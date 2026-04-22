@@ -1,0 +1,21 @@
+//! Search modules aligned with the classic reference.
+
+pub mod alphabeta;
+pub mod movegen;
+pub mod ordering;
+pub mod root;
+pub mod tt;
+
+pub use alphabeta::{
+    compute_corner_state, rootbonus, terminal_score, AlphaBetaSearcher, SearchOptions, SearchStats,
+};
+pub use movegen::{
+    apply_hostile_three_extension, covered_moves, generate_candidates, movegen_backend_name,
+    Candidate, CandidateGenerationResult,
+};
+pub use ordering::{getmi, order_candidates, order_candidates_root_classic, ordering_backend_name};
+pub use root::{
+    fallback_ai_move, new_classic_fallback_rng, ClassicFallbackRng, NullVctSearcher, RootSearcher,
+    SearchLimits, SearchResult, VctSearchResult,
+};
+pub use tt::{ProbeResult, TTEntry, TranspositionTable};

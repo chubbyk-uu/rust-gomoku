@@ -1,0 +1,5 @@
+/target/
+/.codex/
+/reference/
+__pycache__/
+*.pyc
