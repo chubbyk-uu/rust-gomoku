@@ -1,0 +1,20 @@
+{
+  "name": "root_white_first_3_d4_w12",
+  "moves": [
+    [7, 7],
+    [8, 8],
+    [7, 8]
+  ],
+  "first_side": -1,
+  "limits": {
+    "max_depth": 4,
+    "root_width": 12
+  },
+  "runtime": {
+    "compute_vcf": true,
+    "compute_vct": true,
+    "root_vct_depth": 4,
+    "static_board": true
+  },
+  "checks": ["root"]
+}

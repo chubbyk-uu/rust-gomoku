@@ -1,0 +1,23 @@
+{
+  "name": "root_vcf_hit_black_open_three_d4_w10",
+  "moves": [
+    [7, 7],
+    [0, 0],
+    [8, 7],
+    [0, 1],
+    [9, 7],
+    [0, 2]
+  ],
+  "first_side": 1,
+  "limits": {
+    "max_depth": 4,
+    "root_width": 10
+  },
+  "runtime": {
+    "compute_vcf": true,
+    "compute_vct": true,
+    "root_vct_depth": 4,
+    "static_board": true
+  },
+  "checks": ["root"]
+}

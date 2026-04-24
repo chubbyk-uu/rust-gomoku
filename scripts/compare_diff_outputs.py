@@ -17,6 +17,7 @@ DEFAULT_FIELDS = [
     "root.move",
     "root.score",
     "root.depth",
+    "root.nodes",
     "root.trace.used_vcf",
     "root.trace.vcf_found",
     "root.trace.used_vct",
