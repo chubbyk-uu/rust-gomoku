@@ -141,6 +141,8 @@ rust_gomoku/
 │   ├── types.rs
 │   └── zobrist.rs
 ├── tests/
+├── cases/
+│   └── diff/
 ├── data/
 │   ├── reference_text/
 │   └── static/
@@ -242,6 +244,16 @@ Gomocup / zhou 对战验证：
 - 结果：Rust 18 胜，reference 18 胜，18/18 完整走法序列一致
 - 输出样例位置：`/tmp/rust_gomoku_fixed_vs_zhou_9_black.json`、`/tmp/rust_gomoku_fixed_vs_zhou_9_white.json`
 
+Reference / Rust 差分脚手架：
+
+```bash
+cargo run --quiet --bin diff_probe -- --case cases/diff/root_center_11.json > /tmp/rust_diff.json
+python3 scripts/diff_reference.py --case cases/diff/root_center_11.json > /tmp/ref_diff.json
+python3 scripts/compare_diff_outputs.py --rust /tmp/rust_diff.json --reference /tmp/ref_diff.json
+```
+
+当前最小差分 case 覆盖 root 搜索输出，比较字段包括 board 状态、root move/score/depth 和 tactical trace；`nodes`、`vct_ms` 等实现或耗时相关字段默认不作为强断言。
+
 ## 当前限制
 
 需要明确：
@@ -249,14 +261,14 @@ Gomocup / zhou 对战验证：
 - 当前已有基础 Gomocup 入口，并通过一轮 zhou 9 开局黑白双边对战对齐验证
 - 当前重点仍然是“语义迁移”，不是性能冲刺
 - 某些实现虽然已经有增量路径，但整体仍未进入最终优化阶段
-- 目前主要靠 Rust 侧固定局面和手工提取的 reference 语义回归，还没有完整自动差分测试
+- 已有最小 reference / Rust 差分脚手架，但覆盖范围还只到 root 搜索单 case
 - `RootTrace.vct_ms` 是耗时调试字段，不应纳入确定性回归断言
 - root tactical fast path 当前仍应保持 VCF 优先于 VCT，VCT 只在 trigger 命中后运行
 - 多线程只完成架构预留，没有实现执行路径
 
 ## 下一步
 
-下一步不建议继续大面积扩搜索算法，应先把这轮对战验证沉淀成可重复脚本或更系统的差分测试。
+下一步不建议继续大面积扩搜索算法，应先扩展差分测试覆盖面。
 
 ### 1. 提交前收口
 
@@ -288,11 +300,11 @@ Gomocup / zhou 对战验证：
 
 ### 5. Reference / Rust 差分测试脚手架
 
-1. 设计固定局面格式，统一表达 move list、side_to_move、limits、runtime config。
-2. Python 侧调用 `reference/pygomoku` 输出 JSON。
-3. Rust 侧输出同结构 JSON。
-4. 先覆盖 board、eval、movegen、root search，再扩到 VCF/VCT。
-5. 对发现的差异明确记录：Rust 对齐 Python fallback、Cython 路径，还是 reference 当前测试主线。
+1. 继续增加固定局面 case，优先从 18 线 zhou 对战关键 ply 抽样。
+2. 扩展 probe 输出，从 root search 逐步覆盖 movegen、VCF、VCT。
+3. 再补 eval 细粒度字段，避免一开始把输出结构做得过大。
+4. 对发现的差异明确记录：Rust 对齐 Python fallback、Cython 路径，还是 reference 当前测试主线。
+5. 保持 `nodes`、耗时字段默认不作为强断言，除非明确需要锁定。
 
 ### 6. 并行架构第一版
 
