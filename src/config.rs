@@ -31,6 +31,8 @@ pub struct RuntimeOptions {
     pub dynamic_board_margin: i32,
     pub compute_vct: bool,
     pub root_vct_depth: i32,
+    pub lazy_smp: bool,
+    pub lazy_smp_workers: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,6 +108,8 @@ fn default_runtime_options(para: &[f64]) -> RuntimeOptions {
         dynamic_board_margin: 4,
         compute_vct: true,
         root_vct_depth: 8,
+        lazy_smp: false,
+        lazy_smp_workers: 0,
     }
 }
 

@@ -499,3 +499,74 @@ fn root_search_with_none_time_limit_matches_limit_free_search() {
     assert_eq!(explicit_none.score, without_time_limit.score);
     assert_eq!(explicit_none.depth, without_time_limit.depth);
 }
+
+#[test]
+fn root_searcher_and_alphabeta_share_tt_storage() {
+    let searcher = RootSearcher::new(load_default_config());
+    assert!(searcher.tt.is_shared_with(&searcher.alphabeta.tt));
+
+    let mut board = Board::new();
+    board.play(xy_to_move(7, 7).unwrap(), None).unwrap();
+    searcher.tt.store(TTEntry {
+        key: board.zobrist_key(),
+        value: 456,
+        flag: HASHF_ALPHA,
+        depth: 3,
+        priority: 13,
+        best_move: Some(xy_to_move(7, 4).unwrap()),
+    });
+
+    let probe = searcher
+        .alphabeta
+        .tt
+        .probe(board.zobrist_key(), 3, 500, INF);
+    assert!(probe.hit);
+    assert_eq!(probe.value, Some(456));
+}
+
+#[test]
+fn lazy_smp_search_returns_legal_move() {
+    let mut board = Board::new();
+    board.play(xy_to_move(7, 7).unwrap(), None).unwrap();
+    board.play(xy_to_move(8, 7).unwrap(), None).unwrap();
+
+    let mut config = load_default_config();
+    config.runtime.lazy_smp = true;
+    config.runtime.lazy_smp_workers = 2;
+    let mut searcher = RootSearcher::new(config);
+    let result = searcher.search(
+        &mut board,
+        Some(SearchLimits {
+            max_depth: 2,
+            root_width: 8,
+            ..SearchLimits::default()
+        }),
+    );
+    assert!(board.is_legal_move(result.move_));
+    assert_eq!(result.depth, 2);
+}
+
+#[test]
+fn lazy_smp_does_not_start_under_node_limit() {
+    let mut board = Board::new();
+    board.play(xy_to_move(7, 7).unwrap(), None).unwrap();
+    board.play(xy_to_move(8, 7).unwrap(), None).unwrap();
+
+    let limits = Some(SearchLimits {
+        max_depth: 3,
+        root_width: 8,
+        node_limit: Some(50),
+        ..SearchLimits::default()
+    });
+
+    let mut serial = RootSearcher::new(load_default_config());
+    let serial_result = serial.search(&mut board.clone(), limits);
+
+    let mut config = load_default_config();
+    config.runtime.lazy_smp = true;
+    config.runtime.lazy_smp_workers = 2;
+    let mut lazy_smp = RootSearcher::new(config);
+    let lazy_result = lazy_smp.search(&mut board, limits);
+
+    assert_eq!(lazy_result, serial_result);
+}

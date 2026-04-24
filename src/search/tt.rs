@@ -1,6 +1,6 @@
 //! Transposition table aligned with the classic reference.
 
-use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use crate::constants::{HASHF_ALPHA, HASHF_BETA, HASHF_EMPTY, HASHF_EXACT};
 use crate::types::Move;
@@ -51,33 +51,71 @@ impl Default for ProbeResult {
     }
 }
 
+#[derive(Debug)]
+struct TTStorage {
+    shards: Vec<RwLock<Vec<[TTEntry; 2]>>>,
+}
+
+impl TTStorage {
+    fn new(bucket_count: usize) -> Self {
+        let shard_count = TT_SHARD_COUNT.min(bucket_count.max(1));
+        let base_len = bucket_count / shard_count;
+        let remainder = bucket_count % shard_count;
+        let shards = (0..shard_count)
+            .map(|shard_index| {
+                let len = base_len + usize::from(shard_index < remainder);
+                RwLock::new(vec![[TTEntry::default(), TTEntry::default()]; len])
+            })
+            .collect();
+        Self { shards }
+    }
+
+    fn bucket_count(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| shard.read().expect("TT shard lock is not poisoned").len())
+            .sum()
+    }
+}
+
+const TT_SHARD_COUNT: usize = 256;
+
 #[derive(Clone, Debug)]
 pub struct TranspositionTable {
     pub bucket_mask: u64,
-    pub buckets: HashMap<u64, [TTEntry; 2]>,
+    storage: Arc<TTStorage>,
 }
 
 impl TranspositionTable {
     pub fn new(bucket_bits: u32) -> Self {
+        let bucket_count = 1_usize << bucket_bits;
         Self {
             bucket_mask: (1_u64 << bucket_bits) - 1,
-            buckets: HashMap::new(),
+            storage: Arc::new(TTStorage::new(bucket_count)),
         }
     }
 
     pub fn bucket(&self, key: u64) -> [TTEntry; 2] {
-        self.buckets
-            .get(&(key & self.bucket_mask))
-            .copied()
-            .unwrap_or([TTEntry::default(), TTEntry::default()])
+        let (shard_index, local_index) = self.shard_index(key);
+        self.storage.shards[shard_index]
+            .read()
+            .expect("TT shard lock is not poisoned")[local_index]
     }
 
-    pub fn store(&mut self, entry: TTEntry) {
-        let slot_key = entry.key & self.bucket_mask;
-        let bucket = self
-            .buckets
-            .entry(slot_key)
-            .or_insert([TTEntry::default(), TTEntry::default()]);
+    pub fn bucket_count(&self) -> usize {
+        self.storage.bucket_count()
+    }
+
+    pub fn is_shared_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.storage, &other.storage)
+    }
+
+    pub fn store(&self, entry: TTEntry) {
+        let (shard_index, local_index) = self.shard_index(entry.key);
+        let mut shard = self.storage.shards[shard_index]
+            .write()
+            .expect("TT shard lock is not poisoned");
+        let bucket = &mut shard[local_index];
         let mut slot = 0_usize;
         if bucket[0].flag != HASHF_EMPTY && bucket[0].priority > entry.priority {
             slot = 1;
@@ -145,6 +183,18 @@ impl TranspositionTable {
             hit: false,
             ..ProbeResult::default()
         }
+    }
+
+    fn bucket_index(&self, key: u64) -> usize {
+        (key & self.bucket_mask) as usize
+    }
+
+    fn shard_index(&self, key: u64) -> (usize, usize) {
+        let bucket_index = self.bucket_index(key);
+        let shard_count = self.storage.shards.len();
+        let shard_index = bucket_index % shard_count;
+        let local_index = bucket_index / shard_count;
+        (shard_index, local_index)
     }
 }
 

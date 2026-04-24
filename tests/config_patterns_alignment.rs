@@ -57,6 +57,8 @@ fn runtime_defaults_match_reference() {
         config.runtime.root_vct_depth, 8,
         "Rust intentionally uses a deeper default than Python reference"
     );
+    assert!(!config.runtime.lazy_smp);
+    assert_eq!(config.runtime.lazy_smp_workers, 0);
 }
 
 #[test]

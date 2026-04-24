@@ -204,6 +204,29 @@ fn protocol_info_root_vct_depth_negative_clamps_to_zero() {
 }
 
 #[test]
+fn protocol_info_lazy_smp_updates_runtime() {
+    let mut proto = proto();
+    proto.handle_line("INFO lazy_smp 1");
+    assert!(proto.config.runtime.lazy_smp);
+    proto.handle_line("INFO lazy_smp 0");
+    assert!(!proto.config.runtime.lazy_smp);
+}
+
+#[test]
+fn protocol_info_lazy_smp_workers_updates_runtime() {
+    let mut proto = proto();
+    proto.handle_line("INFO lazy_smp_workers 10");
+    assert_eq!(proto.config.runtime.lazy_smp_workers, 10);
+}
+
+#[test]
+fn protocol_info_lazy_smp_workers_negative_clamps_to_zero() {
+    let mut proto = proto();
+    proto.handle_line("INFO lazy_smp_workers -3");
+    assert_eq!(proto.config.runtime.lazy_smp_workers, 0);
+}
+
+#[test]
 fn protocol_info_max_node_zero_means_unlimited() {
     let mut proto = proto();
     proto.handle_line("INFO max_node 0");
@@ -234,6 +257,8 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
     proto.handle_line("INFO compute_vcf qux");
     proto.handle_line("INFO compute_vct nope");
     proto.handle_line("INFO root_vct_depth nope");
+    proto.handle_line("INFO lazy_smp nope");
+    proto.handle_line("INFO lazy_smp_workers nope");
     proto.handle_line("INFO static zed");
     assert_eq!(proto.timeout_turn_ms, Some(500.0));
     assert_eq!(proto.time_left_ms, None);
@@ -241,6 +266,8 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
     assert!(proto.config.runtime.compute_vcf);
     assert!(proto.config.runtime.compute_vct);
     assert_eq!(proto.config.runtime.root_vct_depth, 8);
+    assert!(!proto.config.runtime.lazy_smp);
+    assert_eq!(proto.config.runtime.lazy_smp_workers, 0);
     assert!(proto.config.runtime.static_board);
 }
 

@@ -276,6 +276,18 @@ impl GomocupProtocol {
                     self.searcher = None;
                 }
             }
+            "lazy_smp" => {
+                if let Some(parsed) = parse_one::<i32>(value) {
+                    self.config.runtime.lazy_smp = parsed != 0;
+                    self.searcher = None;
+                }
+            }
+            "lazy_smp_workers" => {
+                if let Some(parsed) = parse_one::<i64>(value) {
+                    self.config.runtime.lazy_smp_workers = parsed.max(0) as usize;
+                    self.searcher = None;
+                }
+            }
             "static" => {
                 if let Some(parsed) = parse_one::<i32>(value) {
                     self.config.runtime.static_board = parsed % 2 != 0;

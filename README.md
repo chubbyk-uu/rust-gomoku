@@ -47,6 +47,8 @@
 - reference / Rust 双端差分测试脚手架
 - 12 个 root 搜索差分 case
 - reference 静态数据提取脚本
+- 可选 Lazy SMP 并行搜索入口
+- 共享固定桶 TT，为 Lazy SMP 辅助线程填表预留并发结构
 - 一批与 reference 对齐的 Rust 自动测试
 
 ### 当前已对齐的能力
@@ -66,6 +68,7 @@
 - movegen 的候选点覆盖、forcing class 折叠、hostile-three 扩展
 - ordering 的 tuple 排序和 root classic selection-sort 语义
 - TT 的 probe / store / replacement / alpha-beta window 行为
+- TT 已从惰性 `HashMap` 改为固定桶共享表；默认串行行为继续由差分测试约束
 - alphabeta 的终局分数、深度、node limit、deadline、fallback 行为
 - root 搜索的空盘中心、动态棋盘窗口、classic fallback RNG、固定开局回归
 - root tactical fast path 在 VCF/VCT 返回前不初始化 eval caches，保持与 reference 结构更接近
@@ -78,18 +81,20 @@
 - Gomocup `BOARD` 模式对齐 reference 的颜色重建语义：`sfn == opn - 1` 时只调整输入列表顺序，正式重放仍从黑棋开始
 - Rust Gomocup engine 在 `d6/w20`、zhou `d5`、9 开局黑白双边共 18 线中，与 reference Gomocup engine 的完整走法序列一致
 - `diff_probe` 使用 `serde/serde_json` 读取固定局面 JSON，输出 Rust 侧 board/root/trace 结果
+- `diff_probe` 可通过 `--lazy-smp --lazy-smp-workers N` 单独观察 Rust 并行路径
 - `scripts/diff_reference.py` 调用 `reference/pygomoku` 输出同结构 JSON
 - `scripts/run_diff.py` 可批量运行 `cases/diff/*.json`，当前 12 个 root case 全部通过
 - 单线程兼容模式下，差分默认比较 `root.nodes`，用于尽早发现搜索路径漂移
+- Lazy SMP 默认关闭；开启后允许 TT 命中和节点数变化，不作为 reference 等价路径
 
 ### 还没有完成
 
 - GUI 或其它外部集成
 - movegen / eval / VCF / VCT 的细粒度双端差分覆盖
 - Python fallback 与 Cython 加速路径的系统性交叉验证
-- 并行搜索执行路径
+- Lazy SMP 的更大规模对战评估和参数调优
 
-也就是说，**当前已经有单线程 classic 搜索主链、战术层、Gomocup stdin/stdout 入口、一轮 zhou 对战对齐验证，以及 root 搜索层面的最小双端差分脚手架；但还没有覆盖 eval / movegen / VCF / VCT 的完整差分体系，也还没有并行执行路径。**
+也就是说，**当前已经有单线程 classic 搜索主链、战术层、Gomocup stdin/stdout 入口、一轮 zhou 对战对齐验证、root 搜索层面的最小双端差分脚手架，以及第一版可选 Lazy SMP 并行路径；但还没有覆盖 eval / movegen / VCF / VCT 的完整差分体系，也还没有对 Lazy SMP 做充分对战验收。**
 
 ## 当前实现原则
 
@@ -105,10 +110,12 @@
 
 - `Board` 和 `EvalCaches` 保持可快照、可恢复
 - `AlphaBetaSearcher`、`VCFSearcher`、`VCTSearcher` 当前持有各自搜索状态，适合作为线程本地 worker 状态
-- root 搜索已经有清晰的 tactical fast path 和 alphabeta path，后续可以在 root candidates 层拆分任务
-- 后续搜索更适合走“线程本地局面与缓存 + 稳定归并 + 可选共享 TT”的路线
-- 默认必须保留稳定的单线程兼容模式
-- 第一版并行不应默认共享 TT；应先做确定性的 root-split，再评估共享 TT、取消机制和时间控制
+- root tactical fast path 仍只在主线程执行；辅助线程不跑 VCF/VCT/root trace
+- Lazy SMP 只在进入 alphabeta 主链后启动，辅助线程使用线程本地 `Board / EvalCaches / AlphaBetaSearcher`
+- Lazy SMP 辅助线程共享 TT，只负责填表；最终返回值仍取主线程 root search 结果
+- 默认必须保留稳定的单线程兼容模式，且 `node_limit / time_limit` 下当前不启用 Lazy SMP
+- 已放弃 root-split full-window 方案：它会丢掉串行 PV 搜索的 alpha/null-window 剪枝，实测容易增大搜索量并降低棋力
+- Lazy SMP 是可选性能/棋力路径，不作为 reference 等价路径；开启后不强制 `nodes` 或 best move 与串行严格一致
 
 ## 目录说明
 
@@ -241,15 +248,37 @@ cargo test
 ```bash
 python3 scripts/extract_static_data.py --check
 cargo test
+python3 scripts/run_diff.py --profile all --jobs 10
 ```
 
-当前全量测试通过规模：170 个 Rust 测试通过。
+当前全量测试通过规模：177 个 Rust 测试通过。
 
 Gomocup CLI smoke：
 
 ```bash
 printf 'START 15\nBEGIN\nEND\n' | cargo run --quiet --bin gomocup_engine -- --depth 2 --width 8
 ```
+
+Lazy SMP CLI smoke：
+
+```bash
+printf 'START 15\nBEGIN\nEND\n' | cargo run --quiet --bin gomocup_engine -- --depth 2 --width 8 --lazy-smp --lazy-smp-workers 2
+```
+
+Lazy SMP 单局探针：
+
+```bash
+cargo run --quiet --bin diff_probe -- --case cases/diff/root_deep_opening_10_4_d8_w15.json --lazy-smp --lazy-smp-workers 4
+```
+
+当前初步 release 计时只用于判断方向，不作为正式 benchmark：
+
+- case：`root_deep_opening_10_4_d8_w15.json`
+- 串行：约 `2.01s`，`122196` 主线程节点
+- Lazy SMP 2 workers：约 `1.86s`，`102740` 主线程节点
+- Lazy SMP 4 workers：约 `1.72s`，`86305` 主线程节点
+- Lazy SMP 10 workers：约 `1.96s`，`76982` 主线程节点
+- 结论：当前 4 workers 在该局面最好，10 workers 已出现额外调度/TT 竞争成本；后续需要用更多局面和对战评估调参
 
 Gomocup / zhou 对战验证：
 

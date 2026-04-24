@@ -2,15 +2,18 @@
 
 use std::io::{self, BufRead, Write};
 
-use rust_gomoku::{GomocupProtocol, SearchLimits};
+use rust_gomoku::{load_default_config, GomocupProtocol, SearchLimits};
 
 const DEFAULT_DEPTH: i32 = 6;
 const DEFAULT_WIDTH: usize = 20;
 
 fn main() {
-    let (depth, width) = parse_args();
+    let (depth, width, lazy_smp, lazy_smp_workers) = parse_args();
+    let mut config = load_default_config();
+    config.runtime.lazy_smp = lazy_smp;
+    config.runtime.lazy_smp_workers = lazy_smp_workers;
     let mut protocol = GomocupProtocol::new(
-        None,
+        Some(config),
         Some(SearchLimits {
             max_depth: depth,
             root_width: width,
@@ -34,9 +37,11 @@ fn main() {
     }
 }
 
-fn parse_args() -> (i32, usize) {
+fn parse_args() -> (i32, usize, bool, usize) {
     let mut depth = DEFAULT_DEPTH;
     let mut width = DEFAULT_WIDTH;
+    let mut lazy_smp = false;
+    let mut lazy_smp_workers = 0_usize;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -50,8 +55,16 @@ fn parse_args() -> (i32, usize) {
                     width = value;
                 }
             }
+            "--lazy-smp" => {
+                lazy_smp = true;
+            }
+            "--lazy-smp-workers" => {
+                if let Some(value) = args.next().and_then(|value| value.parse::<usize>().ok()) {
+                    lazy_smp_workers = value;
+                }
+            }
             _ => {}
         }
     }
-    (depth, width)
+    (depth, width, lazy_smp, lazy_smp_workers)
 }

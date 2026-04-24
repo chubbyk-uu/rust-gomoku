@@ -78,28 +78,58 @@ struct TraceSummary {
 }
 
 fn main() {
-    let path = parse_case_path();
-    let text = fs::read_to_string(&path).expect("case file is readable");
+    let args = parse_args();
+    let text = fs::read_to_string(&args.case_path).expect("case file is readable");
     let case: DiffCase = serde_json::from_str(&text).expect("case file is valid JSON");
-    let output = run_case(case);
+    let output = run_case(case, args.lazy_smp, args.lazy_smp_workers);
     println!(
         "{}",
         serde_json::to_string_pretty(&output).expect("probe output serialises")
     );
 }
 
-fn parse_case_path() -> PathBuf {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--case" {
-            return args.next().expect("--case requires a path").into();
-        }
-    }
-    eprintln!("usage: diff_probe --case <case.json>");
-    std::process::exit(2);
+#[derive(Debug)]
+struct ProbeArgs {
+    case_path: PathBuf,
+    lazy_smp: bool,
+    lazy_smp_workers: usize,
 }
 
-fn run_case(case: DiffCase) -> ProbeOutput {
+fn parse_args() -> ProbeArgs {
+    let mut args = std::env::args().skip(1);
+    let mut case_path = None;
+    let mut lazy_smp = false;
+    let mut lazy_smp_workers = 0_usize;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--case" => {
+                case_path = Some(args.next().expect("--case requires a path").into());
+            }
+            "--lazy-smp" => {
+                lazy_smp = true;
+            }
+            "--lazy-smp-workers" => {
+                lazy_smp_workers = args
+                    .next()
+                    .expect("--lazy-smp-workers requires a value")
+                    .parse()
+                    .expect("--lazy-smp-workers must be a non-negative integer");
+            }
+            _ => {}
+        }
+    }
+    let Some(case_path) = case_path else {
+        eprintln!("usage: diff_probe --case <case.json> [--lazy-smp] [--lazy-smp-workers <n>]");
+        std::process::exit(2);
+    };
+    ProbeArgs {
+        case_path,
+        lazy_smp,
+        lazy_smp_workers,
+    }
+}
+
+fn run_case(case: DiffCase, lazy_smp: bool, lazy_smp_workers: usize) -> ProbeOutput {
     let mut board = Board::with_side_to_move(case.first_side).expect("first_side is valid");
     for [x, y] in &case.moves {
         let move_ = xy_to_move(*x as usize, *y as usize).expect("case move is in range");
@@ -119,6 +149,8 @@ fn run_case(case: DiffCase) -> ProbeOutput {
     if let Some(v) = case.runtime.static_board {
         config.runtime.static_board = v;
     }
+    config.runtime.lazy_smp = lazy_smp;
+    config.runtime.lazy_smp_workers = lazy_smp_workers;
 
     let limits = SearchLimits {
         max_depth: case.limits.max_depth.unwrap_or(config.root_search.depth),
