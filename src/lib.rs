@@ -35,9 +35,9 @@ pub use search::{
     apply_hostile_three_extension, compute_corner_state, covered_moves, fallback_ai_move,
     generate_candidates, getmi, movegen_backend_name, new_classic_fallback_rng, order_candidates,
     order_candidates_root_classic, ordering_backend_name, rootbonus, terminal_score,
-    AlphaBetaSearcher, Candidate, CandidateGenerationResult, ClassicFallbackRng, NullVctSearcher,
-    ProbeResult, RootSearcher, SearchLimits, SearchOptions, SearchResult, SearchStats, TTEntry,
-    TranspositionTable, VctSearchResult,
+    AlphaBetaSearcher, Candidate, CandidateGenerationResult, ClassicFallbackRng, ProbeResult,
+    RootSearcher, RootTrace, SearchLimits, SearchOptions, SearchResult, SearchStats, TTEntry,
+    TranspositionTable,
 };
 pub use threats::{
     broken_four_reply, forcing_threat_moves, has_open_four, has_vct_trigger, threat_moves,

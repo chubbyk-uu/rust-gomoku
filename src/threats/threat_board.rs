@@ -241,6 +241,11 @@ impl ThreatBoardView {
         l1.b4(p1) + l2.b4(p2) + l3.b4(p3) + l4.b4(p4)
     }
 
+    // NOTE: this can call a5test -> play/undo while already inside another
+    // ThreatBoardView::play frame (for example has_vct_trigger). The
+    // previous_sides stack is intentionally frame-local: each undo must restore
+    // the side_to_move observed immediately before its matching play, not the
+    // original board side. Keep the nested restore invariant covered by tests.
     pub fn a3r_count(&mut self, x: usize, y: usize) -> i32 {
         let point = self.board.grid_rows()[y][x];
         if point == EMPTY {

@@ -8,7 +8,7 @@ use crate::config::EngineConfig;
 use crate::constants::{INF, WIN};
 use crate::eval::{recompute_all, EvalCaches};
 use crate::search::{AlphaBetaSearcher, SearchOptions, SearchStats, TranspositionTable};
-use crate::threats::VCFSearcher;
+use crate::threats::{forcing_threat_moves, has_vct_trigger, VCFSearcher, VCTSearcher};
 use crate::types::{Move, Side};
 
 const CLASSIC_RAND_SEED: i32 = 1_232_356;
@@ -37,18 +37,32 @@ pub struct SearchResult {
     pub nodes: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct VctSearchResult {
-    pub move_: Option<Move>,
-    pub found: bool,
+#[derive(Clone, Debug, PartialEq)]
+pub struct RootTrace {
+    pub used_vcf: bool,
+    pub vcf_found: bool,
+    pub used_vct: bool,
+    pub vct_triggered: bool,
+    pub vct_found: bool,
+    pub vct_move: Option<Move>,
+    pub vct_accepted: bool,
+    pub vct_reject_reason: Option<&'static str>,
+    pub tactical_path: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NullVctSearcher;
-
-impl NullVctSearcher {
-    pub fn search(&mut self, _board: &Board, _side: Side, _depth: i32) -> VctSearchResult {
-        VctSearchResult::default()
+impl Default for RootTrace {
+    fn default() -> Self {
+        Self {
+            used_vcf: false,
+            vcf_found: false,
+            used_vct: false,
+            vct_triggered: false,
+            vct_found: false,
+            vct_move: None,
+            vct_accepted: false,
+            vct_reject_reason: None,
+            tactical_path: "alphabeta",
+        }
     }
 }
 
@@ -210,8 +224,9 @@ pub struct RootSearcher {
     pub tt: TranspositionTable,
     pub alphabeta: AlphaBetaSearcher,
     pub vcf: VCFSearcher,
-    pub vct: NullVctSearcher,
+    pub vct: VCTSearcher,
     pub fallback_rng: ClassicFallbackRng,
+    pub last_trace: Option<RootTrace>,
 }
 
 impl RootSearcher {
@@ -223,8 +238,9 @@ impl RootSearcher {
             tt,
             alphabeta,
             vcf: VCFSearcher::default(),
-            vct: NullVctSearcher,
+            vct: VCTSearcher::default(),
             fallback_rng: new_classic_fallback_rng(),
+            last_trace: None,
         }
     }
 
@@ -235,9 +251,35 @@ impl RootSearcher {
             tt,
             alphabeta,
             vcf: VCFSearcher::default(),
-            vct: NullVctSearcher,
+            vct: VCTSearcher::default(),
             fallback_rng: new_classic_fallback_rng(),
+            last_trace: None,
         }
+    }
+
+    pub fn verify_root_vct_move(
+        &mut self,
+        board: &Board,
+        side: Side,
+        move_: Move,
+    ) -> (bool, Option<&'static str>) {
+        if !board.is_legal_move(move_) {
+            return (false, Some("illegal"));
+        }
+        let mut trial = board.clone();
+        trial
+            .play(move_, Some(side))
+            .expect("verified root VCT move should be legal");
+        if trial.winner() == side {
+            return (true, None);
+        }
+        if !forcing_threat_moves(&trial, -side).is_empty() {
+            return (false, Some("opponent_forcing"));
+        }
+        if self.config.runtime.compute_vcf && self.vcf.search(&trial, -side, 4).found {
+            return (false, Some("opponent_vcf"));
+        }
+        (true, None)
     }
 
     pub fn root_allowed_moves(&self, board: &Board) -> Option<HashSet<Move>> {
@@ -362,12 +404,19 @@ impl RootSearcher {
         }
 
         let side = board.side_to_move();
+        let mut trace = RootTrace::default();
+        self.last_trace = Some(trace.clone());
+
         let mut caches = EvalCaches::new();
         recompute_all(board, &mut caches);
 
         if self.config.runtime.compute_vcf {
+            trace.used_vcf = true;
             let vcf_result = self.vcf.search(board, side, 8);
             if vcf_result.found {
+                trace.vcf_found = true;
+                trace.tactical_path = "vcf";
+                self.last_trace = Some(trace);
                 return SearchResult {
                     move_: vcf_result
                         .move_
@@ -378,6 +427,34 @@ impl RootSearcher {
                 };
             }
         }
+
+        if self.config.runtime.compute_vct && self.config.runtime.root_vct_depth > 0 {
+            trace.used_vct = true;
+            if has_vct_trigger(board, side) {
+                trace.vct_triggered = true;
+                let vct_result = self
+                    .vct
+                    .search(board, side, self.config.runtime.root_vct_depth);
+                trace.vct_found = vct_result.found;
+                trace.vct_move = vct_result.move_;
+                if let Some(move_) = vct_result.move_.filter(|_| vct_result.found) {
+                    let (accepted, reason) = self.verify_root_vct_move(board, side, move_);
+                    trace.vct_accepted = accepted;
+                    trace.vct_reject_reason = reason;
+                    if accepted {
+                        trace.tactical_path = "vct";
+                        self.last_trace = Some(trace);
+                        return SearchResult {
+                            move_,
+                            score: INF,
+                            depth: 0,
+                            nodes: 0,
+                        };
+                    }
+                }
+            }
+        }
+        self.last_trace = Some(trace);
 
         self.alphabeta.config = self.config.clone();
         self.alphabeta.tt = self.tt.clone();

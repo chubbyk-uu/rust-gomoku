@@ -60,6 +60,7 @@ fn root_search_prefers_vcf_first_when_available() {
     board.play(xy_to_move(4, 7).unwrap(), None).unwrap();
     board.play(xy_to_move(1, 0).unwrap(), None).unwrap();
     board.play(xy_to_move(5, 7).unwrap(), None).unwrap();
+    board.play(xy_to_move(2, 0).unwrap(), None).unwrap();
     let mut searcher = RootSearcher::new(load_default_config());
     let result = searcher.search(
         &mut board,
@@ -70,6 +71,150 @@ fn root_search_prefers_vcf_first_when_available() {
         }),
     );
     assert!(matches!(move_to_xy(result.move_).unwrap(), (2, 7) | (6, 7)));
+    let trace = searcher.last_trace.as_ref().expect("trace is recorded");
+    assert!(trace.vcf_found);
+    assert!(!trace.used_vct);
+    assert_eq!(trace.tactical_path, "vcf");
+}
+
+#[test]
+fn root_vct_not_triggered_when_disabled() {
+    let mut board = Board::new();
+    let sequence = [
+        (6, 7, 1),
+        (0, 0, -1),
+        (8, 7, 1),
+        (1, 3, -1),
+        (7, 6, 1),
+        (3, 1, -1),
+        (7, 8, 1),
+        (14, 14, -1),
+    ];
+    for (x, y, side) in sequence {
+        board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
+    }
+    let mut config = load_default_config();
+    config.runtime.compute_vct = false;
+    let mut searcher = RootSearcher::new(config);
+    searcher.search(
+        &mut board,
+        Some(SearchLimits {
+            max_depth: 3,
+            root_width: 10,
+            ..SearchLimits::default()
+        }),
+    );
+    let trace = searcher.last_trace.as_ref().expect("trace is recorded");
+    assert!(!trace.used_vct);
+    assert!(!trace.vct_triggered);
+}
+
+#[test]
+fn root_vct_not_triggered_on_quiet_position() {
+    let mut board = Board::new();
+    board.play(xy_to_move(7, 7).unwrap(), None).unwrap();
+    board.play(xy_to_move(0, 0).unwrap(), None).unwrap();
+    let mut searcher = RootSearcher::new(load_default_config());
+    searcher.search(
+        &mut board,
+        Some(SearchLimits {
+            max_depth: 3,
+            root_width: 10,
+            ..SearchLimits::default()
+        }),
+    );
+    let trace = searcher.last_trace.as_ref().expect("trace is recorded");
+    assert!(trace.used_vct);
+    assert!(!trace.vct_triggered);
+}
+
+#[test]
+fn root_vct_triggered_and_accepted_on_dual_a3_win() {
+    let mut board = Board::new();
+    let sequence = [
+        (6, 7, 1),
+        (0, 0, -1),
+        (8, 7, 1),
+        (1, 3, -1),
+        (7, 6, 1),
+        (3, 1, -1),
+        (7, 8, 1),
+        (14, 14, -1),
+    ];
+    for (x, y, side) in sequence {
+        board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
+    }
+    let mut searcher = RootSearcher::new(load_default_config());
+    let result = searcher.search(
+        &mut board,
+        Some(SearchLimits {
+            max_depth: 4,
+            root_width: 20,
+            ..SearchLimits::default()
+        }),
+    );
+    let trace = searcher.last_trace.as_ref().expect("trace is recorded");
+    assert!(trace.vct_triggered);
+    assert!(trace.vct_found);
+    assert!(trace.vct_accepted);
+    assert_eq!(trace.tactical_path, "vct");
+    assert_eq!(move_to_xy(result.move_).unwrap(), (7, 7));
+    assert_eq!(result.score, INF);
+}
+
+#[test]
+fn root_vct_triggered_but_finds_no_win() {
+    let mut board = Board::new();
+    let sequence = [
+        (5, 7, 1),
+        (4, 7, -1),
+        (6, 7, 1),
+        (0, 1, -1),
+        (7, 7, 1),
+        (1, 1, -1),
+    ];
+    for (x, y, side) in sequence {
+        board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
+    }
+    let mut searcher = RootSearcher::new(load_default_config());
+    searcher.search(
+        &mut board,
+        Some(SearchLimits {
+            max_depth: 4,
+            root_width: 20,
+            ..SearchLimits::default()
+        }),
+    );
+    let trace = searcher.last_trace.as_ref().expect("trace is recorded");
+    assert!(trace.vct_triggered);
+    assert!(!trace.vct_found);
+    assert!(!trace.vct_accepted);
+    assert_eq!(trace.tactical_path, "alphabeta");
+}
+
+#[test]
+fn root_vct_verification_rejects_opponent_counter() {
+    let mut board = Board::new();
+    let sequence = [
+        (5, 7, 1),
+        (10, 5, -1),
+        (6, 7, 1),
+        (11, 5, -1),
+        (7, 7, 1),
+        (12, 5, -1),
+        (0, 1, 1),
+        (13, 5, -1),
+        (0, 2, 1),
+        (4, 7, -1),
+    ];
+    for (x, y, side) in sequence {
+        board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
+    }
+    let mut searcher = RootSearcher::new(load_default_config());
+    let (accepted, reason) =
+        searcher.verify_root_vct_move(&board, board.side_to_move(), xy_to_move(2, 14).unwrap());
+    assert!(!accepted);
+    assert!(matches!(reason, Some("opponent_forcing" | "opponent_vcf")));
 }
 
 #[test]
