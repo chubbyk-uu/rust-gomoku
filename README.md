@@ -41,6 +41,9 @@
 - `vcf`
 - `vct`
 - `RootSearcher` 的 VCF 优先、VCT 触发、VCT 根着验证和 trace
+- Gomocup 协议入口
+- 命令行 Gomocup engine 入口
+- 与 `opponent/zhou` 的 9 开局黑白双边对战验证
 - reference 静态数据提取脚本
 - 一批与 reference 对齐的 Rust 自动测试
 
@@ -67,18 +70,19 @@
 - threat board 的威胁点、A4/B4/A3 判定、嵌套 `play/undo` 恢复不变量
 - VCF 的 begin depth 映射、序列 key、forcing threat 搜索
 - VCT 的 trigger、OR/AND 搜索、memo 清理、root 接入、验证与 `vct_ms` trace
+- Gomocup `START / RECTSTART / RESTART / BEGIN / TURN / BOARD / DONE / TAKEBACK / INFO / ABOUT / END`
+- 命令行入口默认 `--depth 6 --width 20`，对齐 reference GUI / Gomocup engine 正式运行参数
+- Gomocup `BOARD` 模式对齐 reference 的颜色重建语义：`sfn == opn - 1` 时只调整输入列表顺序，正式重放仍从黑棋开始
+- Rust Gomocup engine 在 `d6/w20`、zhou `d5`、9 开局黑白双边共 18 线中，与 reference Gomocup engine 的完整走法序列一致
 
 ### 还没有完成
 
-- Gomocup 协议入口
-- 命令行引擎入口
 - GUI 或其它外部集成
-- 与 `opponent/zhou` 的对战验证链路
 - reference / Rust 双端差分测试脚手架
 - Python fallback 与 Cython 加速路径的系统性交叉验证
 - 并行搜索执行路径
 
-也就是说，**当前已经有单线程 classic 搜索主链和战术层雏形，但还不能作为完整外部引擎使用。**
+也就是说，**当前已经有单线程 classic 搜索主链、战术层、Gomocup stdin/stdout 入口和一轮 zhou 对战对齐验证；但还没有完整差分测试脚手架和并行执行路径。**
 
 ## 当前实现原则
 
@@ -129,6 +133,11 @@ rust_gomoku/
 │   │   ├── types.rs
 │   │   ├── vcf.rs
 │   │   └── vct.rs
+│   ├── protocol/
+│   │   ├── gomocup.rs
+│   │   └── mod.rs
+│   ├── bin/
+│   │   └── gomocup_engine.rs
 │   ├── types.rs
 │   └── zobrist.rs
 ├── tests/
@@ -206,6 +215,7 @@ cargo test
 - `threats/threat_board`
 - `vcf`
 - `vct`
+- `protocol/gomocup`
 
 这些测试既包含基础行为，也包含 handpicked 精确值回归和固定局面搜索回归。
 
@@ -216,13 +226,27 @@ python3 scripts/extract_static_data.py --check
 cargo test
 ```
 
-当前全量测试通过规模：140 个 Rust 测试通过。
+当前全量测试通过规模：170 个 Rust 测试通过。
+
+Gomocup CLI smoke：
+
+```bash
+printf 'START 15\nBEGIN\nEND\n' | cargo run --quiet --bin gomocup_engine -- --depth 2 --width 8
+```
+
+Gomocup / zhou 对战验证：
+
+- 参数：Rust/reference `depth=6, width=20`，zhou `depth=5`
+- 开局：reference 的 9 个固定开局
+- 颜色：黑白双边，共 18 线
+- 结果：Rust 18 胜，reference 18 胜，18/18 完整走法序列一致
+- 输出样例位置：`/tmp/rust_gomoku_fixed_vs_zhou_9_black.json`、`/tmp/rust_gomoku_fixed_vs_zhou_9_white.json`
 
 ## 当前限制
 
 需要明确：
 
-- 当前还没有协议入口和对外运行入口，因此仓库还不能当作完整引擎使用
+- 当前已有基础 Gomocup 入口，并通过一轮 zhou 9 开局黑白双边对战对齐验证
 - 当前重点仍然是“语义迁移”，不是性能冲刺
 - 某些实现虽然已经有增量路径，但整体仍未进入最终优化阶段
 - 目前主要靠 Rust 侧固定局面和手工提取的 reference 语义回归，还没有完整自动差分测试
@@ -232,7 +256,7 @@ cargo test
 
 ## 下一步
 
-下一步不建议继续大面积扩搜索算法，应先收口可运行入口和差分验证。
+下一步不建议继续大面积扩搜索算法，应先把这轮对战验证沉淀成可重复脚本或更系统的差分测试。
 
 ### 1. 提交前收口
 
@@ -240,7 +264,7 @@ cargo test
 2. 检查 `git status`，确认 `reference/` 和 `.codex/` 不进入提交。
 3. 运行 `python3 scripts/extract_static_data.py --check`。
 4. 运行 `cargo test`。
-5. 提交 Root VCT 接线、trace、嵌套 `play/undo` 测试和 README 更新。
+5. 提交协议入口、CLI、测试和 README 更新。
 
 ### 2. Root 搜索后续补强
 
@@ -248,19 +272,19 @@ cargo test
 2. 检查 `RootTrace` 是否还需要补充协议或日志层会用到的字段，但不要把耗时字段纳入确定性回归断言。
 3. 继续核对 root search 与 `reference/pygomoku/pygomoku/search/root.py` 的结构差异，只保留有明确理由的差异。
 
-### 3. Gomocup 协议入口
+### 3. Gomocup / zhou 对战验证沉淀
 
-1. 新增 `src/protocol/` 模块。
-2. 对齐 `START`、`RESTART`、`BEGIN`、`TURN`、`BOARD`、`DONE`、`TAKEBACK`、`INFO`、`ABOUT`。
-3. 重点测试非法输入、越界坐标、`BOARD` 重建、`INFO compute_vct/root_vct_depth` 配置变更。
-4. 新增 `tests/protocol_alignment.rs`。
+1. 把本次手工命令整理成脚本或 README 中的可复制命令。
+2. 后续优先比较 Rust/reference 的完整 move sequence，而不是只看胜负。
+3. 继续保留输出到 `/tmp` 或专门 ignored 目录，避免把对战 JSON 误提交。
+4. 若后续开启并行搜索，必须重复跑这 18 线，确认默认单线程兼容路径不漂移。
 
-### 4. 命令行引擎入口
+### 4. 协议补强
 
-1. 新增 `src/bin/gomocup_engine.rs`。
-2. 接入协议 reader/writer，不在入口层散落棋盘逻辑。
-3. 保留 deterministic single-thread 默认模式。
-4. 增加 smoke test 或协议 transcript 回归。
+1. 与 reference `tests/test_protocol.py` 继续逐条比对，补缺少的边界用例。
+2. 检查 `ABOUT` 文本是否需要完全对齐 reference，还是保留 Rust engine 名称。
+3. 确认 `TAKEBACK` 是否保持 reference 的“忽略参数，只撤一步”语义。
+4. 根据 zhou smoke 结果补 transcript 回归。
 
 ### 5. Reference / Rust 差分测试脚手架
 
@@ -281,4 +305,4 @@ cargo test
 
 ## 一句话总结
 
-当前仓库已经完成了 **基础状态机 + 配置 + pattern + eval + 单线程 classic 搜索 + VCF/VCT 战术路径** 的 Rust 化，并建立了对应回归测试；下一阶段重点是 **协议入口、差分验证和确定性并行架构落地**。
+当前仓库已经完成了 **基础状态机 + 配置 + pattern + eval + 单线程 classic 搜索 + VCF/VCT 战术路径 + Gomocup 协议入口** 的 Rust 化，并建立了对应回归测试和一轮 zhou 对战对齐验证；下一阶段重点是 **差分测试脚手架和确定性并行架构落地**。

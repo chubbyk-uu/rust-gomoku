@@ -8,6 +8,7 @@ pub mod config;
 pub mod constants;
 pub mod eval;
 pub mod patterns;
+pub mod protocol;
 pub mod search;
 pub mod threats;
 pub mod types;
@@ -31,6 +32,7 @@ pub use patterns::{
     PatternError, ShapeLabel, DIAGONAL_DOWN, DIAGONAL_UP, DIRECTION_IDS, DOUBLE_SHAPE, HORIZONTAL,
     VERTICAL,
 };
+pub use protocol::{GomocupProtocol, ABOUT_TEXT};
 pub use search::{
     apply_hostile_three_extension, compute_corner_state, covered_moves, fallback_ai_move,
     generate_candidates, getmi, movegen_backend_name, new_classic_fallback_rng, order_candidates,
