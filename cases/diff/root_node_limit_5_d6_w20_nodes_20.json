@@ -1,0 +1,23 @@
+{
+  "name": "root_node_limit_5_d6_w20_nodes_20",
+  "moves": [
+    [7, 7],
+    [8, 6],
+    [7, 5],
+    [7, 4],
+    [6, 6]
+  ],
+  "first_side": 1,
+  "limits": {
+    "max_depth": 6,
+    "root_width": 20,
+    "node_limit": 20
+  },
+  "runtime": {
+    "compute_vcf": true,
+    "compute_vct": true,
+    "root_vct_depth": 4,
+    "static_board": true
+  },
+  "checks": ["root"]
+}

@@ -1,0 +1,31 @@
+{
+  "name": "root_zhou_black_5_10_4_prefix_14_d6_w20",
+  "moves": [
+    [10, 4],
+    [8, 4],
+    [11, 4],
+    [8, 3],
+    [11, 5],
+    [9, 3],
+    [11, 3],
+    [11, 2],
+    [11, 6],
+    [11, 7],
+    [13, 4],
+    [12, 4],
+    [12, 5],
+    [10, 7]
+  ],
+  "first_side": 1,
+  "limits": {
+    "max_depth": 6,
+    "root_width": 20
+  },
+  "runtime": {
+    "compute_vcf": true,
+    "compute_vct": true,
+    "root_vct_depth": 4,
+    "static_board": true
+  },
+  "checks": ["root"]
+}

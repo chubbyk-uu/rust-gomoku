@@ -45,7 +45,7 @@
 - 命令行 Gomocup engine 入口
 - 与 `opponent/zhou` 的 9 开局黑白双边对战验证
 - reference / Rust 双端差分测试脚手架
-- 5 个 root 搜索差分 case
+- 12 个 root 搜索差分 case
 - reference 静态数据提取脚本
 - 一批与 reference 对齐的 Rust 自动测试
 
@@ -79,7 +79,7 @@
 - Rust Gomocup engine 在 `d6/w20`、zhou `d5`、9 开局黑白双边共 18 线中，与 reference Gomocup engine 的完整走法序列一致
 - `diff_probe` 使用 `serde/serde_json` 读取固定局面 JSON，输出 Rust 侧 board/root/trace 结果
 - `scripts/diff_reference.py` 调用 `reference/pygomoku` 输出同结构 JSON
-- `scripts/run_diff.py` 可批量运行 `cases/diff/*.json`，当前 5 个 root case 全部通过
+- `scripts/run_diff.py` 可批量运行 `cases/diff/*.json`，当前 12 个 root case 全部通过
 - 单线程兼容模式下，差分默认比较 `root.nodes`，用于尽早发现搜索路径漂移
 
 ### 还没有完成
@@ -271,16 +271,32 @@ python3 scripts/compare_diff_outputs.py --rust /tmp/rust_diff.json --reference /
 批量运行全部差分 case：
 
 ```bash
-python3 scripts/run_diff.py
+python3 scripts/run_diff.py --profile all
 ```
 
-当前已有 5 个 root 搜索差分 case：
+日常快速差分默认只跑 fast case，可以并行执行：
+
+```bash
+python3 scripts/run_diff.py --jobs 10
+```
+
+只跑 slow case：
+
+```bash
+python3 scripts/run_diff.py --profile slow --jobs 10
+```
+
+当前已有 12 个 root 搜索差分 case，其中 11 个 fast、1 个 slow：
 
 - `root_center_11.json`：中盘固定局面，`d6/w20`
-- `root_node_limit_5.json`：带 `node_limit` 的 root 搜索路径
+- `root_center_11_d6_w5.json` / `root_center_11_d6_w12.json`：同一局面的 root_width 裁剪边界
+- `root_deep_opening_10_4_d8_w15.json`：depth 8 深层 alphabeta / TT 路径，标记为 slow
+- `root_node_limit_5.json`：带 `node_limit=200` 的 root 搜索路径
+- `root_node_limit_5_d6_w20_nodes_20.json` / `root_node_limit_5_d6_w20_nodes_1000.json`：节点超限后的 best-move 选择边界
 - `root_vcf_hit_6.json`：VCF fast path 命中场景
 - `root_vct_hit_8.json`：VCT trigger / 命中场景
 - `root_white_first_3.json`：白棋先手 side_to_move 场景
+- `root_zhou_black_5_10_4_prefix_14_d6_w20.json` / `root_zhou_white_8_7_7_prefix_16_d6_w20.json`：从 zhou 18 线对战抽样的多步重建局面
 
 默认比较字段包括 board 状态、`zobrist_key`、root move/score/depth/nodes 和 tactical trace。`root.nodes` 当前在单线程兼容模式下作为强断言，用来捕捉候选顺序、TT、剪枝或提前停止语义的细微漂移；但它不是最终对弈语义字段，后续并行模式或优化模式不应默认强锁 `nodes`。`vct_ms` 等耗时字段始终不应纳入确定性回归断言。
 
@@ -304,7 +320,7 @@ python3 scripts/run_diff.py
 
 ### 1. Root 搜索后续补强
 
-1. 继续从 18 线 zhou 对战关键 ply 抽样，补充更接近真实对局的 root 差分局面。
+1. 继续从 18 线 zhou 对战关键 ply 抽样，补充更多接近真实对局的 root 差分局面。
 2. 检查 `RootTrace` 是否还需要补充协议或日志层会用到的字段，但不要把耗时字段纳入确定性回归断言。
 3. 继续核对 root search 与 `reference/pygomoku/pygomoku/search/root.py` 的结构差异，只保留有明确理由的差异。
 4. 明确区分单线程兼容断言字段和未来并行模式断言字段，避免 `nodes` 阻塞无语义变化的并行优化。

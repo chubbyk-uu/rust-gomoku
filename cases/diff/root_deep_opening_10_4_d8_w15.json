@@ -1,0 +1,19 @@
+{
+  "name": "root_deep_opening_10_4_d8_w15",
+  "profile": "slow",
+  "moves": [
+    [10, 4]
+  ],
+  "first_side": 1,
+  "limits": {
+    "max_depth": 8,
+    "root_width": 15
+  },
+  "runtime": {
+    "compute_vcf": true,
+    "compute_vct": true,
+    "root_vct_depth": 4,
+    "static_board": true
+  },
+  "checks": ["root"]
+}
