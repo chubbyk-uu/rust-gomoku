@@ -8,8 +8,17 @@ use rust_gomoku::{
 fn root_search_returns_center_on_empty_board() {
     let mut board = Board::new();
     let mut searcher = RootSearcher::new(load_default_config());
+    searcher.last_trace = Some(rust_gomoku::RootTrace {
+        used_vcf: true,
+        tactical_path: "vcf",
+        ..rust_gomoku::RootTrace::default()
+    });
     let result = searcher.search(&mut board, None);
     assert_eq!(result.move_, xy_to_move(7, 7).unwrap());
+    let trace = searcher.last_trace.as_ref().expect("trace is recorded");
+    assert!(!trace.used_vcf);
+    assert!(!trace.used_vct);
+    assert_eq!(trace.tactical_path, "alphabeta");
 }
 
 #[test]
@@ -74,6 +83,7 @@ fn root_search_prefers_vcf_first_when_available() {
     let trace = searcher.last_trace.as_ref().expect("trace is recorded");
     assert!(trace.vcf_found);
     assert!(!trace.used_vct);
+    assert_eq!(trace.vct_ms, None);
     assert_eq!(trace.tactical_path, "vcf");
 }
 
@@ -107,6 +117,7 @@ fn root_vct_not_triggered_when_disabled() {
     let trace = searcher.last_trace.as_ref().expect("trace is recorded");
     assert!(!trace.used_vct);
     assert!(!trace.vct_triggered);
+    assert_eq!(trace.vct_ms, None);
 }
 
 #[test]
@@ -126,6 +137,7 @@ fn root_vct_not_triggered_on_quiet_position() {
     let trace = searcher.last_trace.as_ref().expect("trace is recorded");
     assert!(trace.used_vct);
     assert!(!trace.vct_triggered);
+    assert_eq!(trace.vct_ms, None);
 }
 
 #[test]
@@ -157,6 +169,7 @@ fn root_vct_triggered_and_accepted_on_dual_a3_win() {
     assert!(trace.vct_triggered);
     assert!(trace.vct_found);
     assert!(trace.vct_accepted);
+    assert!(trace.vct_ms.is_some());
     assert_eq!(trace.tactical_path, "vct");
     assert_eq!(move_to_xy(result.move_).unwrap(), (7, 7));
     assert_eq!(result.score, INF);
@@ -189,6 +202,7 @@ fn root_vct_triggered_but_finds_no_win() {
     assert!(trace.vct_triggered);
     assert!(!trace.vct_found);
     assert!(!trace.vct_accepted);
+    assert!(trace.vct_ms.is_some());
     assert_eq!(trace.tactical_path, "alphabeta");
 }
 
@@ -215,6 +229,26 @@ fn root_vct_verification_rejects_opponent_counter() {
         searcher.verify_root_vct_move(&board, board.side_to_move(), xy_to_move(2, 14).unwrap());
     assert!(!accepted);
     assert!(matches!(reason, Some("opponent_forcing" | "opponent_vcf")));
+}
+
+#[test]
+fn root_vct_verification_accepts_explicit_side_without_panic() {
+    let mut board = Board::new();
+    board.play(xy_to_move(7, 7).unwrap(), None).unwrap();
+    let mut searcher = RootSearcher::new(load_default_config());
+    let (accepted, reason) = searcher.verify_root_vct_move(&board, 1, xy_to_move(8, 7).unwrap());
+    assert!(accepted);
+    assert_eq!(reason, None);
+}
+
+#[test]
+fn root_vct_verification_rejects_invalid_side_without_panic() {
+    let mut board = Board::new();
+    board.play(xy_to_move(7, 7).unwrap(), None).unwrap();
+    let mut searcher = RootSearcher::new(load_default_config());
+    let (accepted, reason) = searcher.verify_root_vct_move(&board, 0, xy_to_move(8, 7).unwrap());
+    assert!(!accepted);
+    assert_eq!(reason, Some("illegal"));
 }
 
 #[test]

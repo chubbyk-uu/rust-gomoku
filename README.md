@@ -63,9 +63,10 @@
 - TT 的 probe / store / replacement / alpha-beta window 行为
 - alphabeta 的终局分数、深度、node limit、deadline、fallback 行为
 - root 搜索的空盘中心、动态棋盘窗口、classic fallback RNG、固定开局回归
+- root tactical fast path 在 VCF/VCT 返回前不初始化 eval caches，保持与 reference 结构更接近
 - threat board 的威胁点、A4/B4/A3 判定、嵌套 `play/undo` 恢复不变量
 - VCF 的 begin depth 映射、序列 key、forcing threat 搜索
-- VCT 的 trigger、OR/AND 搜索、memo 清理、root 接入与验证
+- VCT 的 trigger、OR/AND 搜索、memo 清理、root 接入、验证与 `vct_ms` trace
 
 ### 还没有完成
 
@@ -225,7 +226,7 @@ cargo test
 - 当前重点仍然是“语义迁移”，不是性能冲刺
 - 某些实现虽然已经有增量路径，但整体仍未进入最终优化阶段
 - 目前主要靠 Rust 侧固定局面和手工提取的 reference 语义回归，还没有完整自动差分测试
-- `RootTrace` 当前没有包含 reference 中的 `vct_ms` 时间字段；这是 trace 形状差异，不影响棋局语义，但需要在协议或调试输出前决定是否补齐
+- `RootTrace.vct_ms` 是耗时调试字段，不应纳入确定性回归断言
 - root tactical fast path 当前仍应保持 VCF 优先于 VCT，VCT 只在 trigger 命中后运行
 - 多线程只完成架构预留，没有实现执行路径
 
@@ -241,11 +242,11 @@ cargo test
 4. 运行 `cargo test`。
 5. 提交 Root VCT 接线、trace、嵌套 `play/undo` 测试和 README 更新。
 
-### 2. Root 搜索小修正
+### 2. Root 搜索后续补强
 
-1. 将 root 中 `recompute_all` 移到 VCF/VCT fast path 之后，减少与 reference `search/root.py` 的结构差异和无用计算。
-2. 评估是否补 `RootTrace.vct_ms`。如果补，应避免把耗时字段纳入确定性回归断言。
-3. 为 VCF 优先、VCT fallback 到 alphabeta、VCT reject reason 增加更接近 reference 的固定局面差分样例。
+1. 为 VCF 优先、VCT fallback 到 alphabeta、VCT reject reason 增加更接近 reference 的固定局面差分样例。
+2. 检查 `RootTrace` 是否还需要补充协议或日志层会用到的字段，但不要把耗时字段纳入确定性回归断言。
+3. 继续核对 root search 与 `reference/pygomoku/pygomoku/search/root.py` 的结构差异，只保留有明确理由的差异。
 
 ### 3. Gomocup 协议入口
 

@@ -47,6 +47,7 @@ pub struct RootTrace {
     pub vct_move: Option<Move>,
     pub vct_accepted: bool,
     pub vct_reject_reason: Option<&'static str>,
+    pub vct_ms: Option<f64>,
     pub tactical_path: &'static str,
 }
 
@@ -61,6 +62,7 @@ impl Default for RootTrace {
             vct_move: None,
             vct_accepted: false,
             vct_reject_reason: None,
+            vct_ms: None,
             tactical_path: "alphabeta",
         }
     }
@@ -267,9 +269,9 @@ impl RootSearcher {
             return (false, Some("illegal"));
         }
         let mut trial = board.clone();
-        trial
-            .play(move_, Some(side))
-            .expect("verified root VCT move should be legal");
+        if trial.force_side_to_move(side).is_err() || trial.play(move_, Some(side)).is_err() {
+            return (false, Some("illegal"));
+        }
         if trial.winner() == side {
             return (true, None);
         }
@@ -393,6 +395,7 @@ impl RootSearcher {
         });
 
         if board.move_count() == 0 {
+            self.last_trace = Some(RootTrace::default());
             let center =
                 xy_to_move(board.size() / 2, board.size() / 2).expect("center stays valid");
             return SearchResult {
@@ -406,9 +409,6 @@ impl RootSearcher {
         let side = board.side_to_move();
         let mut trace = RootTrace::default();
         self.last_trace = Some(trace.clone());
-
-        let mut caches = EvalCaches::new();
-        recompute_all(board, &mut caches);
 
         if self.config.runtime.compute_vcf {
             trace.used_vcf = true;
@@ -432,9 +432,12 @@ impl RootSearcher {
             trace.used_vct = true;
             if has_vct_trigger(board, side) {
                 trace.vct_triggered = true;
+                let vct_start = Instant::now();
                 let vct_result = self
                     .vct
                     .search(board, side, self.config.runtime.root_vct_depth);
+                trace.vct_ms =
+                    Some((vct_start.elapsed().as_secs_f64() * 1000.0 * 1000.0).round() / 1000.0);
                 trace.vct_found = vct_result.found;
                 trace.vct_move = vct_result.move_;
                 if let Some(move_) = vct_result.move_.filter(|_| vct_result.found) {
@@ -455,6 +458,9 @@ impl RootSearcher {
             }
         }
         self.last_trace = Some(trace);
+
+        let mut caches = EvalCaches::new();
+        recompute_all(board, &mut caches);
 
         self.alphabeta.config = self.config.clone();
         self.alphabeta.tt = self.tt.clone();
