@@ -1,6 +1,10 @@
 //! Transposition table aligned with the classic reference.
 
-use std::sync::{Arc, RwLock};
+use std::array;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use crate::constants::{HASHF_ALPHA, HASHF_BETA, HASHF_EMPTY, HASHF_EXACT};
 use crate::types::Move;
@@ -53,32 +57,98 @@ impl Default for ProbeResult {
 
 #[derive(Debug)]
 struct TTStorage {
-    shards: Vec<RwLock<Vec<[TTEntry; 2]>>>,
+    buckets: Vec<[RawEntry; 2]>,
 }
 
 impl TTStorage {
     fn new(bucket_count: usize) -> Self {
-        let shard_count = TT_SHARD_COUNT.min(bucket_count.max(1));
-        let base_len = bucket_count / shard_count;
-        let remainder = bucket_count % shard_count;
-        let shards = (0..shard_count)
-            .map(|shard_index| {
-                let len = base_len + usize::from(shard_index < remainder);
-                RwLock::new(vec![[TTEntry::default(), TTEntry::default()]; len])
-            })
+        let buckets = (0..bucket_count)
+            .map(|_| array::from_fn(|_| RawEntry::default()))
             .collect();
-        Self { shards }
+        Self { buckets }
     }
 
     fn bucket_count(&self) -> usize {
-        self.shards
-            .iter()
-            .map(|shard| shard.read().expect("TT shard lock is not poisoned").len())
-            .sum()
+        self.buckets.len()
     }
 }
 
-const TT_SHARD_COUNT: usize = 256;
+#[derive(Debug)]
+struct RawEntry {
+    key_check: AtomicU64,
+    data: AtomicU64,
+}
+
+impl Default for RawEntry {
+    fn default() -> Self {
+        Self {
+            key_check: AtomicU64::new(0),
+            data: AtomicU64::new(0),
+        }
+    }
+}
+
+impl RawEntry {
+    fn load_for_key(&self, key: u64) -> TTEntry {
+        let data = self.data.load(Ordering::Relaxed);
+        let key_check = self.key_check.load(Ordering::Relaxed);
+        if data == 0 || (key_check ^ data) != key {
+            return TTEntry::default();
+        }
+        unpack_entry(key, data)
+    }
+
+    fn load_raw(&self) -> TTEntry {
+        let data = self.data.load(Ordering::Relaxed);
+        let key_check = self.key_check.load(Ordering::Relaxed);
+        if data == 0 {
+            return TTEntry::default();
+        }
+        unpack_entry(key_check ^ data, data)
+    }
+
+    fn store(&self, entry: TTEntry) {
+        let data = pack_entry(entry);
+        self.data.store(data, Ordering::Relaxed);
+        self.key_check.store(entry.key ^ data, Ordering::Relaxed);
+    }
+}
+
+const VALUE_SHIFT: u64 = 48;
+const FLAG_SHIFT: u64 = 46;
+const DEPTH_SHIFT: u64 = 38;
+const PRIORITY_SHIFT: u64 = 22;
+const BEST_MOVE_SHIFT: u64 = 14;
+const BEST_MOVE_NONE: u8 = 0xFF;
+
+fn pack_entry(entry: TTEntry) -> u64 {
+    let value = (entry.value as i16 as u16 as u64) << VALUE_SHIFT;
+    let flag = (u64::from(entry.flag) & 0x3) << FLAG_SHIFT;
+    let depth = (entry.depth.clamp(0, u8::MAX as i32) as u64) << DEPTH_SHIFT;
+    let priority = (entry.priority.clamp(0, u16::MAX as i32) as u64) << PRIORITY_SHIFT;
+    let best_move = entry
+        .best_move
+        .and_then(|move_| u8::try_from(move_).ok())
+        .unwrap_or(BEST_MOVE_NONE);
+    let best_move = u64::from(best_move) << BEST_MOVE_SHIFT;
+    value | flag | depth | priority | best_move
+}
+
+fn unpack_entry(key: u64, data: u64) -> TTEntry {
+    let value = ((data >> VALUE_SHIFT) as u16) as i16 as i32;
+    let flag = ((data >> FLAG_SHIFT) & 0x3) as u8;
+    let depth = ((data >> DEPTH_SHIFT) & 0xFF) as i32;
+    let priority = ((data >> PRIORITY_SHIFT) & 0xFFFF) as i32;
+    let best_move = ((data >> BEST_MOVE_SHIFT) & 0xFF) as u8;
+    TTEntry {
+        key,
+        value,
+        flag,
+        depth,
+        priority,
+        best_move: (best_move != BEST_MOVE_NONE).then_some(best_move as Move),
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct TranspositionTable {
@@ -96,10 +166,9 @@ impl TranspositionTable {
     }
 
     pub fn bucket(&self, key: u64) -> [TTEntry; 2] {
-        let (shard_index, local_index) = self.shard_index(key);
-        self.storage.shards[shard_index]
-            .read()
-            .expect("TT shard lock is not poisoned")[local_index]
+        self.storage.buckets[self.bucket_index(key)]
+            .each_ref()
+            .map(|entry| entry.load_for_key(key))
     }
 
     pub fn bucket_count(&self) -> usize {
@@ -111,16 +180,13 @@ impl TranspositionTable {
     }
 
     pub fn store(&self, entry: TTEntry) {
-        let (shard_index, local_index) = self.shard_index(entry.key);
-        let mut shard = self.storage.shards[shard_index]
-            .write()
-            .expect("TT shard lock is not poisoned");
-        let bucket = &mut shard[local_index];
+        let bucket = &self.storage.buckets[self.bucket_index(entry.key)];
+        let first = bucket[0].load_raw();
         let mut slot = 0_usize;
-        if bucket[0].flag != HASHF_EMPTY && bucket[0].priority > entry.priority {
+        if first.flag != HASHF_EMPTY && first.priority > entry.priority {
             slot = 1;
         }
-        bucket[slot] = entry;
+        bucket[slot].store(entry);
     }
 
     pub fn probe(&self, key: u64, depth: i32, alpha: i32, beta: i32) -> ProbeResult {
@@ -187,14 +253,6 @@ impl TranspositionTable {
 
     fn bucket_index(&self, key: u64) -> usize {
         (key & self.bucket_mask) as usize
-    }
-
-    fn shard_index(&self, key: u64) -> (usize, usize) {
-        let bucket_index = self.bucket_index(key);
-        let shard_count = self.storage.shards.len();
-        let shard_index = bucket_index % shard_count;
-        let local_index = bucket_index / shard_count;
-        (shard_index, local_index)
     }
 }
 
