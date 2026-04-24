@@ -240,7 +240,7 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
     assert_eq!(proto.node_limit, None);
     assert!(proto.config.runtime.compute_vcf);
     assert!(proto.config.runtime.compute_vct);
-    assert_eq!(proto.config.runtime.root_vct_depth, 4);
+    assert_eq!(proto.config.runtime.root_vct_depth, 8);
     assert!(proto.config.runtime.static_board);
 }
 

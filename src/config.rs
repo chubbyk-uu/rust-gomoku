@@ -105,7 +105,7 @@ fn default_runtime_options(para: &[f64]) -> RuntimeOptions {
         static_board: true,
         dynamic_board_margin: 4,
         compute_vct: true,
-        root_vct_depth: 4,
+        root_vct_depth: 8,
     }
 }
 

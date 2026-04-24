@@ -52,6 +52,11 @@ fn runtime_defaults_match_reference() {
     assert!(!config.runtime.nonroot_vcf);
     assert!(config.runtime.static_board);
     assert_eq!(config.runtime.dynamic_board_margin, 4);
+    assert!(config.runtime.compute_vct);
+    assert_eq!(
+        config.runtime.root_vct_depth, 8,
+        "Rust intentionally uses a deeper default than Python reference"
+    );
 }
 
 #[test]

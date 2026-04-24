@@ -44,6 +44,8 @@
 - Gomocup 协议入口
 - 命令行 Gomocup engine 入口
 - 与 `opponent/zhou` 的 9 开局黑白双边对战验证
+- reference / Rust 双端差分测试脚手架
+- 5 个 root 搜索差分 case
 - reference 静态数据提取脚本
 - 一批与 reference 对齐的 Rust 自动测试
 
@@ -72,17 +74,22 @@
 - VCT 的 trigger、OR/AND 搜索、memo 清理、root 接入、验证与 `vct_ms` trace
 - Gomocup `START / RECTSTART / RESTART / BEGIN / TURN / BOARD / DONE / TAKEBACK / INFO / ABOUT / END`
 - 命令行入口默认 `--depth 6 --width 20`，对齐 reference GUI / Gomocup engine 正式运行参数
+- Rust 默认开启 VCT，`root_vct_depth = 8`；这是基于 Rust 性能的有意偏离，reference Python 主线因性能约束使用较低默认值
 - Gomocup `BOARD` 模式对齐 reference 的颜色重建语义：`sfn == opn - 1` 时只调整输入列表顺序，正式重放仍从黑棋开始
 - Rust Gomocup engine 在 `d6/w20`、zhou `d5`、9 开局黑白双边共 18 线中，与 reference Gomocup engine 的完整走法序列一致
+- `diff_probe` 使用 `serde/serde_json` 读取固定局面 JSON，输出 Rust 侧 board/root/trace 结果
+- `scripts/diff_reference.py` 调用 `reference/pygomoku` 输出同结构 JSON
+- `scripts/run_diff.py` 可批量运行 `cases/diff/*.json`，当前 5 个 root case 全部通过
+- 单线程兼容模式下，差分默认比较 `root.nodes`，用于尽早发现搜索路径漂移
 
 ### 还没有完成
 
 - GUI 或其它外部集成
-- reference / Rust 双端差分测试脚手架
+- movegen / eval / VCF / VCT 的细粒度双端差分覆盖
 - Python fallback 与 Cython 加速路径的系统性交叉验证
 - 并行搜索执行路径
 
-也就是说，**当前已经有单线程 classic 搜索主链、战术层、Gomocup stdin/stdout 入口和一轮 zhou 对战对齐验证；但还没有完整差分测试脚手架和并行执行路径。**
+也就是说，**当前已经有单线程 classic 搜索主链、战术层、Gomocup stdin/stdout 入口、一轮 zhou 对战对齐验证，以及 root 搜索层面的最小双端差分脚手架；但还没有覆盖 eval / movegen / VCF / VCT 的完整差分体系，也还没有并行执行路径。**
 
 ## 当前实现原则
 
@@ -137,6 +144,7 @@ rust_gomoku/
 │   │   ├── gomocup.rs
 │   │   └── mod.rs
 │   ├── bin/
+│   │   ├── diff_probe.rs
 │   │   └── gomocup_engine.rs
 │   ├── types.rs
 │   └── zobrist.rs
@@ -147,7 +155,10 @@ rust_gomoku/
 │   ├── reference_text/
 │   └── static/
 ├── scripts/
-│   └── extract_static_data.py
+│   ├── compare_diff_outputs.py
+│   ├── diff_reference.py
+│   ├── extract_static_data.py
+│   └── run_diff.py
 └── reference/
     └── pygomoku/
 ```
@@ -158,6 +169,10 @@ rust_gomoku/
 - `data/reference_text/`：从 reference vendoring 进来的源文本副本
 - `data/static/`：从 vendored 文本提取出的纯静态数据文件
 - `scripts/extract_static_data.py`：负责重新生成和校验静态数据
+- `cases/diff/`：reference / Rust 双端差分固定局面
+- `src/bin/diff_probe.rs`：Rust 侧差分探针
+- `scripts/diff_reference.py`：Python reference 侧差分探针
+- `scripts/run_diff.py`：批量运行差分 case
 
 ## 静态数据来源
 
@@ -239,6 +254,7 @@ printf 'START 15\nBEGIN\nEND\n' | cargo run --quiet --bin gomocup_engine -- --de
 Gomocup / zhou 对战验证：
 
 - 参数：Rust/reference `depth=6, width=20`，zhou `depth=5`
+- 说明：这轮历史对战是在当时显式对齐 reference runtime 的条件下完成；现在 Rust 默认 `root_vct_depth` 已提升到 8，后续对战验证应同时记录 VCT depth
 - 开局：reference 的 9 个固定开局
 - 颜色：黑白双边，共 18 线
 - 结果：Rust 18 胜，reference 18 胜，18/18 完整走法序列一致
@@ -252,7 +268,21 @@ python3 scripts/diff_reference.py --case cases/diff/root_center_11.json > /tmp/r
 python3 scripts/compare_diff_outputs.py --rust /tmp/rust_diff.json --reference /tmp/ref_diff.json
 ```
 
-当前最小差分 case 覆盖 root 搜索输出，比较字段包括 board 状态、root move/score/depth 和 tactical trace；`nodes`、`vct_ms` 等实现或耗时相关字段默认不作为强断言。
+批量运行全部差分 case：
+
+```bash
+python3 scripts/run_diff.py
+```
+
+当前已有 5 个 root 搜索差分 case：
+
+- `root_center_11.json`：中盘固定局面，`d6/w20`
+- `root_node_limit_5.json`：带 `node_limit` 的 root 搜索路径
+- `root_vcf_hit_6.json`：VCF fast path 命中场景
+- `root_vct_hit_8.json`：VCT trigger / 命中场景
+- `root_white_first_3.json`：白棋先手 side_to_move 场景
+
+默认比较字段包括 board 状态、`zobrist_key`、root move/score/depth/nodes 和 tactical trace。`root.nodes` 当前在单线程兼容模式下作为强断言，用来捕捉候选顺序、TT、剪枝或提前停止语义的细微漂移；但它不是最终对弈语义字段，后续并行模式或优化模式不应默认强锁 `nodes`。`vct_ms` 等耗时字段始终不应纳入确定性回归断言。
 
 ## 当前限制
 
@@ -261,52 +291,47 @@ python3 scripts/compare_diff_outputs.py --rust /tmp/rust_diff.json --reference /
 - 当前已有基础 Gomocup 入口，并通过一轮 zhou 9 开局黑白双边对战对齐验证
 - 当前重点仍然是“语义迁移”，不是性能冲刺
 - 某些实现虽然已经有增量路径，但整体仍未进入最终优化阶段
-- 已有最小 reference / Rust 差分脚手架，但覆盖范围还只到 root 搜索单 case
+- Rust 默认 `root_vct_depth = 8` 是明确的性能型偏离；需要与 reference 做严格差分时，应在 case 或协议 `INFO root_vct_depth` 中显式设成 reference 对应值
+- 已有最小 reference / Rust 差分脚手架，但覆盖范围还只到 root 搜索层面
 - `RootTrace.vct_ms` 是耗时调试字段，不应纳入确定性回归断言
+- `root.nodes` 只应在单线程兼容模式下强断言；并行或优化模式应改为比较 move/score/depth/trace 等语义字段
 - root tactical fast path 当前仍应保持 VCF 优先于 VCT，VCT 只在 trigger 命中后运行
 - 多线程只完成架构预留，没有实现执行路径
 
 ## 下一步
 
-下一步不建议继续大面积扩搜索算法，应先扩展差分测试覆盖面。
+下一步不建议继续大面积扩搜索算法，应先把差分测试覆盖面补到能支撑后续优化和并行。
 
-### 1. 提交前收口
+### 1. Root 搜索后续补强
 
-1. 更新 README 当前状态。
-2. 检查 `git status`，确认 `reference/` 和 `.codex/` 不进入提交。
-3. 运行 `python3 scripts/extract_static_data.py --check`。
-4. 运行 `cargo test`。
-5. 提交协议入口、CLI、测试和 README 更新。
-
-### 2. Root 搜索后续补强
-
-1. 为 VCF 优先、VCT fallback 到 alphabeta、VCT reject reason 增加更接近 reference 的固定局面差分样例。
+1. 继续从 18 线 zhou 对战关键 ply 抽样，补充更接近真实对局的 root 差分局面。
 2. 检查 `RootTrace` 是否还需要补充协议或日志层会用到的字段，但不要把耗时字段纳入确定性回归断言。
 3. 继续核对 root search 与 `reference/pygomoku/pygomoku/search/root.py` 的结构差异，只保留有明确理由的差异。
+4. 明确区分单线程兼容断言字段和未来并行模式断言字段，避免 `nodes` 阻塞无语义变化的并行优化。
 
-### 3. Gomocup / zhou 对战验证沉淀
+### 2. Gomocup / zhou 对战验证沉淀
 
 1. 把本次手工命令整理成脚本或 README 中的可复制命令。
 2. 后续优先比较 Rust/reference 的完整 move sequence，而不是只看胜负。
 3. 继续保留输出到 `/tmp` 或专门 ignored 目录，避免把对战 JSON 误提交。
 4. 若后续开启并行搜索，必须重复跑这 18 线，确认默认单线程兼容路径不漂移。
 
-### 4. 协议补强
+### 3. 协议补强
 
 1. 与 reference `tests/test_protocol.py` 继续逐条比对，补缺少的边界用例。
 2. 检查 `ABOUT` 文本是否需要完全对齐 reference，还是保留 Rust engine 名称。
 3. 确认 `TAKEBACK` 是否保持 reference 的“忽略参数，只撤一步”语义。
 4. 根据 zhou smoke 结果补 transcript 回归。
 
-### 5. Reference / Rust 差分测试脚手架
+### 4. Reference / Rust 差分测试脚手架
 
-1. 继续增加固定局面 case，优先从 18 线 zhou 对战关键 ply 抽样。
-2. 扩展 probe 输出，从 root search 逐步覆盖 movegen、VCF、VCT。
-3. 再补 eval 细粒度字段，避免一开始把输出结构做得过大。
+1. 扩展 probe 输出，从 root search 逐步覆盖 movegen、VCF、VCT。
+2. 再补 eval 细粒度字段，避免一开始把输出结构做得过大。
+3. 为不同层级拆分默认比较字段，例如 root 兼容模式比较 `nodes`，并行模式不比较 `nodes`。
 4. 对发现的差异明确记录：Rust 对齐 Python fallback、Cython 路径，还是 reference 当前测试主线。
-5. 保持 `nodes`、耗时字段默认不作为强断言，除非明确需要锁定。
+5. 耗时字段始终不作为强断言。
 
-### 6. 并行架构第一版
+### 5. 并行架构第一版
 
 1. 保留单线程兼容路径作为默认 baseline。
 2. 新增 root candidate task 抽象，不改变候选顺序和最终归并规则。
@@ -317,4 +342,4 @@ python3 scripts/compare_diff_outputs.py --rust /tmp/rust_diff.json --reference /
 
 ## 一句话总结
 
-当前仓库已经完成了 **基础状态机 + 配置 + pattern + eval + 单线程 classic 搜索 + VCF/VCT 战术路径 + Gomocup 协议入口** 的 Rust 化，并建立了对应回归测试和一轮 zhou 对战对齐验证；下一阶段重点是 **差分测试脚手架和确定性并行架构落地**。
+当前仓库已经完成了 **基础状态机 + 配置 + pattern + eval + 单线程 classic 搜索 + VCF/VCT 战术路径 + Gomocup 协议入口** 的 Rust 化，并建立了对应回归测试、一轮 zhou 对战对齐验证，以及 root 搜索层面的 reference / Rust 差分脚手架；下一阶段重点是 **扩展差分覆盖和落地确定性并行架构**。
