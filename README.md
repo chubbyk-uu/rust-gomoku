@@ -2,7 +2,7 @@
 
 `rust_gomoku` 的目标不是重新设计一个新的五子棋引擎，而是：
 
-**在尽量不破坏语义的前提下，用 Rust 重构 `reference/pygomoku`。**
+**在尽量不破坏语义的前提下，用 Rust 重构 Python reference `pygomoku`。**
 
 这里的“语义”包括但不限于：
 
@@ -13,7 +13,7 @@
 - 默认参数、默认搜索行为
 - 固定局面上的回归结果
 
-如果 Rust 写法更优雅，但行为偏离 `reference/pygomoku`，默认视为不符合当前项目目标。
+如果 Rust 写法更优雅，但行为偏离 Python reference `pygomoku`，默认视为不符合当前项目目标。
 
 ## 当前状态
 
@@ -88,7 +88,7 @@
 - Rust Gomocup engine 在 `d6/w20`、zhou `d5`、9 开局黑白双边共 18 线中，与 reference Gomocup engine 的完整走法序列一致
 - `diff_probe` 使用 `serde/serde_json` 读取固定局面 JSON，输出 Rust 侧 board/root/trace 结果
 - `diff_probe` 可通过 `--lazy-smp --lazy-smp-workers N` 单独观察 Rust 并行路径
-- `scripts/diff_reference.py` 调用 `reference/pygomoku` 输出同结构 JSON
+- `scripts/diff_reference.py` 调用外部 Python reference 输出同结构 JSON
 - `scripts/run_diff.py` 可批量运行 `cases/diff/*.json`，当前 12 个 root case 全部通过
 - 单线程兼容模式下，差分默认比较 `root.nodes`，用于尽早发现搜索路径漂移
 - Lazy SMP 是 experimental 功能，默认关闭；开启后允许 TT 命中、节点数和 best move 变化，不作为 reference 等价路径
@@ -108,7 +108,7 @@
 
 项目当前遵循这些原则：
 
-- 以 `reference/pygomoku` 作为唯一主语义基准
+- 以外部 Python reference `pygomoku` 作为唯一主语义基准
 - 先保证单线程、确定性、可回归
 - Rust 代码从一开始就考虑未来并行架构边界
 - 但默认执行路径先不因为并行而改变 reference 结果
@@ -168,6 +168,8 @@ rust_gomoku/
 ├── tests/
 ├── cases/
 │   └── diff/
+├── opponent/
+│   └── zhou/
 ├── data/
 │   ├── reference_text/
 │   └── static/
@@ -176,13 +178,12 @@ rust_gomoku/
 │   ├── diff_reference.py
 │   ├── extract_static_data.py
 │   └── run_diff.py
-└── reference/
-    └── pygomoku/
 ```
 
 其中：
 
-- `reference/pygomoku/`：当前语义基准
+- Python reference 不随本仓库提交；默认可通过 `PYGOMOKU_REF_ROOT=/path/to/pygomoku` 指定，本机约定路径为 `~/python_ws/pygomoku`
+- `opponent/zhou/`：保留在本仓库内的 zhou 基线对手
 - `data/reference_text/`：从 reference vendoring 进来的源文本副本
 - `data/static/`：从 vendored 文本提取出的纯静态数据文件
 - `scripts/extract_static_data.py`：负责重新生成和校验静态数据
@@ -260,7 +261,7 @@ cargo test
 ```bash
 python3 scripts/extract_static_data.py --check
 cargo test
-python3 scripts/run_diff.py --profile all --jobs 10
+PYGOMOKU_REF_ROOT=~/python_ws/pygomoku python3 scripts/run_diff.py --profile all --jobs 10
 ```
 
 当前全量测试通过规模：188 个 Rust 测试通过。
@@ -330,14 +331,16 @@ Reference / Rust 差分脚手架：
 
 ```bash
 cargo run --quiet --bin diff_probe -- --case cases/diff/root_center_11.json > /tmp/rust_diff.json
-python3 scripts/diff_reference.py --case cases/diff/root_center_11.json > /tmp/ref_diff.json
+PYGOMOKU_REF_ROOT=~/python_ws/pygomoku python3 scripts/diff_reference.py --case cases/diff/root_center_11.json > /tmp/ref_diff.json
 python3 scripts/compare_diff_outputs.py --rust /tmp/rust_diff.json --reference /tmp/ref_diff.json
 ```
+
+`scripts/diff_reference.py` 和 `scripts/run_diff.py` 查找 reference 的顺序是：显式 `--ref-root`、环境变量 `PYGOMOKU_REF_ROOT`、旧本地路径 `./reference/pygomoku`、本机约定路径 `~/python_ws/pygomoku`。完整 Python reference 不提交进本仓库。
 
 批量运行全部差分 case：
 
 ```bash
-python3 scripts/run_diff.py --profile all
+PYGOMOKU_REF_ROOT=~/python_ws/pygomoku python3 scripts/run_diff.py --profile all
 ```
 
 日常快速差分默认只跑 fast case，可以并行执行：
@@ -389,7 +392,7 @@ python3 scripts/run_diff.py --profile slow --jobs 10
 
 1. 继续从 18 线 zhou 对战关键 ply 抽样，补充更多接近真实对局的 root 差分局面。
 2. 检查 `RootTrace` 是否还需要补充协议或日志层会用到的字段，但不要把耗时字段纳入确定性回归断言。
-3. 继续核对 root search 与 `reference/pygomoku/pygomoku/search/root.py` 的结构差异，只保留有明确理由的差异。
+3. 继续核对 root search 与 `$PYGOMOKU_REF_ROOT/pygomoku/search/root.py` 的结构差异，只保留有明确理由的差异。
 4. 明确区分单线程兼容断言字段和未来并行模式断言字段，避免 `nodes` 阻塞无语义变化的并行优化。
 
 ### 2. Gomocup / zhou 对战验证沉淀

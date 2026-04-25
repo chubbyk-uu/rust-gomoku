@@ -5,17 +5,42 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
+
+REFERENCE_ROOT_ENV = "PYGOMOKU_REF_ROOT"
 
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def import_reference() -> None:
-    ref_root = repo_root() / "reference" / "pygomoku"
+def resolve_reference_root(ref_root: str | Path | None = None) -> Path:
+    if ref_root is not None:
+        candidates = [Path(ref_root).expanduser()]
+    elif os.environ.get(REFERENCE_ROOT_ENV):
+        candidates = [Path(os.environ[REFERENCE_ROOT_ENV]).expanduser()]
+    else:
+        candidates = [
+            repo_root() / "reference" / "pygomoku",
+            Path.home() / "python_ws" / "pygomoku",
+        ]
+
+    for candidate in candidates:
+        if (candidate / "pygomoku").is_dir():
+            return candidate.resolve()
+
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise RuntimeError(
+        "Python reference not found. Set "
+        f"{REFERENCE_ROOT_ENV}=/path/to/pygomoku. Searched: {searched}"
+    )
+
+
+def import_reference(ref_root: str | Path | None = None) -> None:
+    ref_root = resolve_reference_root(ref_root)
     sys.path.insert(0, str(ref_root))
 
 
@@ -66,8 +91,8 @@ def trace_json(trace: dict | None):
     }
 
 
-def run_case(case: dict) -> dict:
-    import_reference()
+def run_case(case: dict, ref_root: str | Path | None = None) -> dict:
+    import_reference(ref_root)
     from pygomoku.board import Board, move_to_xy, xy_to_move
     from pygomoku.config import load_default_config
     from pygomoku.search.root import RootSearcher, SearchLimits
@@ -109,9 +134,14 @@ def run_case(case: dict) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", required=True, type=Path)
+    parser.add_argument(
+        "--ref-root",
+        type=Path,
+        help=f"Python reference root; defaults to ${REFERENCE_ROOT_ENV}, ./reference/pygomoku, then ~/python_ws/pygomoku",
+    )
     args = parser.parse_args()
     case = json.loads(args.case.read_text(encoding="utf-8"))
-    print(json.dumps(run_case(case), indent=2, sort_keys=True))
+    print(json.dumps(run_case(case, args.ref_root), indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

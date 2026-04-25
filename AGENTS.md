@@ -4,7 +4,7 @@
 
 `rust_gomoku` 的首要目标不是“做一个新的五子棋引擎”，而是：
 
-**在尽量不破坏语义的前提下，用 Rust 完整重构参考项目 `reference/pygomoku`。**
+**在尽量不破坏语义的前提下，用 Rust 完整重构参考项目 `pygomoku`。**
 
 这里的“语义”包括但不限于：
 
@@ -19,23 +19,23 @@
 
 ## 当前仓库状态
 
-- 当前根仓库仍处于早期阶段，主实现基本尚未开始
-- 参考语义来源位于 `reference/pygomoku`
-- 当前根目录还没有完善的 `README.md`
+- classic 主链已经推进到 board / eval / search / VCF / VCT / Gomocup / GUI
+- 完整 Python reference 不随本仓库提交；本机约定路径为 `~/python_ws/pygomoku`
+- 需要运行 Python reference 差分时，优先通过 `PYGOMOKU_REF_ROOT=/path/to/pygomoku` 指定外部 reference
+- 仓库内保留 `opponent/zhou` 作为 zhou 基线对手
 
 因此，现阶段 Agent 在本仓库工作时，应把以下文件视为最高优先级上下文：
 
 1. 本仓库 `AGENTS.md`
-2. `reference/pygomoku/AGENTS.md`
-3. `reference/pygomoku/README.md`
-4. `reference/pygomoku/tests/`
-5. `reference/pygomoku/pygomoku/` 对应模块源码
+2. 本仓库 `README.md`
+3. `$PYGOMOKU_REF_ROOT/AGENTS.md` 或 `~/python_ws/pygomoku/AGENTS.md`
+4. `$PYGOMOKU_REF_ROOT/README.md`、`tests/` 和 `pygomoku/` 对应模块源码
 
 ## 核心工程原则
 
 ### 1. 参考实现优先
 
-- `reference/pygomoku` 是当前唯一语义基准
+- 外部 Python reference `pygomoku` 是当前唯一语义基准
 - 发生行为歧义时，优先对齐参考实现和参考测试，而不是靠主观判断重写
 - 不要把仓库里的 `zhou` 实现习惯当作主语义来源
 
@@ -364,8 +364,8 @@ Rust 重构不能只做“能编译”或“能下一盘棋”的验证。
 适合本仓库的工作顺序：
 
 1. 先读本仓库 `AGENTS.md`
-2. 如果根目录 `README.md` 仍不存在，直接读 `reference/pygomoku/README.md`
-3. 读 `reference/pygomoku/AGENTS.md`
+2. 读根目录 `README.md`
+3. 如果任务需要核对 reference，先解析 `PYGOMOKU_REF_ROOT`；未设置时使用本机约定 `~/python_ws/pygomoku`
 4. 读本次改动相关的 reference 模块与测试
 5. 明确本次任务是“语义迁移”还是“性能优化”
 6. 先写或补测试，再改实现

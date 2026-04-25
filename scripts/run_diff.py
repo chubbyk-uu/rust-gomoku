@@ -5,6 +5,9 @@ Usage:
   scripts/run_diff.py                       # run fast cases/diff/*.json cases
   scripts/run_diff.py --profile all         # run every cases/diff/*.json case
   scripts/run_diff.py cases/diff/foo.json   # run one or more explicit cases
+
+Set PYGOMOKU_REF_ROOT=/path/to/pygomoku when the Python reference lives
+outside this repository.
 """
 
 from __future__ import annotations
@@ -36,9 +39,9 @@ def run_rust_probe(case_path: Path) -> dict:
     return json.loads(result.stdout)
 
 
-def run_reference_probe(case_path: Path) -> dict:
+def run_reference_probe(case_path: Path, ref_root: Path | None) -> dict:
     case = json.loads(case_path.read_text(encoding="utf-8"))
-    return run_reference_case(case)
+    return run_reference_case(case, ref_root)
 
 
 def case_profile(case_path: Path) -> str:
@@ -62,13 +65,17 @@ def compare(rust: dict, reference: dict, fields: list[str]) -> list[tuple[str, o
     return mismatches
 
 
-def run_one_case(case_path: Path, fields: list[str]) -> tuple[str, bool, list[str], float]:
+def run_one_case(
+    case_path: Path,
+    fields: list[str],
+    ref_root: Path | None,
+) -> tuple[str, bool, list[str], float]:
     start = time.perf_counter()
     name = case_path.name
     lines: list[str] = []
     try:
         rust = run_rust_probe(case_path)
-        reference = run_reference_probe(case_path)
+        reference = run_reference_probe(case_path, ref_root)
     except subprocess.CalledProcessError as exc:
         lines.append(f"{name}: FAIL rust probe")
         if exc.stderr:
@@ -105,6 +112,11 @@ def main() -> int:
         default=1,
         help="number of diff cases to run concurrently (default: 1)",
     )
+    parser.add_argument(
+        "--ref-root",
+        type=Path,
+        help="Python reference root; overrides PYGOMOKU_REF_ROOT",
+    )
     args = parser.parse_args()
 
     if args.cases:
@@ -119,11 +131,11 @@ def main() -> int:
 
     started = time.perf_counter()
     if jobs == 1 or len(case_paths) <= 1:
-        results = [run_one_case(case_path, fields) for case_path in case_paths]
+        results = [run_one_case(case_path, fields, args.ref_root) for case_path in case_paths]
     else:
         with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as pool:
             futures = {
-                pool.submit(run_one_case, case_path, fields): index
+                pool.submit(run_one_case, case_path, fields, args.ref_root): index
                 for index, case_path in enumerate(case_paths)
             }
             indexed_results = []
