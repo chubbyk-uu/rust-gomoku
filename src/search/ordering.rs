@@ -104,37 +104,25 @@ pub fn order_candidates(
     side: Side,
     tt_best_move: Option<Move>,
 ) -> Vec<Candidate> {
-    let mut ordered: Vec<(Candidate, bool)> = candidates
-        .iter()
-        .map(|candidate| (*candidate, tt_best_move == Some(candidate.move_)))
-        .collect();
     let mut mi_cache = [0_i32; BOARD_AREA];
-    ordered.sort_by(|a, b| {
-        let (a_candidate, a_tt) = a;
-        let (b_candidate, b_tt) = b;
-        b_tt.cmp(a_tt)
+    for candidate in candidates {
+        let (x, y) = move_to_xy(candidate.move_).expect("candidate move is in range");
+        mi_cache[candidate.move_ as usize] = getmi(board, x, y, side);
+    }
+    let mut result = candidates.to_vec();
+    result.sort_unstable_by(|a, b| {
+        let a_tt = tt_best_move == Some(a.move_);
+        let b_tt = tt_best_move == Some(b.move_);
+        b_tt.cmp(&a_tt)
             .then_with(|| {
-                b_candidate
-                    .order_score
-                    .partial_cmp(&a_candidate.order_score)
+                b.order_score
+                    .partial_cmp(&a.order_score)
                     .expect("candidate scores are finite")
             })
-            .then_with(|| {
-                let mut cached_mi = |c: &Candidate| {
-                    let idx = c.move_ as usize;
-                    if mi_cache[idx] == 0 {
-                        let (x, y) = move_to_xy(c.move_).expect("candidate move is in range");
-                        mi_cache[idx] = getmi(board, x, y, side);
-                    }
-                    mi_cache[idx]
-                };
-                let a_mi = cached_mi(a_candidate);
-                let b_mi = cached_mi(b_candidate);
-                b_mi.cmp(&a_mi)
-            })
-            .then_with(|| a_candidate.move_.cmp(&b_candidate.move_))
+            .then_with(|| mi_cache[b.move_ as usize].cmp(&mi_cache[a.move_ as usize]))
+            .then_with(|| a.move_.cmp(&b.move_))
     });
-    ordered.into_iter().map(|(candidate, _)| candidate).collect()
+    result
 }
 
 pub fn order_candidates_root_classic(

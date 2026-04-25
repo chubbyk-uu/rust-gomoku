@@ -48,24 +48,23 @@ const COVER_DIRS: [(isize, isize); 32] = [
 const COVER_NEIGHBOR_CAP: usize = 32;
 const COVER_SENTINEL: Move = u16::MAX;
 
-static COVER_NEIGHBORS: LazyLock<[[Move; COVER_NEIGHBOR_CAP]; BOARD_AREA]> =
-    LazyLock::new(|| {
-        let mut table = [[COVER_SENTINEL; COVER_NEIGHBOR_CAP]; BOARD_AREA];
-        for move_index in 0..BOARD_AREA {
-            let x = move_index % BOARD_SIZE;
-            let y = move_index / BOARD_SIZE;
-            let mut count = 0;
-            for &(dx, dy) in COVER_DIRS.iter() {
-                let xx = x as isize + dx;
-                let yy = y as isize + dy;
-                if xx >= 0 && yy >= 0 && xx < BOARD_SIZE as isize && yy < BOARD_SIZE as isize {
-                    table[move_index][count] = (yy as usize * BOARD_SIZE + xx as usize) as Move;
-                    count += 1;
-                }
+static COVER_NEIGHBORS: LazyLock<[[Move; COVER_NEIGHBOR_CAP]; BOARD_AREA]> = LazyLock::new(|| {
+    let mut table = [[COVER_SENTINEL; COVER_NEIGHBOR_CAP]; BOARD_AREA];
+    for move_index in 0..BOARD_AREA {
+        let x = move_index % BOARD_SIZE;
+        let y = move_index / BOARD_SIZE;
+        let mut count = 0;
+        for &(dx, dy) in COVER_DIRS.iter() {
+            let xx = x as isize + dx;
+            let yy = y as isize + dy;
+            if xx >= 0 && yy >= 0 && xx < BOARD_SIZE as isize && yy < BOARD_SIZE as isize {
+                table[move_index][count] = (yy as usize * BOARD_SIZE + xx as usize) as Move;
+                count += 1;
             }
         }
-        table
-    });
+    }
+    table
+});
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Candidate {
@@ -106,7 +105,9 @@ pub fn covered_moves(board: &Board) -> Vec<Move> {
             }
         }
     }
-    (0..BOARD_AREA as Move).filter(|&m| seen[m as usize]).collect()
+    (0..BOARD_AREA as Move)
+        .filter(|&m| seen[m as usize])
+        .collect()
 }
 
 pub fn apply_hostile_three_extension(
@@ -254,7 +255,7 @@ pub fn generate_candidates(
     }
 
     if !preserve_scan_order {
-        candidates.sort_by(|a, b| {
+        candidates.sort_unstable_by(|a, b| {
             b.order_score
                 .partial_cmp(&a.order_score)
                 .unwrap()

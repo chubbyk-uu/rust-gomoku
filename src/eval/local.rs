@@ -310,7 +310,8 @@ fn mark_cell_neighbors(
     seen = 0;
     xx = x as isize + 1;
     yy = y as isize + 1;
-    while xx < size as isize && yy < size as isize && xx <= x as isize + AR && yy <= y as isize + AR {
+    while xx < size as isize && yy < size as isize && xx <= x as isize + AR && yy <= y as isize + AR
+    {
         let value = grid[yy as usize][xx as usize];
         if seen == 0 {
             seen = value;
