@@ -7,6 +7,7 @@ use crate::eval::caches::EvalCaches;
 use crate::patterns::buckets::bucket_for_lines;
 use crate::patterns::line::shape_raw_from_board_point_python;
 use crate::patterns::shapes::{ShapeLabel, DIAGONAL_DOWN, DIAGONAL_UP, HORIZONTAL, VERTICAL};
+use crate::types::Move;
 
 const FOUR_DIRECTIONS: [i32; 4] = [HORIZONTAL, VERTICAL, DIAGONAL_DOWN, DIAGONAL_UP];
 
@@ -183,46 +184,63 @@ pub fn value_wide_compute(board: &mut Board, caches: &mut EvalCaches, changed: (
     let diag_down_flag = 4_u8;
     let diag_up_flag = 8_u8;
     let mut comp = [[0_u8; BOARD_SIZE]; BOARD_SIZE];
+    let mut dirty = [0 as Move; BOARD_SIZE * BOARD_SIZE];
+    let mut dirty_len = 0_usize;
 
     {
         let grid = board.grid_rows();
-        comp[cx][cy] = 15;
-        mark_cell_neighbors(&mut comp, grid, cx, cy, size);
+        mark_dirty_cell(&mut comp, &mut dirty, &mut dirty_len, cx, cy, 15);
+        mark_cell_neighbors(&mut comp, &mut dirty, &mut dirty_len, grid, cx, cy, size);
     }
 
     caches.board_shadow[cx][cy] = board.grid_rows()[cy][cx];
 
-    for x in 0..size {
-        for y in 0..size {
-            let flags = comp[x][y];
-            if flags == 0 {
-                continue;
+    for &move_ in &dirty[..dirty_len] {
+        let index = move_ as usize;
+        let x = index % BOARD_SIZE;
+        let y = index / BOARD_SIZE;
+        let flags = comp[x][y];
+        let cell = board.grid_rows()[y][x];
+        if cell == EMPTY {
+            if flags & horizontal_flag != 0 {
+                update_direction_cache(board, caches, x, y, HORIZONTAL);
             }
-            let cell = board.grid_rows()[y][x];
-            if cell == EMPTY {
-                if flags & horizontal_flag != 0 {
-                    update_direction_cache(board, caches, x, y, HORIZONTAL);
-                }
-                if flags & vertical_flag != 0 {
-                    update_direction_cache(board, caches, x, y, VERTICAL);
-                }
-                if flags & diag_down_flag != 0 {
-                    update_direction_cache(board, caches, x, y, DIAGONAL_DOWN);
-                }
-                if flags & diag_up_flag != 0 {
-                    update_direction_cache(board, caches, x, y, DIAGONAL_UP);
-                }
-                update_bucket_attack(board, caches, x, y, 0);
-                update_bucket_attack(board, caches, x, y, 1);
-            } else {
-                clear_occupied_point(caches, x, y);
+            if flags & vertical_flag != 0 {
+                update_direction_cache(board, caches, x, y, VERTICAL);
             }
+            if flags & diag_down_flag != 0 {
+                update_direction_cache(board, caches, x, y, DIAGONAL_DOWN);
+            }
+            if flags & diag_up_flag != 0 {
+                update_direction_cache(board, caches, x, y, DIAGONAL_UP);
+            }
+            update_bucket_attack(board, caches, x, y, 0);
+            update_bucket_attack(board, caches, x, y, 1);
+        } else {
+            clear_occupied_point(caches, x, y);
         }
     }
 }
 
+fn mark_dirty_cell(
+    comp: &mut [[u8; BOARD_SIZE]; BOARD_SIZE],
+    dirty: &mut [Move; BOARD_SIZE * BOARD_SIZE],
+    dirty_len: &mut usize,
+    x: usize,
+    y: usize,
+    flags: u8,
+) {
+    if comp[x][y] == 0 {
+        dirty[*dirty_len] = (y * BOARD_SIZE + x) as Move;
+        *dirty_len += 1;
+    }
+    comp[x][y] |= flags;
+}
+
 fn mark_cell_neighbors(
     comp: &mut [[u8; BOARD_SIZE]; BOARD_SIZE],
+    dirty: &mut [Move; BOARD_SIZE * BOARD_SIZE],
+    dirty_len: &mut usize,
     grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
     x: usize,
     y: usize,
@@ -243,7 +261,7 @@ fn mark_cell_neighbors(
         } else if value != EMPTY && value != seen {
             break;
         }
-        comp[fixed][yy] |= H;
+        mark_dirty_cell(comp, dirty, dirty_len, fixed, yy, H);
     }
     seen = 0;
     for yy in (0..y).rev().take(AR as usize) {
@@ -253,7 +271,7 @@ fn mark_cell_neighbors(
         } else if value != EMPTY && value != seen {
             break;
         }
-        comp[fixed][yy] |= H;
+        mark_dirty_cell(comp, dirty, dirty_len, fixed, yy, H);
     }
 
     let fixed = y;
@@ -265,7 +283,7 @@ fn mark_cell_neighbors(
         } else if value != EMPTY && value != seen {
             break;
         }
-        comp[xx][fixed] |= V;
+        mark_dirty_cell(comp, dirty, dirty_len, xx, fixed, V);
     }
     seen = 0;
     for xx in (0..x).rev().take(AR as usize) {
@@ -275,7 +293,7 @@ fn mark_cell_neighbors(
         } else if value != EMPTY && value != seen {
             break;
         }
-        comp[xx][fixed] |= V;
+        mark_dirty_cell(comp, dirty, dirty_len, xx, fixed, V);
     }
 
     let mut seen = 0_i8;
@@ -288,7 +306,7 @@ fn mark_cell_neighbors(
         } else if value != EMPTY && value != seen {
             break;
         }
-        comp[xx as usize][yy as usize] |= DD;
+        mark_dirty_cell(comp, dirty, dirty_len, xx as usize, yy as usize, DD);
         xx -= 1;
         yy += 1;
     }
@@ -302,7 +320,7 @@ fn mark_cell_neighbors(
         } else if value != EMPTY && value != seen {
             break;
         }
-        comp[xx as usize][yy as usize] |= DD;
+        mark_dirty_cell(comp, dirty, dirty_len, xx as usize, yy as usize, DD);
         xx += 1;
         yy -= 1;
     }
@@ -318,7 +336,7 @@ fn mark_cell_neighbors(
         } else if value != EMPTY && value != seen {
             break;
         }
-        comp[xx as usize][yy as usize] |= DU;
+        mark_dirty_cell(comp, dirty, dirty_len, xx as usize, yy as usize, DU);
         xx += 1;
         yy += 1;
     }
@@ -332,7 +350,7 @@ fn mark_cell_neighbors(
         } else if value != EMPTY && value != seen {
             break;
         }
-        comp[xx as usize][yy as usize] |= DU;
+        mark_dirty_cell(comp, dirty, dirty_len, xx as usize, yy as usize, DU);
         xx -= 1;
         yy -= 1;
     }

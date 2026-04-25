@@ -11,10 +11,8 @@ use crate::board::{move_to_xy, Board};
 use crate::config::EngineConfig;
 use crate::constants::{HASHF_ALPHA, HASHF_BETA, HASHF_EXACT, INF, WIN};
 use crate::eval::{evaluate_board, value_wide_compute, EvalCaches};
-use crate::search::{
-    generate_candidates, order_candidates, order_candidates_root_classic, TTEntry,
-    TranspositionTable,
-};
+use crate::search::movegen::{generate_candidates_with_coverage, CoverageTracker};
+use crate::search::{order_candidates, order_candidates_root_classic, TTEntry, TranspositionTable};
 use crate::threats::VCFSearcher;
 use crate::types::{Move, Side};
 
@@ -159,11 +157,39 @@ impl AlphaBetaSearcher {
         caches: &mut EvalCaches,
         side: Side,
         depth: f64,
+        alpha: i32,
+        beta: i32,
+        wide: usize,
+        stats: &mut SearchStats,
+        options: SearchOptions<'_>,
+    ) -> (i32, Option<Move>) {
+        let mut coverage = CoverageTracker::from_board(board);
+        self.search_with_coverage(
+            board,
+            caches,
+            side,
+            depth,
+            alpha,
+            beta,
+            wide,
+            stats,
+            options,
+            &mut coverage,
+        )
+    }
+
+    fn search_with_coverage(
+        &mut self,
+        board: &mut Board,
+        caches: &mut EvalCaches,
+        side: Side,
+        depth: f64,
         mut alpha: i32,
         mut beta: i32,
         wide: usize,
         stats: &mut SearchStats,
         options: SearchOptions<'_>,
+        coverage: &mut CoverageTracker,
     ) -> (i32, Option<Move>) {
         let root_depth = options.root_depth.unwrap_or(depth);
         let priority_base = options.priority_base.unwrap_or(board.move_count() as i32);
@@ -226,7 +252,7 @@ impl AlphaBetaSearcher {
             return (score, None);
         }
 
-        let generated = generate_candidates(
+        let generated = generate_candidates_with_coverage(
             board,
             caches,
             side,
@@ -239,6 +265,7 @@ impl AlphaBetaSearcher {
             },
             probe.best_move,
             options.root,
+            coverage,
         );
         let mut ordered = if options.root {
             order_candidates_root_classic(board, &generated.candidates, side)
@@ -296,6 +323,7 @@ impl AlphaBetaSearcher {
             board
                 .play(candidate.move_, Some(side))
                 .expect("ordered candidate stays legal");
+            coverage.add_move(candidate.move_);
             value_wide_compute(board, caches, (mx, my));
 
             running_downf += index as i32;
@@ -338,7 +366,7 @@ impl AlphaBetaSearcher {
                     priority_base: Some(priority_base),
                 };
                 let score = if found_pv {
-                    let (narrow_score, _) = self.search(
+                    let (narrow_score, _) = self.search_with_coverage(
                         board,
                         caches,
                         -side,
@@ -348,13 +376,14 @@ impl AlphaBetaSearcher {
                         child_wide,
                         stats,
                         child_options,
+                        coverage,
                     );
                     if stats.stop {
                         break narrow_score;
                     }
                     let narrowed = -atdown - narrow_score;
                     if alpha < narrowed && narrowed < beta {
-                        let (full_score, _) = self.search(
+                        let (full_score, _) = self.search_with_coverage(
                             board,
                             caches,
                             -side,
@@ -364,6 +393,7 @@ impl AlphaBetaSearcher {
                             child_wide,
                             stats,
                             child_options,
+                            coverage,
                         );
                         if stats.stop {
                             break full_score;
@@ -373,7 +403,7 @@ impl AlphaBetaSearcher {
                         narrowed
                     }
                 } else {
-                    let (full_score, _) = self.search(
+                    let (full_score, _) = self.search_with_coverage(
                         board,
                         caches,
                         -side,
@@ -383,6 +413,7 @@ impl AlphaBetaSearcher {
                         child_wide,
                         stats,
                         child_options,
+                        coverage,
                     );
                     if stats.stop {
                         break full_score;
@@ -401,6 +432,7 @@ impl AlphaBetaSearcher {
             };
 
             board.undo().expect("ordered candidate was just played");
+            coverage.remove_move(candidate.move_);
             caches.restore_snapshot(&snapshot);
             if stats.stop {
                 break;

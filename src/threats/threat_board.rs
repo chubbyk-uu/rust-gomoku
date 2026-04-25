@@ -1,8 +1,7 @@
 //! Threat-focused board view and tactical helpers.
 
 use crate::board::{move_to_xy, xy_to_move, Board};
-use crate::constants::{BOARD_SIZE, EMPTY};
-use crate::patterns::Line;
+use crate::constants::{BLACK, BOARD_SIZE, EMPTY, WHITE};
 use crate::threats::types::{AttackMove, ThreatLevel};
 use crate::types::{Move, Side};
 
@@ -31,6 +30,294 @@ fn ga(value: i32) -> usize {
 
 fn gb(value: i32) -> usize {
     ((value >> 8) & 0xFF) as usize
+}
+
+fn comb(x: usize, y: usize) -> i32 {
+    ((x as i32) << 8) | (y as i32 - 2)
+}
+
+fn comc(x: usize, y: usize, z: usize) -> i32 {
+    comb(comb(x, y) as usize, z)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ThreatLine {
+    cells: [i32; BOARD_SIZE + 4],
+}
+
+impl ThreatLine {
+    fn from_values(values: &[i32]) -> Self {
+        let mut cells = [1024; BOARD_SIZE + 4];
+        cells[2..2 + BOARD_SIZE].copy_from_slice(values);
+        Self { cells }
+    }
+
+    fn a4(&self, point_index: usize) -> i32 {
+        let p = point_index + 2;
+        let x0 = self.cells[p];
+        if x0 == i32::from(EMPTY) {
+            return 0;
+        }
+        let xmin = usize::max(2, p.saturating_sub(3));
+        let xmax = usize::min(BOARD_SIZE - 2, p);
+        for i in xmin..=xmax {
+            if self.cells[i] + self.cells[i + 1] + self.cells[i + 2] + self.cells[i + 3] != 4 * x0 {
+                continue;
+            }
+            if self.cells[i - 1] == i32::from(EMPTY) && self.cells[i + 4] == i32::from(EMPTY) {
+                return 1;
+            }
+        }
+        0
+    }
+
+    fn a6(&self, point_index: usize) -> i32 {
+        let p = point_index + 2;
+        if self.cells[p] != i32::from(BLACK) {
+            return 0;
+        }
+        let xmin = usize::max(2, p.saturating_sub(5));
+        let xmax = usize::min(BOARD_SIZE - 4, p);
+        for i in xmin..=xmax {
+            if self.cells[i]
+                + self.cells[i + 1]
+                + self.cells[i + 2]
+                + self.cells[i + 3]
+                + self.cells[i + 4]
+                + self.cells[i + 5]
+                == 6
+            {
+                return 1;
+            }
+        }
+        0
+    }
+
+    fn a5(&self, point_index: usize) -> i32 {
+        let p = point_index + 2;
+        let x0 = self.cells[p];
+        if x0 == i32::from(EMPTY) {
+            return 0;
+        }
+        let xmin = usize::max(2, p.saturating_sub(4));
+        let xmax = usize::min(BOARD_SIZE - 3, p);
+        for i in xmin..=xmax {
+            if self.cells[i]
+                + self.cells[i + 1]
+                + self.cells[i + 2]
+                + self.cells[i + 3]
+                + self.cells[i + 4]
+                == 5 * x0
+            {
+                return 1;
+            }
+        }
+        0
+    }
+
+    fn b4(&self, point_index: usize) -> i32 {
+        let p = point_index + 2;
+        let x0 = self.cells[p];
+        if x0 == i32::from(EMPTY) {
+            return 0;
+        }
+        let xmin = usize::max(2, p.saturating_sub(4));
+        let xmax = usize::min(BOARD_SIZE - 3, p);
+        for i in xmin..=xmax {
+            if self.cells[i]
+                + self.cells[i + 1]
+                + self.cells[i + 2]
+                + self.cells[i + 3]
+                + self.cells[i + 4]
+                != 4 * x0
+            {
+                continue;
+            }
+            let mut shape = (self.cells[i] << 4)
+                + (self.cells[i + 1] << 3)
+                + (self.cells[i + 2] << 2)
+                + (self.cells[i + 3] << 1)
+                + self.cells[i + 4];
+            if x0 == i32::from(WHITE) {
+                shape = -shape;
+            }
+            if shape == 0x1E || shape == 0x0F {
+                return 1;
+            }
+            if shape == 0x1D {
+                if i <= BOARD_SIZE - 7
+                    && self.cells[i + 5] == i32::from(EMPTY)
+                    && self.cells[i + 6] == x0
+                    && self.cells[i + 7] == x0
+                    && self.cells[i + 8] == x0
+                    && p == i + 4
+                {
+                    return 2;
+                }
+                return 1;
+            }
+            if shape == 0x1B {
+                if i <= BOARD_SIZE - 6
+                    && self.cells[i + 5] == i32::from(EMPTY)
+                    && self.cells[i + 6] == x0
+                    && self.cells[i + 7] == x0
+                    && (p == i + 4 || p == i + 3)
+                {
+                    return 2;
+                }
+                return 1;
+            }
+            if shape == 0x17 {
+                if i <= BOARD_SIZE - 5
+                    && self.cells[i + 5] == i32::from(EMPTY)
+                    && self.cells[i + 6] == x0
+                    && (p == i + 4 || p == i + 3 || p == i + 2)
+                {
+                    return 2;
+                }
+                return 1;
+            }
+        }
+        0
+    }
+
+    fn b4p(&self, point_index: usize) -> i32 {
+        let p = point_index + 2;
+        let x0 = self.cells[p];
+        if x0 == i32::from(EMPTY) {
+            return 0;
+        }
+        let xmin = usize::max(2, p.saturating_sub(4));
+        let xmax = usize::min(BOARD_SIZE - 3, p);
+        for i in xmin..=xmax {
+            if self.cells[i]
+                + self.cells[i + 1]
+                + self.cells[i + 2]
+                + self.cells[i + 3]
+                + self.cells[i + 4]
+                != 4 * x0
+            {
+                continue;
+            }
+            let mut shape = (self.cells[i] << 4)
+                + (self.cells[i + 1] << 3)
+                + (self.cells[i + 2] << 2)
+                + (self.cells[i + 3] << 1)
+                + self.cells[i + 4];
+            if x0 == i32::from(WHITE) {
+                shape = -shape;
+            }
+            if shape == 0x1E {
+                if self.cells[i - 1] == i32::from(EMPTY) {
+                    return comc(1, i - 1, i + 4);
+                }
+                return comb(1, i + 4);
+            }
+            if shape == 0x1D {
+                if i <= BOARD_SIZE - 7
+                    && self.cells[i + 5] == x0
+                    && self.cells[i + 6] == x0
+                    && self.cells[i + 7] == x0
+                    && p == i + 4
+                    && self.cells[i + 3] == i32::from(EMPTY)
+                {
+                    return comc(1, i + 3, i + 5);
+                }
+                if self.cells[i + 3] == i32::from(EMPTY) {
+                    return comb(1, i + 3);
+                }
+            }
+            if shape == 0x1B {
+                if i <= BOARD_SIZE - 6
+                    && self.cells[i + 5] == i32::from(EMPTY)
+                    && self.cells[i + 6] == x0
+                    && self.cells[i + 7] == x0
+                    && (p == i + 4 || p == i + 3)
+                    && self.cells[i + 2] == i32::from(EMPTY)
+                {
+                    return comc(1, i + 2, i + 5);
+                }
+                if self.cells[i + 2] == i32::from(EMPTY) {
+                    return comb(1, i + 2);
+                }
+            }
+            if shape == 0x17 {
+                if i <= BOARD_SIZE - 5
+                    && self.cells[i + 5] == i32::from(EMPTY)
+                    && self.cells[i + 6] == x0
+                    && (p == i + 4 || p == i + 3 || p == i + 2)
+                    && self.cells[i + 1] == i32::from(EMPTY)
+                {
+                    return comc(1, i + 1, i + 5);
+                }
+                if self.cells[i + 1] == i32::from(EMPTY) {
+                    return comb(1, i + 1);
+                }
+            }
+            if shape == 0x0F {
+                if self.cells[i + 5] == i32::from(EMPTY) {
+                    return comc(1, i, i + 5);
+                }
+                return comb(1, i);
+            }
+        }
+        0
+    }
+
+    fn a3(&self, point_index: usize) -> i32 {
+        let p = point_index + 2;
+        let x0 = self.cells[p];
+        if x0 == i32::from(EMPTY) {
+            return 0;
+        }
+        let xmin = usize::max(2, p.saturating_sub(3));
+        let xmax = usize::min(BOARD_SIZE - 2, p);
+        for i in xmin..=xmax {
+            let num1 = self.cells[i] + self.cells[i + 1] + self.cells[i + 2] + self.cells[i + 3];
+            let num2 = self.cells[i] * self.cells[i + 1] * self.cells[i + 2] * self.cells[i + 3];
+            if num1 != 3 * x0 || num2 != 0 {
+                continue;
+            }
+            let mut shape = (self.cells[i] << 3)
+                + (self.cells[i + 1] << 2)
+                + (self.cells[i + 2] << 1)
+                + self.cells[i + 3];
+            if x0 == i32::from(WHITE) {
+                shape = -shape;
+            }
+            if shape == 0x0E {
+                if self.cells[i - 1] == i32::from(EMPTY)
+                    && self.cells[i - 2] != x0
+                    && self.cells[i + 4] != x0
+                {
+                    if self.cells[i - 2] == i32::from(EMPTY)
+                        && self.cells[i + 4] == i32::from(EMPTY)
+                    {
+                        return comc(1, i - 1, i + 3);
+                    }
+                    if self.cells[i - 2] == i32::from(EMPTY) {
+                        return comb(1, i - 1);
+                    }
+                    if self.cells[i + 4] == i32::from(EMPTY) {
+                        return comb(1, i + 3);
+                    }
+                }
+            }
+            if shape == 0x0D
+                && self.cells[i - 1] == i32::from(EMPTY)
+                && self.cells[i + 4] == i32::from(EMPTY)
+            {
+                return comb(1, i + 2);
+            }
+            if shape == 0x0B
+                && self.cells[i - 1] == i32::from(EMPTY)
+                && self.cells[i + 4] == i32::from(EMPTY)
+            {
+                return comb(1, i + 1);
+            }
+        }
+        0
+    }
 }
 
 fn decode_line_move(
@@ -109,27 +396,21 @@ impl ThreatBoardView {
         &self,
         x: usize,
         y: usize,
-    ) -> (Line, Line, Line, Line, usize, usize, usize, usize) {
-        fn pad(values: &[i32]) -> Vec<i32> {
-            let mut padded = vec![1024, 1024];
-            padded.extend_from_slice(values);
-            padded.extend_from_slice(&[1024, 1024]);
-            padded
-        }
-
+    ) -> (
+        ThreatLine,
+        ThreatLine,
+        ThreatLine,
+        ThreatLine,
+        usize,
+        usize,
+        usize,
+        usize,
+    ) {
         (
-            Line {
-                cells: pad(&self.x1[x]),
-            },
-            Line {
-                cells: pad(&self.x2[y]),
-            },
-            Line {
-                cells: pad(&self.x3[x + y]),
-            },
-            Line {
-                cells: pad(&self.x4[BOARD_SIZE - 1 - y + x]),
-            },
+            ThreatLine::from_values(&self.x1[x]),
+            ThreatLine::from_values(&self.x2[y]),
+            ThreatLine::from_values(&self.x3[x + y]),
+            ThreatLine::from_values(&self.x4[BOARD_SIZE - 1 - y + x]),
             y,
             x,
             y,
@@ -264,12 +545,16 @@ impl ThreatBoardView {
             if encoded <= 0 {
                 continue;
             }
-            let mut raws = vec![ga(encoded)];
-            if encoded >= 65_536 {
-                raws.push(gb(encoded));
-            }
+            let mut raws = [0_usize; 2];
+            raws[0] = ga(encoded);
+            let raw_count = if encoded >= 65_536 {
+                raws[1] = gb(encoded);
+                2
+            } else {
+                1
+            };
             let mut penalty = true;
-            for raw in raws {
+            for &raw in &raws[..raw_count] {
                 let move_ = decode_line_move(&self.board, x, y, direction, raw as i32);
                 if let Some(move_) = move_ {
                     let (rx, ry) = move_to_xy(move_).expect("decoded move stays valid");
@@ -379,19 +664,25 @@ impl ThreatBoardView {
             (l3.a3(p3), 3_usize),
             (l4.a3(p4), 4_usize),
         ];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = [false; BOARD_SIZE * BOARD_SIZE];
         let mut gains = Vec::new();
         for (encoded, direction) in encoded_lines {
             if encoded <= 0 {
                 continue;
             }
-            let mut raws = vec![ga(encoded)];
-            if encoded >= 65_536 {
-                raws.push(gb(encoded));
-            }
-            for raw in raws {
+            let mut raws = [0_usize; 2];
+            raws[0] = ga(encoded);
+            let raw_count = if encoded >= 65_536 {
+                raws[1] = gb(encoded);
+                2
+            } else {
+                1
+            };
+            for &raw in &raws[..raw_count] {
                 if let Some(move_) = decode_line_move(&self.board, x, y, direction, raw as i32) {
-                    if seen.insert(move_) {
+                    let index = move_ as usize;
+                    if !seen[index] {
+                        seen[index] = true;
                         gains.push(move_);
                     }
                 }

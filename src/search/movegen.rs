@@ -86,28 +86,117 @@ pub fn movegen_backend_name() -> &'static str {
     "python"
 }
 
-pub fn covered_moves(board: &Board) -> Vec<Move> {
+#[derive(Clone, Debug)]
+struct CoveredMovesBuf {
+    moves: [Move; BOARD_AREA],
+    len: usize,
+}
+
+impl Default for CoveredMovesBuf {
+    fn default() -> Self {
+        Self {
+            moves: [0; BOARD_AREA],
+            len: 0,
+        }
+    }
+}
+
+impl CoveredMovesBuf {
+    fn push(&mut self, move_: Move) {
+        self.moves[self.len] = move_;
+        self.len += 1;
+    }
+
+    fn as_slice(&self) -> &[Move] {
+        &self.moves[..self.len]
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CoverageTracker {
+    counts: [u16; BOARD_AREA],
+}
+
+impl CoverageTracker {
+    pub(crate) fn from_board(board: &Board) -> Self {
+        let mut tracker = Self {
+            counts: [0; BOARD_AREA],
+        };
+        for played in board.move_history() {
+            tracker.add_move(played.move_);
+        }
+        tracker
+    }
+
+    pub(crate) fn add_move(&mut self, move_: Move) {
+        for &candidate in COVER_NEIGHBORS[move_ as usize].iter() {
+            if candidate == COVER_SENTINEL {
+                break;
+            }
+            self.counts[candidate as usize] += 1;
+        }
+    }
+
+    pub(crate) fn remove_move(&mut self, move_: Move) {
+        for &candidate in COVER_NEIGHBORS[move_ as usize].iter() {
+            if candidate == COVER_SENTINEL {
+                break;
+            }
+            let count = &mut self.counts[candidate as usize];
+            debug_assert!(*count > 0, "coverage remove must match add");
+            *count -= 1;
+        }
+    }
+
+    fn collect_moves(&self, board: &Board, out: &mut CoveredMovesBuf) {
+        out.len = 0;
+        if board.move_count() == 0 {
+            out.push(xy_to_move(BOARD_SIZE / 2, BOARD_SIZE / 2).expect("center move is valid"));
+            return;
+        }
+        let grid = board.grid_rows();
+        for move_index in 0..BOARD_AREA {
+            if self.counts[move_index] == 0 {
+                continue;
+            }
+            if grid[move_index / BOARD_SIZE][move_index % BOARD_SIZE] == EMPTY {
+                out.push(move_index as Move);
+            }
+        }
+    }
+}
+
+fn collect_covered_moves(board: &Board, out: &mut CoveredMovesBuf) {
+    out.len = 0;
     if board.move_count() == 0 {
-        return vec![xy_to_move(BOARD_SIZE / 2, BOARD_SIZE / 2).expect("center move is valid")];
+        out.push(xy_to_move(BOARD_SIZE / 2, BOARD_SIZE / 2).expect("center move is valid"));
+        return;
     }
 
     let mut seen = [false; BOARD_AREA];
+    let grid = board.grid_rows();
     for played in board.move_history() {
         for &candidate in COVER_NEIGHBORS[played.move_ as usize].iter() {
             if candidate == COVER_SENTINEL {
                 break;
             }
-            if !seen[candidate as usize] {
-                let (x, y) = move_to_xy(candidate).expect("covered neighbor move is in range");
-                if board.grid_rows()[y][x] == EMPTY {
-                    seen[candidate as usize] = true;
-                }
+            let index = candidate as usize;
+            if !seen[index] && grid[index / BOARD_SIZE][index % BOARD_SIZE] == EMPTY {
+                seen[index] = true;
             }
         }
     }
-    (0..BOARD_AREA as Move)
-        .filter(|&m| seen[m as usize])
-        .collect()
+    for (move_index, is_seen) in seen.into_iter().enumerate() {
+        if is_seen {
+            out.push(move_index as Move);
+        }
+    }
+}
+
+pub fn covered_moves(board: &Board) -> Vec<Move> {
+    let mut moves = CoveredMovesBuf::default();
+    collect_covered_moves(board, &mut moves);
+    moves.as_slice().to_vec()
 }
 
 pub fn apply_hostile_three_extension(
@@ -173,7 +262,58 @@ pub fn generate_candidates(
     preferred_move: Option<Move>,
     preserve_scan_order: bool,
 ) -> CandidateGenerationResult {
-    let moves = covered_moves(board);
+    let mut moves_buf = CoveredMovesBuf::default();
+    collect_covered_moves(board, &mut moves_buf);
+    generate_candidates_from_moves(
+        board,
+        caches,
+        side,
+        config,
+        wide,
+        root_allowed_moves,
+        preferred_move,
+        preserve_scan_order,
+        moves_buf.as_slice(),
+    )
+}
+
+pub(crate) fn generate_candidates_with_coverage(
+    board: &Board,
+    caches: &EvalCaches,
+    side: i8,
+    config: &EngineConfig,
+    wide: Option<usize>,
+    root_allowed_moves: Option<&HashSet<Move>>,
+    preferred_move: Option<Move>,
+    preserve_scan_order: bool,
+    coverage: &CoverageTracker,
+) -> CandidateGenerationResult {
+    let mut moves_buf = CoveredMovesBuf::default();
+    coverage.collect_moves(board, &mut moves_buf);
+    generate_candidates_from_moves(
+        board,
+        caches,
+        side,
+        config,
+        wide,
+        root_allowed_moves,
+        preferred_move,
+        preserve_scan_order,
+        moves_buf.as_slice(),
+    )
+}
+
+fn generate_candidates_from_moves(
+    board: &Board,
+    caches: &EvalCaches,
+    side: i8,
+    config: &EngineConfig,
+    wide: Option<usize>,
+    root_allowed_moves: Option<&HashSet<Move>>,
+    preferred_move: Option<Move>,
+    preserve_scan_order: bool,
+    moves: &[Move],
+) -> CandidateGenerationResult {
     let _wide = wide.unwrap_or(config.root_search.wide as usize);
 
     let mut vbw_map = [0.0_f64; BOARD_AREA];
@@ -184,7 +324,7 @@ pub fn generate_candidates(
     let mut sglflag = 0_i32;
     let mut hsflag = None::<Move>;
 
-    for &move_ in &moves {
+    for &move_ in moves {
         let (x, y) = move_to_xy(move_).expect("covered move is valid");
         let vbw = move_value(caches, x, y, side, config).trunc();
         let att1 = attack_level(caches, x, y, side);
@@ -215,7 +355,7 @@ pub fn generate_candidates(
     }
 
     let mut candidates = Vec::with_capacity(moves.len());
-    for &move_ in &moves {
+    for &move_ in moves {
         if let Some(allowed) = root_allowed_moves {
             if !allowed.contains(&move_) {
                 continue;
@@ -285,6 +425,34 @@ pub fn generate_candidates(
         single_forcing: false,
         hostile_threat: hsflag.is_some(),
         win_priority: winpri,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coverage_tracker_matches_covered_moves_after_play_and_undo() {
+        let mut board = Board::new();
+        let mut tracker = CoverageTracker::from_board(&board);
+        let mut buf = CoveredMovesBuf::default();
+        tracker.collect_moves(&board, &mut buf);
+        assert_eq!(buf.as_slice(), covered_moves(&board).as_slice());
+
+        for (x, y) in [(7, 7), (8, 7), (7, 8), (8, 8), (6, 7)] {
+            let move_ = xy_to_move(x, y).unwrap();
+            board.play(move_, None).unwrap();
+            tracker.add_move(move_);
+            tracker.collect_moves(&board, &mut buf);
+            assert_eq!(buf.as_slice(), covered_moves(&board).as_slice());
+        }
+
+        while let Some(played) = board.undo().ok() {
+            tracker.remove_move(played.move_);
+            tracker.collect_moves(&board, &mut buf);
+            assert_eq!(buf.as_slice(), covered_moves(&board).as_slice());
+        }
     }
 }
 

@@ -266,6 +266,18 @@ Gomocup CLI smoke：
 printf 'START 15\nBEGIN\nEND\n' | cargo run --quiet --bin gomocup_engine -- --depth 2 --width 8
 ```
 
+本地 Web GUI：
+
+```bash
+cargo run --release --bin gomoku_gui
+```
+
+启动后打开 `http://127.0.0.1:7878`。GUI 支持选择执黑/执白、重新开局、悔棋、异步引擎思考、棋盘轮询刷新和参数/状态信息面板。默认使用当前配置 `depth=8,width=40,root_vct_depth=8`；如果需要更快的交互 smoke，可用：
+
+```bash
+cargo run --release --bin gomoku_gui -- --depth 6 --width 20
+```
+
 Lazy SMP CLI smoke：
 
 ```bash

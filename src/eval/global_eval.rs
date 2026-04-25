@@ -2,13 +2,22 @@
 
 use crate::board::Board;
 use crate::config::EngineConfig;
-use crate::constants::{BLACK, LAST5, NEXT4, NEXT43, NEXT5, WHITE, WIN};
+use crate::constants::{BLACK, BOARD_SIZE, EMPTY, LAST5, NEXT4, NEXT43, NEXT5, WHITE, WIN};
 use crate::eval::caches::EvalCaches;
 use crate::eval::local::value_wide_compute;
 use crate::patterns::line::Line;
 use crate::patterns::{DIAGONAL_DOWN, DIAGONAL_UP, HORIZONTAL, VERTICAL};
 
-const DIR_MAP: [usize; 9] = [3, 1, 2, 0, 0, 0, 2, 1, 3];
+const NEIGHBOR_CHECKS: [(isize, isize, usize); 8] = [
+    (-1, -1, 3),
+    (-1, 0, 1),
+    (-1, 1, 2),
+    (0, -1, 0),
+    (0, 1, 0),
+    (1, -1, 2),
+    (1, 0, 1),
+    (1, 1, 3),
+];
 
 pub fn global_eval_backend_name() -> &'static str {
     "python"
@@ -50,6 +59,7 @@ pub fn evaluate_board_main(
 ) -> (f64, i32) {
     let player = if side == BLACK { 0 } else { 1 };
     let opponent = 1 - player;
+    let opponent_side = -side;
     let grid = board.grid_rows();
     let shape_cache_player = &caches.shape_cache[player];
     let shape_cache_opponent = &caches.shape_cache[opponent];
@@ -68,68 +78,55 @@ pub fn evaluate_board_main(
         let opponent_value_col = &opponent_values[x];
         for y in 0..size {
             let stone = grid[y][x];
+            if stone == EMPTY {
+                offensive += last_eval[player_value_col[y] as usize];
+                defensive += next_eval[opponent_value_col[y] as usize];
+                continue;
+            }
             if stone == side {
-                let mut cc = 1_i32;
-                for k in 0..9 {
-                    if k == 4 {
-                        continue;
-                    }
-                    let xx = x as isize - 1 + (k / 3) as isize;
-                    let yy = y as isize - 1 + (k % 3) as isize;
-                    if xx < 0
-                        || yy < 0
-                        || xx >= size as isize
-                        || yy >= size as isize
-                        || grid[yy as usize][xx as usize] != 0
-                    {
-                        cc += 1;
-                    } else if ((shape_cache_player[xx as usize][yy as usize][DIR_MAP[k]] >> 16)
-                        & 15)
-                        == 0
-                    {
-                        cc += 1;
-                    }
-                }
+                let cc = blocked_neighbor_count(grid, shape_cache_player, x, y, size);
                 if cc <= 1 {
                     dgn -= 5;
                 } else if cc - 1 >= 5 {
                     dgn -= cc - 1 - 3;
                 }
-            } else if stone == -side {
-                let mut cc = 1_i32;
-                for k in 0..9 {
-                    if k == 4 {
-                        continue;
-                    }
-                    let xx = x as isize - 1 + (k / 3) as isize;
-                    let yy = y as isize - 1 + (k % 3) as isize;
-                    if xx < 0
-                        || yy < 0
-                        || xx >= size as isize
-                        || yy >= size as isize
-                        || grid[yy as usize][xx as usize] != 0
-                    {
-                        cc += 1;
-                    } else if ((shape_cache_opponent[xx as usize][yy as usize][DIR_MAP[k]] >> 16)
-                        & 15)
-                        == 0
-                    {
-                        cc += 1;
-                    }
-                }
+            } else if stone == opponent_side {
+                let cc = blocked_neighbor_count(grid, shape_cache_opponent, x, y, size);
                 if cc <= 1 {
                     dgn += 5;
                 } else if cc - 1 >= 5 {
                     dgn += cc - 1 - 3;
                 }
-            } else {
-                offensive += last_eval[player_value_col[y] as usize];
-                defensive += next_eval[opponent_value_col[y] as usize];
             }
         }
     }
 
     (offensive - defensive, dgn)
+}
+
+#[inline(always)]
+fn blocked_neighbor_count(
+    grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
+    shape_cache: &[[[i32; 4]; BOARD_SIZE]; BOARD_SIZE],
+    x: usize,
+    y: usize,
+    size: usize,
+) -> i32 {
+    let mut cc = 1_i32;
+    for &(dx, dy, direction) in &NEIGHBOR_CHECKS {
+        let xx = x as isize + dx;
+        let yy = y as isize + dy;
+        if xx < 0 || yy < 0 || xx >= size as isize || yy >= size as isize {
+            cc += 1;
+            continue;
+        }
+        let nx = xx as usize;
+        let ny = yy as usize;
+        if grid[ny][nx] != EMPTY || ((shape_cache[nx][ny][direction] >> 16) & 15) == 0 {
+            cc += 1;
+        }
+    }
+    cc
 }
 
 pub fn find_last5_target(
