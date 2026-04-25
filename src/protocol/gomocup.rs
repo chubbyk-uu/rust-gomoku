@@ -264,6 +264,30 @@ impl GomocupProtocol {
                     self.searcher = None;
                 }
             }
+            "root_vcf_depth" => {
+                if let Some(parsed) = parse_one::<i32>(value) {
+                    self.config.runtime.root_vcf_depth = parsed.max(0);
+                    self.searcher = None;
+                }
+            }
+            "opponent_vcf_depth" => {
+                if let Some(parsed) = parse_one::<i32>(value) {
+                    self.config.runtime.opponent_vcf_depth = parsed.max(0);
+                    self.searcher = None;
+                }
+            }
+            "vct_verify_opponent_vcf_depth" => {
+                if let Some(parsed) = parse_one::<i32>(value) {
+                    self.config.runtime.vct_verify_opponent_vcf_depth = parsed.max(0);
+                    self.searcher = None;
+                }
+            }
+            "nonroot_vcf" => {
+                if let Some(parsed) = parse_one::<i32>(value) {
+                    self.config.runtime.nonroot_vcf = parsed != 0;
+                    self.searcher = None;
+                }
+            }
             "compute_vct" => {
                 if let Some(parsed) = parse_one::<i32>(value) {
                     self.config.runtime.compute_vct = parsed != 0;
@@ -294,12 +318,18 @@ impl GomocupProtocol {
                     self.searcher = None;
                 }
             }
+            "dynamic_board_margin" => {
+                if let Some(parsed) = parse_one::<i32>(value) {
+                    self.config.runtime.dynamic_board_margin = parsed.max(0);
+                    self.searcher = None;
+                }
+            }
             _ => {}
         }
     }
 
-    fn search_move(&mut self) -> String {
-        let limits = if let Some(default_limits) = self.default_limits {
+    pub fn current_search_limits(&self) -> SearchLimits {
+        if let Some(default_limits) = self.default_limits {
             SearchLimits {
                 max_depth: default_limits.max_depth,
                 root_width: default_limits.root_width,
@@ -310,14 +340,23 @@ impl GomocupProtocol {
                     .or(default_limits.time_limit_ms),
             }
         } else {
+            let has_time_control = self.timeout_turn_ms.is_some() || self.time_left_ms.is_some();
+            let defaults = if has_time_control {
+                SearchLimits::timed_from_config(&self.config)
+            } else {
+                SearchLimits::fixed_from_config(&self.config)
+            };
             SearchLimits {
-                max_depth: self.config.root_search.depth,
-                root_width: self.config.root_search.wide as usize,
+                max_depth: defaults.max_depth,
+                root_width: defaults.root_width,
                 node_limit: self.node_limit,
                 time_limit_ms: self.timeout_turn_ms.or(self.time_left_ms),
             }
-        };
+        }
+    }
 
+    fn search_move(&mut self) -> String {
+        let limits = self.current_search_limits();
         let mut searcher = self
             .searcher
             .take()

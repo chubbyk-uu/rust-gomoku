@@ -25,12 +25,20 @@ def apply_runtime(config, runtime: dict):
     values = {}
     if "compute_vcf" in runtime:
         values["compute_vcf"] = bool(runtime["compute_vcf"])
+    if "nonroot_vcf" in runtime:
+        values["nonroot_vcf"] = bool(runtime["nonroot_vcf"])
     if "compute_vct" in runtime:
         values["compute_vct"] = bool(runtime["compute_vct"])
     if "root_vct_depth" in runtime:
         values["root_vct_depth"] = max(0, int(runtime["root_vct_depth"]))
     if "static_board" in runtime:
         values["static_board"] = bool(runtime["static_board"])
+    if "dynamic_board_margin" in runtime:
+        values["dynamic_board_margin"] = max(0, int(runtime["dynamic_board_margin"]))
+    # Newer Rust-only runtime knobs may not exist in the current reference
+    # dataclass. Ignore unsupported keys here; cases that need strict reference
+    # parity should only use knobs available on both sides.
+    values = {key: value for key, value in values.items() if hasattr(config.runtime, key)}
     if not values:
         return config
     return replace(config, runtime=replace(config.runtime, **values))

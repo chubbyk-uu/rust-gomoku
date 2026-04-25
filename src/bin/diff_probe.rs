@@ -30,9 +30,14 @@ struct CaseLimits {
 #[derive(Debug, Default, Deserialize)]
 struct CaseRuntime {
     compute_vcf: Option<bool>,
+    root_vcf_depth: Option<i32>,
+    opponent_vcf_depth: Option<i32>,
+    vct_verify_opponent_vcf_depth: Option<i32>,
+    nonroot_vcf: Option<bool>,
     compute_vct: Option<bool>,
     root_vct_depth: Option<i32>,
     static_board: Option<bool>,
+    dynamic_board_margin: Option<i32>,
 }
 
 fn default_first_side() -> i8 {
@@ -140,6 +145,18 @@ fn run_case(case: DiffCase, lazy_smp: bool, lazy_smp_workers: usize) -> ProbeOut
     if let Some(v) = case.runtime.compute_vcf {
         config.runtime.compute_vcf = v;
     }
+    if let Some(v) = case.runtime.root_vcf_depth {
+        config.runtime.root_vcf_depth = v.max(0);
+    }
+    if let Some(v) = case.runtime.opponent_vcf_depth {
+        config.runtime.opponent_vcf_depth = v.max(0);
+    }
+    if let Some(v) = case.runtime.vct_verify_opponent_vcf_depth {
+        config.runtime.vct_verify_opponent_vcf_depth = v.max(0);
+    }
+    if let Some(v) = case.runtime.nonroot_vcf {
+        config.runtime.nonroot_vcf = v;
+    }
     if let Some(v) = case.runtime.compute_vct {
         config.runtime.compute_vct = v;
     }
@@ -149,15 +166,16 @@ fn run_case(case: DiffCase, lazy_smp: bool, lazy_smp_workers: usize) -> ProbeOut
     if let Some(v) = case.runtime.static_board {
         config.runtime.static_board = v;
     }
+    if let Some(v) = case.runtime.dynamic_board_margin {
+        config.runtime.dynamic_board_margin = v.max(0);
+    }
     config.runtime.lazy_smp = lazy_smp;
     config.runtime.lazy_smp_workers = lazy_smp_workers;
 
+    let default_limits = SearchLimits::fixed_from_config(&config);
     let limits = SearchLimits {
-        max_depth: case.limits.max_depth.unwrap_or(config.root_search.depth),
-        root_width: case
-            .limits
-            .root_width
-            .unwrap_or(config.root_search.wide as usize),
+        max_depth: case.limits.max_depth.unwrap_or(default_limits.max_depth),
+        root_width: case.limits.root_width.unwrap_or(default_limits.root_width),
         node_limit: case.limits.node_limit,
         time_limit_ms: case.limits.time_limit_ms,
     };

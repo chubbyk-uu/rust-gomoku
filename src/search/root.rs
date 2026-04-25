@@ -34,6 +34,26 @@ pub struct SearchLimits {
     pub time_limit_ms: Option<f64>,
 }
 
+impl SearchLimits {
+    pub fn fixed_from_config(config: &EngineConfig) -> Self {
+        Self {
+            max_depth: config.root_search.depth,
+            root_width: config.root_search.wide as usize,
+            node_limit: None,
+            time_limit_ms: None,
+        }
+    }
+
+    pub fn timed_from_config(config: &EngineConfig) -> Self {
+        Self {
+            max_depth: config.root_search.timed_max_depth,
+            root_width: config.root_search.timed_max_wide as usize,
+            node_limit: None,
+            time_limit_ms: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchResult {
     pub move_: Move,
@@ -283,7 +303,16 @@ impl RootSearcher {
         if !forcing_threat_moves(&trial, -side).is_empty() {
             return (false, Some("opponent_forcing"));
         }
-        if self.config.runtime.compute_vcf && self.vcf.search(&trial, -side, 4).found {
+        if self.config.runtime.compute_vcf
+            && self
+                .vcf
+                .search(
+                    &trial,
+                    -side,
+                    self.config.runtime.vct_verify_opponent_vcf_depth,
+                )
+                .found
+        {
             return (false, Some("opponent_vcf"));
         }
         (true, None)
@@ -359,7 +388,9 @@ impl RootSearcher {
         if !self.config.runtime.compute_vcf {
             return allowed_moves;
         }
-        let opponent_vcf = self.vcf.search(board, -side, 7);
+        let opponent_vcf = self
+            .vcf
+            .search(board, -side, self.config.runtime.opponent_vcf_depth);
         if !opponent_vcf.found {
             return allowed_moves;
         }
@@ -384,7 +415,11 @@ impl RootSearcher {
             trial
                 .play(move_, Some(side))
                 .expect("candidate move stays legal on trial board");
-            if !self.vcf.search(&trial, -side, 7).found {
+            if !self
+                .vcf
+                .search(&trial, -side, self.config.runtime.opponent_vcf_depth)
+                .found
+            {
                 filtered.insert(move_);
             }
         }
@@ -464,12 +499,7 @@ impl RootSearcher {
     }
 
     pub fn search(&mut self, board: &mut Board, limits: Option<SearchLimits>) -> SearchResult {
-        let limits = limits.unwrap_or(SearchLimits {
-            max_depth: self.config.root_search.depth,
-            root_width: self.config.root_search.wide as usize,
-            node_limit: None,
-            time_limit_ms: None,
-        });
+        let limits = limits.unwrap_or_else(|| SearchLimits::fixed_from_config(&self.config));
 
         if board.move_count() == 0 {
             self.last_trace = Some(RootTrace::default());
@@ -489,7 +519,9 @@ impl RootSearcher {
 
         if self.config.runtime.compute_vcf {
             trace.used_vcf = true;
-            let vcf_result = self.vcf.search(board, side, 8);
+            let vcf_result = self
+                .vcf
+                .search(board, side, self.config.runtime.root_vcf_depth);
             if vcf_result.found {
                 trace.vcf_found = true;
                 trace.tactical_path = "vcf";

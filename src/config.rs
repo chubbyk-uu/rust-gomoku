@@ -4,6 +4,18 @@ use std::sync::LazyLock;
 
 use crate::constants::DSHAPE_SIZE;
 
+pub const DEFAULT_SEARCH_DEPTH: i32 = 8;
+pub const DEFAULT_SEARCH_WIDTH: i32 = 40;
+pub const DEFAULT_TIMED_SEARCH_MAX_DEPTH: i32 = 25;
+pub const DEFAULT_TIMED_SEARCH_MAX_WIDTH: i32 = DEFAULT_SEARCH_WIDTH;
+pub const DEFAULT_CHILD_WIDTH_RATIO_NUM: i32 = 1;
+pub const DEFAULT_CHILD_WIDTH_RATIO_DEN: i32 = 1;
+pub const DEFAULT_DYNAMIC_BOARD_MARGIN: i32 = 4;
+pub const DEFAULT_ROOT_VCF_DEPTH: i32 = 8;
+pub const DEFAULT_OPPONENT_VCF_DEPTH: i32 = 7;
+pub const DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH: i32 = 4;
+pub const DEFAULT_ROOT_VCT_DEPTH: i32 = 8;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct EvalBucketTables {
     pub last_eval: Vec<f64>,
@@ -26,6 +38,9 @@ pub struct SearchParameters {
 pub struct RuntimeOptions {
     pub read_config_each_move: bool,
     pub compute_vcf: bool,
+    pub root_vcf_depth: i32,
+    pub opponent_vcf_depth: i32,
+    pub vct_verify_opponent_vcf_depth: i32,
     pub nonroot_vcf: bool,
     pub static_board: bool,
     pub dynamic_board_margin: i32,
@@ -41,6 +56,8 @@ pub struct RuntimeOptions {
 pub struct RootSearchDefaults {
     pub depth: i32,
     pub wide: i32,
+    pub timed_max_depth: i32,
+    pub timed_max_wide: i32,
     pub ratio_num: i32,
     pub ratio_den: i32,
 }
@@ -105,11 +122,14 @@ fn default_runtime_options(para: &[f64]) -> RuntimeOptions {
     RuntimeOptions {
         read_config_each_move: para[offset + 5] != 0.0,
         compute_vcf: true,
+        root_vcf_depth: DEFAULT_ROOT_VCF_DEPTH,
+        opponent_vcf_depth: DEFAULT_OPPONENT_VCF_DEPTH,
+        vct_verify_opponent_vcf_depth: DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
         nonroot_vcf: false,
         static_board: true,
-        dynamic_board_margin: 4,
+        dynamic_board_margin: DEFAULT_DYNAMIC_BOARD_MARGIN,
         compute_vct: true,
-        root_vct_depth: 8,
+        root_vct_depth: DEFAULT_ROOT_VCT_DEPTH,
         lazy_smp: false,
         lazy_smp_workers: 0,
     }
@@ -117,10 +137,12 @@ fn default_runtime_options(para: &[f64]) -> RuntimeOptions {
 
 fn default_root_search() -> RootSearchDefaults {
     RootSearchDefaults {
-        depth: 25,
-        wide: 60,
-        ratio_num: 1,
-        ratio_den: 1,
+        depth: DEFAULT_SEARCH_DEPTH,
+        wide: DEFAULT_SEARCH_WIDTH,
+        timed_max_depth: DEFAULT_TIMED_SEARCH_MAX_DEPTH,
+        timed_max_wide: DEFAULT_TIMED_SEARCH_MAX_WIDTH,
+        ratio_num: DEFAULT_CHILD_WIDTH_RATIO_NUM,
+        ratio_den: DEFAULT_CHILD_WIDTH_RATIO_DEN,
     }
 }
 

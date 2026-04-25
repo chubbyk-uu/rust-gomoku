@@ -76,8 +76,12 @@
 - VCF 的 begin depth 映射、序列 key、forcing threat 搜索
 - VCT 的 trigger、OR/AND 搜索、memo 清理、root 接入、验证与 `vct_ms` trace
 - Gomocup `START / RECTSTART / RESTART / BEGIN / TURN / BOARD / DONE / TAKEBACK / INFO / ABOUT / END`
-- 命令行入口默认 `--depth 6 --width 20`，对齐 reference GUI / Gomocup engine 正式运行参数
-- Rust 默认开启 VCT，`root_vct_depth = 8`；这是基于 Rust 性能的有意偏离，reference Python 主线因性能约束使用较低默认值
+- 命令行入口默认固定搜索为 `depth=8, width=40`；带时间控制且未显式传 CLI 深宽时，`SearchLimits` 最大上限为 `depth=25, width=40`
+- 固定默认搜索限制由 `SearchLimits::fixed_from_config` 生成，时间控制上限由 `SearchLimits::timed_from_config` 生成，源头都在 `src/config.rs`
+- Rust 默认开启 VCF/VCT：`root_vcf_depth = 8`、`opponent_vcf_depth = 7`、`vct_verify_opponent_vcf_depth = 4`、`root_vct_depth = 8`
+- 运行时开关集中在 `RuntimeOptions`：`compute_vcf`、`nonroot_vcf`、`compute_vct`、`static_board`、`lazy_smp` 等都从 config 读取，协议层只负责更新 config
+- 动态棋盘搜索窗口默认由已落子包络线外扩 `dynamic_board_margin = 4` 后再补成正方形；当前 `static_board = true`，默认不启用动态窗口，可通过 Gomocup `INFO static 0` / `INFO dynamic_board_margin N` 调整
+- 正常候选生成不依赖动态窗口；`covered_moves` 使用 reference 对齐的固定 32 偏移覆盖表，包含距离 1、距离 2 的邻域和距离 3 的八方向点
 - Gomocup `BOARD` 模式对齐 reference 的颜色重建语义：`sfn == opn - 1` 时只调整输入列表顺序，正式重放仍从黑棋开始
 - Rust Gomocup engine 在 `d6/w20`、zhou `d5`、9 开局黑白双边共 18 线中，与 reference Gomocup engine 的完整走法序列一致
 - `diff_probe` 使用 `serde/serde_json` 读取固定局面 JSON，输出 Rust 侧 board/root/trace 结果
@@ -118,7 +122,7 @@
 - 默认必须保留稳定的单线程兼容模式，且 `node_limit / time_limit` 下当前不启用 Lazy SMP
 - 已放弃 root-split full-window 方案：它会丢掉串行 PV 搜索的 alpha/null-window 剪枝，实测容易增大搜索量并降低棋力
 - Lazy SMP 当前仅作为 experimental 开关保留，不作为 reference 等价路径，也不建议默认用于对战；开启后不强制 `nodes` 或 best move 与串行严格一致
-- 当前实测显示朴素 Lazy SMP helper 在 `d6/w20` 和 `d8/w30` 下没有稳定提速，主要价值是保留并行架构边界和验证工具
+- 当前实测显示朴素 Lazy SMP helper 在 `d6/w20` 和早期 `d8/w30` smoke 下没有稳定提速，主要价值是保留并行架构边界和验证工具
 
 ## 目录说明
 
@@ -254,7 +258,7 @@ cargo test
 python3 scripts/run_diff.py --profile all --jobs 10
 ```
 
-当前全量测试通过规模：177 个 Rust 测试通过。
+当前全量测试通过规模：187 个 Rust 测试通过。
 
 Gomocup CLI smoke：
 
@@ -279,7 +283,7 @@ Lazy SMP 当前结论：
 - 这是 experimental 功能，默认关闭。
 - 它保留了并行搜索的工程边界：线程本地 `Board / EvalCaches / AlphaBetaSearcher`、共享无锁 TT、stop signal、CLI / protocol 开关和探针参数。
 - 朴素 helper 填表策略当前没有稳定性能收益，不建议作为默认对战模式。
-- `d8/w30`、同开局 `(7,7)`、Rust 执黑对 zhou 的单局 smoke 中，Lazy2 与串行棋谱一致，但 Rust 平均耗时略慢。
+- 早期 `d8/w30`、同开局 `(7,7)`、Rust 执黑对 zhou 的单局 smoke 中，Lazy2 与串行棋谱一致，但 Rust 平均耗时略慢。
 - 更早的 Lazy8 / 多开局 smoke 出现过走法漂移，说明共享 TT 会改变主线程 move ordering；这是 experimental 模式允许的行为，但不能用于 reference 等价验证。
 - 后续如果继续推进并行，应先重设计 helper 写入策略或使用更保守的后台分析模式，而不是继续增加 worker 数。
 
@@ -297,8 +301,8 @@ Lazy SMP 当前结论：
 
 Gomocup / zhou 对战验证：
 
-- 参数：Rust/reference `depth=6, width=20`，zhou `depth=5`
-- 说明：这轮历史对战是在当时显式对齐 reference runtime 的条件下完成；现在 Rust 默认 `root_vct_depth` 已提升到 8，后续对战验证应同时记录 VCT depth
+- 参数：Rust/reference `depth=6, width=20, root_vct_depth=4`，zhou `depth=5`
+- 说明：这是显式对齐 reference runtime 的历史验证；当前 Rust 默认运行参数已提升到 `depth=8, width=40, root_vct_depth=8`，后续对战验证必须记录 depth/width/VCF/VCT depth
 - 开局：reference 的 9 个固定开局
 - 颜色：黑白双边，共 18 线
 - 结果：Rust 18 胜，reference 18 胜，18/18 完整走法序列一致
@@ -349,14 +353,14 @@ python3 scripts/run_diff.py --profile slow --jobs 10
 需要明确：
 
 - 当前已有基础 Gomocup 入口，并通过一轮 zhou 9 开局黑白双边对战对齐验证
-- 当前重点仍然是“语义迁移”，不是性能冲刺
-- 某些实现虽然已经有增量路径，但整体仍未进入最终优化阶段
-- Rust 默认 `root_vct_depth = 8` 是明确的性能型偏离；需要与 reference 做严格差分时，应在 case 或协议 `INFO root_vct_depth` 中显式设成 reference 对应值
+- 当前重点仍然是“语义迁移 + 可验证优化”，不是重新设计搜索算法
+- 串行主线已经做过一轮低风险热点优化，但更激进的候选范围、VCT 验证深度或并行策略仍需单独对战验证
+- Rust 默认固定搜索 `depth=8, width=40, root_vct_depth=8` 是明确的运行参数偏离；带时间控制时搜索上限为 `depth=25, width=40`，实际完成深度由时间提前停止决定；需要与 reference 做严格差分时，应在 case 或协议 `INFO root_vct_depth 4` 等参数中显式设成 reference 对应值
 - 已有最小 reference / Rust 差分脚手架，但覆盖范围还只到 root 搜索层面
 - `RootTrace.vct_ms` 是耗时调试字段，不应纳入确定性回归断言
 - `root.nodes` 只应在单线程兼容模式下强断言；并行或优化模式应改为比较 move/score/depth/trace 等语义字段
 - root tactical fast path 当前仍应保持 VCF 优先于 VCT，VCT 只在 trigger 命中后运行
-- 多线程只完成架构预留，没有实现执行路径
+- Lazy SMP 已有 experimental 执行路径，但默认关闭；当前实测没有稳定提速，且共享 TT 可能改变 move ordering，因此不作为 reference 等价路径
 
 ## 下一步
 
@@ -391,15 +395,15 @@ python3 scripts/run_diff.py --profile slow --jobs 10
 4. 对发现的差异明确记录：Rust 对齐 Python fallback、Cython 路径，还是 reference 当前测试主线。
 5. 耗时字段始终不作为强断言。
 
-### 5. 并行架构第一版
+### 5. 并行与性能后续
 
-1. 保留单线程兼容路径作为默认 baseline。
-2. 新增 root candidate task 抽象，不改变候选顺序和最终归并规则。
-3. 每个 worker 使用线程本地 `Board`、`EvalCaches`、`AlphaBetaSearcher`、`VCFSearcher`、`VCTSearcher`。
-4. 第一版不共享 TT，只做确定性 root-split。
-5. 加重复运行稳定性测试：同一局面、同一深度、多次运行返回同一 move、score、depth。
-6. 后续再评估共享 TT、取消 token、统计聚合和时间控制。
+1. 保留单线程兼容路径作为默认 baseline，继续用 `nodes` 强断言守住 reference 对齐。
+2. Lazy SMP 维持 experimental：只在无 `node_limit / time_limit` 时可启用，结果不要求与串行逐节点一致。
+3. 先分析 helper TT 写入策略和主线程 TT 命中收益，再决定是否继续推进 Lazy SMP；不要简单增加 worker 数。
+4. 已放弃 root-split full-window 方案，除非重新设计共享 alpha / PV 顺序，否则不再作为主方案。
+5. 若尝试新的并行策略，必须补重复运行稳定性测试和 zhou 18 线对战对比。
+6. 更现实的短期优化方向是继续做串行热点 profiling、差分夹具扩展和局部数据结构优化。
 
 ## 一句话总结
 
-当前仓库已经完成了 **基础状态机 + 配置 + pattern + eval + 单线程 classic 搜索 + VCF/VCT 战术路径 + Gomocup 协议入口** 的 Rust 化，并建立了对应回归测试、一轮 zhou 对战对齐验证，以及 root 搜索层面的 reference / Rust 差分脚手架；下一阶段重点是 **扩展差分覆盖和落地确定性并行架构**。
+当前仓库已经完成了 **基础状态机 + 配置 + pattern + eval + 单线程 classic 搜索 + VCF/VCT 战术路径 + Gomocup 协议入口** 的 Rust 化，并建立了对应回归测试、一轮 zhou 对战对齐验证、root 搜索层面的 reference / Rust 差分脚手架，以及默认关闭的 Lazy SMP 实验路径；下一阶段重点是 **扩展差分覆盖、继续串行热点优化，并谨慎评估并行策略是否值得进入主线**。

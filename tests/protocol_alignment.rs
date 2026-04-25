@@ -1,4 +1,9 @@
-use rust_gomoku::{GomocupProtocol, SearchLimits};
+use rust_gomoku::{
+    GomocupProtocol, SearchLimits, DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_OPPONENT_VCF_DEPTH,
+    DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
+    DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
+    DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
+};
 
 fn proto() -> GomocupProtocol {
     GomocupProtocol::new(
@@ -176,10 +181,44 @@ fn protocol_info_static_updates_runtime() {
 }
 
 #[test]
+fn protocol_info_dynamic_board_margin_updates_runtime() {
+    let mut proto = proto();
+    proto.handle_line("INFO dynamic_board_margin 2");
+    assert_eq!(proto.config.runtime.dynamic_board_margin, 2);
+}
+
+#[test]
+fn protocol_info_dynamic_board_margin_negative_clamps_to_zero() {
+    let mut proto = proto();
+    proto.handle_line("INFO dynamic_board_margin -1");
+    assert_eq!(proto.config.runtime.dynamic_board_margin, 0);
+}
+
+#[test]
 fn protocol_info_compute_vcf_updates_runtime() {
     let mut proto = proto();
     proto.handle_line("INFO compute_vcf 0");
     assert!(!proto.config.runtime.compute_vcf);
+}
+
+#[test]
+fn protocol_info_vcf_depths_update_runtime() {
+    let mut proto = proto();
+    proto.handle_line("INFO root_vcf_depth 9");
+    proto.handle_line("INFO opponent_vcf_depth 6");
+    proto.handle_line("INFO vct_verify_opponent_vcf_depth 3");
+    assert_eq!(proto.config.runtime.root_vcf_depth, 9);
+    assert_eq!(proto.config.runtime.opponent_vcf_depth, 6);
+    assert_eq!(proto.config.runtime.vct_verify_opponent_vcf_depth, 3);
+}
+
+#[test]
+fn protocol_info_nonroot_vcf_updates_runtime() {
+    let mut proto = proto();
+    proto.handle_line("INFO nonroot_vcf 1");
+    assert!(proto.config.runtime.nonroot_vcf);
+    proto.handle_line("INFO nonroot_vcf 0");
+    assert!(!proto.config.runtime.nonroot_vcf);
 }
 
 #[test]
@@ -248,6 +287,35 @@ fn protocol_info_timeout_match_zero_matches_expected_large_default() {
 }
 
 #[test]
+fn protocol_without_time_control_uses_fixed_search_defaults() {
+    let proto = GomocupProtocol::default();
+    let limits = proto.current_search_limits();
+    assert_eq!(limits.max_depth, DEFAULT_SEARCH_DEPTH);
+    assert_eq!(limits.root_width, DEFAULT_SEARCH_WIDTH as usize);
+    assert_eq!(limits.time_limit_ms, None);
+}
+
+#[test]
+fn protocol_time_control_uses_timed_search_caps() {
+    let mut proto = GomocupProtocol::default();
+    proto.handle_line("INFO timeout_turn 5000");
+    let limits = proto.current_search_limits();
+    assert_eq!(limits.max_depth, DEFAULT_TIMED_SEARCH_MAX_DEPTH);
+    assert_eq!(limits.root_width, DEFAULT_TIMED_SEARCH_MAX_WIDTH as usize);
+    assert_eq!(limits.time_limit_ms, Some(5000.0));
+}
+
+#[test]
+fn protocol_explicit_search_limits_keep_depth_width_under_time_control() {
+    let mut proto = proto();
+    proto.handle_line("INFO timeout_turn 5000");
+    let limits = proto.current_search_limits();
+    assert_eq!(limits.max_depth, 2);
+    assert_eq!(limits.root_width, 8);
+    assert_eq!(limits.time_limit_ms, Some(5000.0));
+}
+
+#[test]
 fn protocol_info_invalid_numeric_values_are_ignored() {
     let mut proto = proto();
     proto.handle_line("INFO timeout_turn 500");
@@ -255,20 +323,39 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
     proto.handle_line("INFO time_left bar");
     proto.handle_line("INFO max_node baz");
     proto.handle_line("INFO compute_vcf qux");
+    proto.handle_line("INFO root_vcf_depth nope");
+    proto.handle_line("INFO opponent_vcf_depth nope");
+    proto.handle_line("INFO vct_verify_opponent_vcf_depth nope");
+    proto.handle_line("INFO nonroot_vcf nope");
     proto.handle_line("INFO compute_vct nope");
     proto.handle_line("INFO root_vct_depth nope");
     proto.handle_line("INFO lazy_smp nope");
     proto.handle_line("INFO lazy_smp_workers nope");
     proto.handle_line("INFO static zed");
+    proto.handle_line("INFO dynamic_board_margin hmm");
     assert_eq!(proto.timeout_turn_ms, Some(500.0));
     assert_eq!(proto.time_left_ms, None);
     assert_eq!(proto.node_limit, None);
     assert!(proto.config.runtime.compute_vcf);
+    assert_eq!(proto.config.runtime.root_vcf_depth, DEFAULT_ROOT_VCF_DEPTH);
+    assert_eq!(
+        proto.config.runtime.opponent_vcf_depth,
+        DEFAULT_OPPONENT_VCF_DEPTH
+    );
+    assert_eq!(
+        proto.config.runtime.vct_verify_opponent_vcf_depth,
+        DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH
+    );
+    assert!(!proto.config.runtime.nonroot_vcf);
     assert!(proto.config.runtime.compute_vct);
-    assert_eq!(proto.config.runtime.root_vct_depth, 8);
+    assert_eq!(proto.config.runtime.root_vct_depth, DEFAULT_ROOT_VCT_DEPTH);
     assert!(!proto.config.runtime.lazy_smp);
     assert_eq!(proto.config.runtime.lazy_smp_workers, 0);
     assert!(proto.config.runtime.static_board);
+    assert_eq!(
+        proto.config.runtime.dynamic_board_margin,
+        DEFAULT_DYNAMIC_BOARD_MARGIN
+    );
 }
 
 #[test]

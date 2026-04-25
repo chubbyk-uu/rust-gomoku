@@ -1,7 +1,11 @@
 use rust_gomoku::{
     adjust_loaded_parameters, bucket_for_lines, default_eval_para, line_backend_name,
-    load_default_config, xy_to_move, Board, Line, PackedShape, ShapeLabel, BLACK, BOARD_SIZE,
-    DIAGONAL_DOWN, DIAGONAL_UP, DIRECTION_IDS, DOUBLE_SHAPE, HORIZONTAL, VERTICAL,
+    load_default_config, xy_to_move, Board, Line, PackedShape, SearchLimits, ShapeLabel, BLACK,
+    BOARD_SIZE, DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_ROOT_VCF_DEPTH,
+    DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
+    DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
+    DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH, DIAGONAL_DOWN, DIAGONAL_UP, DIRECTION_IDS, DOUBLE_SHAPE,
+    HORIZONTAL, VERTICAL,
 };
 
 #[test]
@@ -49,25 +53,62 @@ fn runtime_defaults_match_reference() {
     let config = load_default_config();
     assert!(!config.runtime.read_config_each_move);
     assert!(config.runtime.compute_vcf);
+    assert_eq!(config.runtime.root_vcf_depth, DEFAULT_ROOT_VCF_DEPTH);
+    assert_eq!(
+        config.runtime.opponent_vcf_depth,
+        DEFAULT_OPPONENT_VCF_DEPTH
+    );
+    assert_eq!(
+        config.runtime.vct_verify_opponent_vcf_depth,
+        DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH
+    );
     assert!(!config.runtime.nonroot_vcf);
     assert!(config.runtime.static_board);
-    assert_eq!(config.runtime.dynamic_board_margin, 4);
-    assert!(config.runtime.compute_vct);
     assert_eq!(
-        config.runtime.root_vct_depth, 8,
-        "Rust intentionally uses a deeper default than Python reference"
+        config.runtime.dynamic_board_margin,
+        DEFAULT_DYNAMIC_BOARD_MARGIN
     );
+    assert!(config.runtime.compute_vct);
+    assert_eq!(config.runtime.root_vct_depth, DEFAULT_ROOT_VCT_DEPTH);
     assert!(!config.runtime.lazy_smp);
     assert_eq!(config.runtime.lazy_smp_workers, 0);
 }
 
 #[test]
-fn root_search_defaults_match_reference() {
+fn root_search_defaults_match_engine_defaults() {
     let config = load_default_config();
-    assert_eq!(config.root_search.depth, 25);
-    assert_eq!(config.root_search.wide, 60);
+    assert_eq!(config.root_search.depth, DEFAULT_SEARCH_DEPTH);
+    assert_eq!(config.root_search.wide, DEFAULT_SEARCH_WIDTH);
+    assert_eq!(
+        config.root_search.timed_max_depth,
+        DEFAULT_TIMED_SEARCH_MAX_DEPTH
+    );
+    assert_eq!(
+        config.root_search.timed_max_wide,
+        DEFAULT_TIMED_SEARCH_MAX_WIDTH
+    );
     assert_eq!(config.root_search.ratio_num, 1);
     assert_eq!(config.root_search.ratio_den, 1);
+}
+
+#[test]
+fn fixed_search_limits_from_config_match_engine_defaults() {
+    let config = load_default_config();
+    let limits = SearchLimits::fixed_from_config(&config);
+    assert_eq!(limits.max_depth, DEFAULT_SEARCH_DEPTH);
+    assert_eq!(limits.root_width, DEFAULT_SEARCH_WIDTH as usize);
+    assert_eq!(limits.node_limit, None);
+    assert_eq!(limits.time_limit_ms, None);
+}
+
+#[test]
+fn timed_search_limits_from_config_match_engine_caps() {
+    let config = load_default_config();
+    let limits = SearchLimits::timed_from_config(&config);
+    assert_eq!(limits.max_depth, DEFAULT_TIMED_SEARCH_MAX_DEPTH);
+    assert_eq!(limits.root_width, DEFAULT_TIMED_SEARCH_MAX_WIDTH as usize);
+    assert_eq!(limits.node_limit, None);
+    assert_eq!(limits.time_limit_ms, None);
 }
 
 #[test]
