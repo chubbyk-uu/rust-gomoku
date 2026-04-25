@@ -177,6 +177,7 @@ rust_gomoku/
 │   ├── compare_diff_outputs.py
 │   ├── diff_reference.py
 │   ├── extract_static_data.py
+│   ├── run_engine_match.py
 │   └── run_diff.py
 ```
 
@@ -193,6 +194,7 @@ rust_gomoku/
 - `src/bin/gomoku_gui.rs`：本地 Web GUI 人机对战入口
 - `scripts/diff_reference.py`：Python reference 侧差分探针
 - `scripts/run_diff.py`：批量运行差分 case
+- `scripts/run_engine_match.py`：Rust / Python reference 的固定开局 Gomocup 对战脚本
 
 ## 静态数据来源
 
@@ -354,6 +356,18 @@ python3 scripts/run_diff.py --jobs 10
 ```bash
 python3 scripts/run_diff.py --profile slow --jobs 10
 ```
+
+Rust / Python reference 固定开局 Gomocup 对战：
+
+```bash
+cargo build --release --bin gomocup_engine
+python3 scripts/run_engine_match.py \
+  --opening-set 9 \
+  --jobs 18 \
+  --output /tmp/rust_vs_reference_9_openings.json
+```
+
+默认设置是 Rust 使用当前 engine 默认参数，Python reference 使用 `--depth 6 --width 20` 且 `INFO root_vct_depth 4`。脚本每手用 `BOARD` 全量同步局面，便于稳定复现；默认单手超时 `120s`、单局超时 `900s`，传 `--move-timeout-sec 0 --game-timeout-sec 0` 可关闭。最近一次 9 开局黑白双边 18 局结果：Rust 17 胜 1 负，唯一败局是 `[4,4]` 开局 Rust 执白。
 
 当前已有 12 个 root 搜索差分 case，其中 11 个 fast、1 个 slow：
 
