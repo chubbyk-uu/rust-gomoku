@@ -117,62 +117,124 @@ pub(crate) fn shape_raw_from_board_point_python(
     let grid = board.grid_rows();
     let size = board.size();
     match direction {
-        HORIZONTAL => Ok(shape_raw_from_line_slots(
+        HORIZONTAL => Ok(shape_raw_horizontal_point(
+            grid,
             size,
+            pivot,
             point_index,
             freestyle,
-            |slot| slot_line_index(size, slot).map_or(SENTINEL, |i| i32::from(grid[i][pivot])),
         )),
-        VERTICAL => Ok(shape_raw_from_line_slots(
+        VERTICAL => Ok(shape_raw_vertical_point(
+            grid,
             size,
+            pivot,
             point_index,
             freestyle,
-            |slot| slot_line_index(size, slot).map_or(SENTINEL, |i| i32::from(grid[pivot][i])),
         )),
         DIAGONAL_DOWN => {
             let r = diagonal_index_range(size, pivot);
-            let (lo, hi) = (r.start, r.end);
-            Ok(shape_raw_from_line_slots(
+            Ok(shape_raw_diagonal_down_point(
+                grid,
                 size,
+                pivot,
                 point_index,
                 freestyle,
-                |slot| {
-                    slot_line_index(size, slot)
-                        .and_then(|i| (i >= lo && i < hi).then_some(i))
-                        .map_or(SENTINEL, |i| i32::from(grid[i][pivot - i]))
-                },
+                r.start,
+                r.end,
             ))
         }
         DIAGONAL_UP => {
             let r = diagonal_index_range(size, pivot);
-            let (lo, hi) = (r.start, r.end);
-            Ok(shape_raw_from_line_slots(
+            Ok(shape_raw_diagonal_up_point(
+                grid,
                 size,
+                pivot,
                 point_index,
                 freestyle,
-                |slot| {
-                    slot_line_index(size, slot)
-                        .and_then(|i| (i >= lo && i < hi).then_some(i))
-                        .map_or(SENTINEL, |i| i32::from(grid[size - 1 - i][pivot - i]))
-                },
+                r.start,
+                r.end,
             ))
         }
         _ => Err(PatternError::InvalidDirection(direction)),
     }
 }
 
-fn shape_raw_from_line_slots<F>(
+#[inline(always)]
+fn shape_raw_horizontal_point(
+    grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
+    size: usize,
+    pivot: usize,
+    point_index: usize,
+    freestyle: bool,
+) -> i32 {
+    shape_raw_from_logical_indices(size, point_index, freestyle, |i| i32::from(grid[i][pivot]))
+}
+
+#[inline(always)]
+fn shape_raw_vertical_point(
+    grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
+    size: usize,
+    pivot: usize,
+    point_index: usize,
+    freestyle: bool,
+) -> i32 {
+    shape_raw_from_logical_indices(size, point_index, freestyle, |i| i32::from(grid[pivot][i]))
+}
+
+#[inline(always)]
+fn shape_raw_diagonal_down_point(
+    grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
+    size: usize,
+    pivot: usize,
+    point_index: usize,
+    freestyle: bool,
+    lo: usize,
+    hi: usize,
+) -> i32 {
+    shape_raw_from_logical_indices(size, point_index, freestyle, |i| {
+        if i >= lo && i < hi {
+            i32::from(grid[i][pivot - i])
+        } else {
+            SENTINEL
+        }
+    })
+}
+
+#[inline(always)]
+fn shape_raw_diagonal_up_point(
+    grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
+    size: usize,
+    pivot: usize,
+    point_index: usize,
+    freestyle: bool,
+    lo: usize,
+    hi: usize,
+) -> i32 {
+    shape_raw_from_logical_indices(size, point_index, freestyle, |i| {
+        if i >= lo && i < hi {
+            i32::from(grid[size - 1 - i][pivot - i])
+        } else {
+            SENTINEL
+        }
+    })
+}
+
+#[inline(always)]
+fn shape_raw_from_logical_indices<F>(
     size: usize,
     point_index: usize,
     freestyle: bool,
-    mut cell_at_slot: F,
+    mut cell_at_index: F,
 ) -> i32
 where
     F: FnMut(usize) -> i32,
 {
-    let p = point_index + 2;
-    debug_assert!(p < size + 4);
-    let stone = cell_at_slot(p);
+    debug_assert!(point_index < size);
+    let stone = if point_index < size {
+        cell_at_index(point_index)
+    } else {
+        SENTINEL
+    };
     if stone != i32::from(BLACK) && stone != i32::from(WHITE) {
         return 0;
     }
@@ -189,7 +251,8 @@ where
     let mut offset = 1_usize;
     while offset <= 5 {
         let mask = forward_masks[offset - 1];
-        let value = cell_at_slot(p + offset);
+        let i = point_index + offset;
+        let value = if i < size { cell_at_index(i) } else { SENTINEL };
         if value == i32::from(EMPTY) {
             offset += 1;
             continue;
@@ -210,7 +273,9 @@ where
     offset = 1;
     while offset <= 5 {
         let mask = backward_masks[offset - 1];
-        let value = cell_at_slot(p - offset);
+        let value = point_index
+            .checked_sub(offset)
+            .map_or(SENTINEL, &mut cell_at_index);
         if value == i32::from(EMPTY) {
             offset += 1;
             continue;
@@ -239,14 +304,6 @@ where
     ((trt & 0xF0) << 12) | (trt & 0xF)
 }
 
-fn slot_line_index(size: usize, slot: usize) -> Option<usize> {
-    if slot < 2 || slot >= size + 2 {
-        None
-    } else {
-        Some(slot - 2)
-    }
-}
-
 fn diagonal_index_range(size: usize, pivot: usize) -> std::ops::Range<usize> {
     if pivot < size {
         0..pivot + 1
@@ -260,53 +317,87 @@ mod tests {
     use super::*;
 
     #[test]
-    fn point_shape_reader_matches_full_line_extraction() {
-        let mut board = Board::new();
-        for (x, y, side) in [
-            (7, 7, BLACK),
-            (8, 7, WHITE),
-            (6, 8, BLACK),
-            (9, 6, WHITE),
-            (3, 11, BLACK),
-            (11, 3, WHITE),
-        ] {
-            board.grid_rows_mut()[y][x] = side;
-        }
+    fn point_shape_reader_matches_full_line_extraction_on_varied_boards() {
+        let boards = [
+            vec![
+                (7, 7, BLACK),
+                (8, 7, WHITE),
+                (6, 8, BLACK),
+                (9, 6, WHITE),
+                (3, 11, BLACK),
+                (11, 3, WHITE),
+            ],
+            vec![
+                (0, 0, BLACK),
+                (1, 0, BLACK),
+                (2, 0, WHITE),
+                (14, 14, WHITE),
+                (13, 14, BLACK),
+                (12, 13, WHITE),
+                (0, 14, BLACK),
+                (14, 0, WHITE),
+            ],
+            vec![
+                (4, 4, BLACK),
+                (5, 5, BLACK),
+                (6, 6, EMPTY),
+                (7, 7, WHITE),
+                (8, 8, BLACK),
+                (10, 4, WHITE),
+                (9, 5, WHITE),
+                (8, 6, BLACK),
+                (6, 8, WHITE),
+            ],
+        ];
 
-        for x in 0..BOARD_SIZE {
-            for y in 0..BOARD_SIZE {
-                if board.grid_rows()[y][x] != EMPTY {
-                    continue;
-                }
-                for side in [BLACK, WHITE] {
+        for stones in boards {
+            let mut board = Board::new();
+            for (x, y, side) in stones {
+                if side != EMPTY {
                     board.grid_rows_mut()[y][x] = side;
-                    for direction in [HORIZONTAL, VERTICAL, DIAGONAL_DOWN, DIAGONAL_UP] {
-                        let (pivot, point_index) = match direction {
-                            HORIZONTAL => (x, y),
-                            VERTICAL => (y, x),
-                            DIAGONAL_DOWN => (x + y, y),
-                            DIAGONAL_UP => (BOARD_SIZE - 1 - y + x, BOARD_SIZE - 1 - y),
-                            _ => unreachable!(),
-                        };
-                        let full = shape_raw_from_board_python(
-                            &board,
-                            pivot,
-                            direction,
-                            point_index,
-                            true,
-                        )
-                        .unwrap();
-                        let point = shape_raw_from_board_point_python(
-                            &board,
-                            pivot,
-                            direction,
-                            point_index,
-                            true,
-                        )
-                        .unwrap();
-                        assert_eq!(point, full, "x={x} y={y} side={side} direction={direction}");
+                }
+            }
+
+            for x in 0..BOARD_SIZE {
+                for y in 0..BOARD_SIZE {
+                    if board.grid_rows()[y][x] != EMPTY {
+                        continue;
                     }
-                    board.grid_rows_mut()[y][x] = EMPTY;
+                    for side in [BLACK, WHITE] {
+                        board.grid_rows_mut()[y][x] = side;
+                        for freestyle in [true, false] {
+                            for direction in [HORIZONTAL, VERTICAL, DIAGONAL_DOWN, DIAGONAL_UP] {
+                                let (pivot, point_index) = match direction {
+                                    HORIZONTAL => (x, y),
+                                    VERTICAL => (y, x),
+                                    DIAGONAL_DOWN => (x + y, y),
+                                    DIAGONAL_UP => (BOARD_SIZE - 1 - y + x, BOARD_SIZE - 1 - y),
+                                    _ => unreachable!(),
+                                };
+                                let full = shape_raw_from_board_python(
+                                    &board,
+                                    pivot,
+                                    direction,
+                                    point_index,
+                                    freestyle,
+                                )
+                                .unwrap();
+                                let point = shape_raw_from_board_point_python(
+                                    &board,
+                                    pivot,
+                                    direction,
+                                    point_index,
+                                    freestyle,
+                                )
+                                .unwrap();
+                                assert_eq!(
+                                    point, full,
+                                    "x={x} y={y} side={side} direction={direction} freestyle={freestyle}"
+                                );
+                            }
+                        }
+                        board.grid_rows_mut()[y][x] = EMPTY;
+                    }
                 }
             }
         }
