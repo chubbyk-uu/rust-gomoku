@@ -292,10 +292,11 @@ impl AlphaBetaSearcher {
 
         for (index, candidate) in ordered.iter().copied().enumerate() {
             let snapshot = caches.snapshot();
+            let (mx, my) = move_to_xy(candidate.move_).expect("candidate move is valid");
             board
                 .play(candidate.move_, Some(side))
                 .expect("ordered candidate stays legal");
-            value_wide_compute(board, caches);
+            value_wide_compute(board, caches, (mx, my));
 
             running_downf += index as i32;
             let mut local_downf = running_downf;

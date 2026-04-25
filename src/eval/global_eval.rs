@@ -167,7 +167,7 @@ pub fn evaluate_last5_branch(
     let snapshot = caches.snapshot();
     board.grid_rows_mut()[y][x] = -side;
     let result = {
-        value_wide_compute(board, caches);
+        value_wide_compute(board, caches, (x, y));
         -evaluate_board(board, caches, -side, 1 - opo, config)
     };
     board.grid_rows_mut()[y][x] = 0;

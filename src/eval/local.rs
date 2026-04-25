@@ -158,19 +158,16 @@ pub fn recompute_all(board: &mut Board, caches: &mut EvalCaches) {
     caches.initialized = true;
 }
 
-pub fn value_wide_compute(board: &mut Board, caches: &mut EvalCaches) {
+pub fn value_wide_compute(board: &mut Board, caches: &mut EvalCaches, changed: (usize, usize)) {
     let size = board.size();
     if !caches.initialized {
         let mut has_stone = false;
-        for x in 0..size {
+        'init: for x in 0..size {
             for y in 0..size {
                 if board.grid_rows()[y][x] != EMPTY {
                     has_stone = true;
-                    break;
+                    break 'init;
                 }
-            }
-            if has_stone {
-                break;
             }
         }
         if has_stone {
@@ -180,7 +177,7 @@ pub fn value_wide_compute(board: &mut Board, caches: &mut EvalCaches) {
         caches.initialized = true;
     }
 
-    let ar = 4_isize;
+    let (cx, cy) = changed;
     let horizontal_flag = 1_u8;
     let vertical_flag = 2_u8;
     let diag_down_flag = 4_u8;
@@ -189,139 +186,20 @@ pub fn value_wide_compute(board: &mut Board, caches: &mut EvalCaches) {
 
     {
         let grid = board.grid_rows();
-        let shadow = &caches.board_shadow;
-        for x in 0..size {
-            for y in 0..size {
-                if shadow[x][y] != grid[y][x] {
-                    comp[x][y] = 15;
-
-                    let fixed = x;
-                    let mut seen = 0_i8;
-                    for yy in (y + 1)..usize::min(size, y + ar as usize + 1) {
-                        let value = grid[yy][fixed];
-                        if seen == 0 {
-                            seen = value;
-                        } else if value != EMPTY && value != seen {
-                            break;
-                        }
-                        comp[fixed][yy] |= horizontal_flag;
-                    }
-                    seen = 0;
-                    for yy in (0..y).rev().take(ar as usize) {
-                        let value = grid[yy][fixed];
-                        if seen == 0 {
-                            seen = value;
-                        } else if value != EMPTY && value != seen {
-                            break;
-                        }
-                        comp[fixed][yy] |= horizontal_flag;
-                    }
-
-                    let fixed = y;
-                    seen = 0;
-                    for xx in (x + 1)..usize::min(size, x + ar as usize + 1) {
-                        let value = grid[fixed][xx];
-                        if seen == 0 {
-                            seen = value;
-                        } else if value != EMPTY && value != seen {
-                            break;
-                        }
-                        comp[xx][fixed] |= vertical_flag;
-                    }
-                    seen = 0;
-                    for xx in (0..x).rev().take(ar as usize) {
-                        let value = grid[fixed][xx];
-                        if seen == 0 {
-                            seen = value;
-                        } else if value != EMPTY && value != seen {
-                            break;
-                        }
-                        comp[xx][fixed] |= vertical_flag;
-                    }
-
-                    let mut seen = 0_i8;
-                    let mut xx = x as isize - 1;
-                    let mut yy = y as isize + 1;
-                    while xx >= 0
-                        && yy < size as isize
-                        && xx >= x as isize - ar
-                        && yy <= y as isize + ar
-                    {
-                        let value = grid[yy as usize][xx as usize];
-                        if seen == 0 {
-                            seen = value;
-                        } else if value != EMPTY && value != seen {
-                            break;
-                        }
-                        comp[xx as usize][yy as usize] |= diag_down_flag;
-                        xx -= 1;
-                        yy += 1;
-                    }
-
-                    seen = 0;
-                    xx = x as isize + 1;
-                    yy = y as isize - 1;
-                    while xx < size as isize
-                        && yy >= 0
-                        && xx <= x as isize + ar
-                        && yy >= y as isize - ar
-                    {
-                        let value = grid[yy as usize][xx as usize];
-                        if seen == 0 {
-                            seen = value;
-                        } else if value != EMPTY && value != seen {
-                            break;
-                        }
-                        comp[xx as usize][yy as usize] |= diag_down_flag;
-                        xx += 1;
-                        yy -= 1;
-                    }
-
-                    seen = 0;
-                    xx = x as isize + 1;
-                    yy = y as isize + 1;
-                    while xx < size as isize
-                        && yy < size as isize
-                        && xx <= x as isize + ar
-                        && yy <= y as isize + ar
-                    {
-                        let value = grid[yy as usize][xx as usize];
-                        if seen == 0 {
-                            seen = value;
-                        } else if value != EMPTY && value != seen {
-                            break;
-                        }
-                        comp[xx as usize][yy as usize] |= diag_up_flag;
-                        xx += 1;
-                        yy += 1;
-                    }
-
-                    seen = 0;
-                    xx = x as isize - 1;
-                    yy = y as isize - 1;
-                    while xx >= 0 && yy >= 0 && xx >= x as isize - ar && yy >= y as isize - ar {
-                        let value = grid[yy as usize][xx as usize];
-                        if seen == 0 {
-                            seen = value;
-                        } else if value != EMPTY && value != seen {
-                            break;
-                        }
-                        comp[xx as usize][yy as usize] |= diag_up_flag;
-                        xx -= 1;
-                        yy -= 1;
-                    }
-                }
-            }
-        }
+        comp[cx][cy] = 15;
+        mark_cell_neighbors(&mut comp, grid, cx, cy, size);
     }
+
+    caches.board_shadow[cx][cy] = board.grid_rows()[cy][cx];
 
     for x in 0..size {
         for y in 0..size {
-            let cell = board.grid_rows()[y][x];
-            caches.board_shadow[x][y] = cell;
             let flags = comp[x][y];
-
-            if flags != 0 && cell == EMPTY {
+            if flags == 0 {
+                continue;
+            }
+            let cell = board.grid_rows()[y][x];
+            if cell == EMPTY {
                 if flags & horizontal_flag != 0 {
                     update_direction_cache(board, caches, x, y, HORIZONTAL);
                 }
@@ -334,13 +212,128 @@ pub fn value_wide_compute(board: &mut Board, caches: &mut EvalCaches) {
                 if flags & diag_up_flag != 0 {
                     update_direction_cache(board, caches, x, y, DIAGONAL_UP);
                 }
-
                 update_bucket_attack(board, caches, x, y, 0);
                 update_bucket_attack(board, caches, x, y, 1);
-            } else if cell != EMPTY {
+            } else {
                 clear_occupied_point(caches, x, y);
             }
         }
+    }
+}
+
+fn mark_cell_neighbors(
+    comp: &mut [[u8; BOARD_SIZE]; BOARD_SIZE],
+    grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
+    x: usize,
+    y: usize,
+    size: usize,
+) {
+    const AR: isize = 4;
+    const H: u8 = 1;
+    const V: u8 = 2;
+    const DD: u8 = 4;
+    const DU: u8 = 8;
+
+    let fixed = x;
+    let mut seen = 0_i8;
+    for yy in (y + 1)..usize::min(size, y + AR as usize + 1) {
+        let value = grid[yy][fixed];
+        if seen == 0 {
+            seen = value;
+        } else if value != EMPTY && value != seen {
+            break;
+        }
+        comp[fixed][yy] |= H;
+    }
+    seen = 0;
+    for yy in (0..y).rev().take(AR as usize) {
+        let value = grid[yy][fixed];
+        if seen == 0 {
+            seen = value;
+        } else if value != EMPTY && value != seen {
+            break;
+        }
+        comp[fixed][yy] |= H;
+    }
+
+    let fixed = y;
+    seen = 0;
+    for xx in (x + 1)..usize::min(size, x + AR as usize + 1) {
+        let value = grid[fixed][xx];
+        if seen == 0 {
+            seen = value;
+        } else if value != EMPTY && value != seen {
+            break;
+        }
+        comp[xx][fixed] |= V;
+    }
+    seen = 0;
+    for xx in (0..x).rev().take(AR as usize) {
+        let value = grid[fixed][xx];
+        if seen == 0 {
+            seen = value;
+        } else if value != EMPTY && value != seen {
+            break;
+        }
+        comp[xx][fixed] |= V;
+    }
+
+    let mut seen = 0_i8;
+    let mut xx = x as isize - 1;
+    let mut yy = y as isize + 1;
+    while xx >= 0 && yy < size as isize && xx >= x as isize - AR && yy <= y as isize + AR {
+        let value = grid[yy as usize][xx as usize];
+        if seen == 0 {
+            seen = value;
+        } else if value != EMPTY && value != seen {
+            break;
+        }
+        comp[xx as usize][yy as usize] |= DD;
+        xx -= 1;
+        yy += 1;
+    }
+    seen = 0;
+    xx = x as isize + 1;
+    yy = y as isize - 1;
+    while xx < size as isize && yy >= 0 && xx <= x as isize + AR && yy >= y as isize - AR {
+        let value = grid[yy as usize][xx as usize];
+        if seen == 0 {
+            seen = value;
+        } else if value != EMPTY && value != seen {
+            break;
+        }
+        comp[xx as usize][yy as usize] |= DD;
+        xx += 1;
+        yy -= 1;
+    }
+
+    seen = 0;
+    xx = x as isize + 1;
+    yy = y as isize + 1;
+    while xx < size as isize && yy < size as isize && xx <= x as isize + AR && yy <= y as isize + AR {
+        let value = grid[yy as usize][xx as usize];
+        if seen == 0 {
+            seen = value;
+        } else if value != EMPTY && value != seen {
+            break;
+        }
+        comp[xx as usize][yy as usize] |= DU;
+        xx += 1;
+        yy += 1;
+    }
+    seen = 0;
+    xx = x as isize - 1;
+    yy = y as isize - 1;
+    while xx >= 0 && yy >= 0 && xx >= x as isize - AR && yy >= y as isize - AR {
+        let value = grid[yy as usize][xx as usize];
+        if seen == 0 {
+            seen = value;
+        } else if value != EMPTY && value != seen {
+            break;
+        }
+        comp[xx as usize][yy as usize] |= DU;
+        xx -= 1;
+        yy -= 1;
     }
 }
 

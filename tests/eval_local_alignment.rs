@@ -1,7 +1,7 @@
 use rust_gomoku::{
     attack_level, compute_bucket_and_attack, compute_direction_shape, load_default_config,
-    local_backend_name, move_value, recompute_all, recompute_point_caches, value_wide_compute,
-    xy_to_move, Board, EvalCaches, ShapeLabel, BLACK,
+    local_backend_name, move_to_xy, move_value, recompute_all, recompute_point_caches,
+    value_wide_compute, xy_to_move, Board, EvalCaches, ShapeLabel, BLACK,
 };
 
 #[test]
@@ -47,7 +47,7 @@ fn incremental_value_wide_matches_full_recompute() {
 
     let mut incremental = EvalCaches::new();
     let mut full = EvalCaches::new();
-    value_wide_compute(&mut board, &mut incremental);
+    value_wide_compute(&mut board, &mut incremental, (8, 8));
     recompute_all(&mut board, &mut full);
 
     assert_eq!(incremental.board_shadow, full.board_shadow);
@@ -66,9 +66,10 @@ fn value_wide_compute_roundtrip_after_play_and_undo() {
     let snapshot = caches.snapshot();
 
     board.play(xy_to_move(7, 8).unwrap(), None).unwrap();
-    value_wide_compute(&mut board, &mut caches);
-    board.undo().unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    value_wide_compute(&mut board, &mut caches, (7, 8));
+    let undone = board.undo().unwrap();
+    let (ux, uy) = move_to_xy(undone.move_).unwrap();
+    value_wide_compute(&mut board, &mut caches, (ux, uy));
 
     let mut expected = EvalCaches::new();
     recompute_all(&mut board, &mut expected);
@@ -89,23 +90,25 @@ fn nested_snapshots_restore_shape_cache_in_lifo_order() {
 
     let outer = caches.snapshot();
     board.play(xy_to_move(7, 8).unwrap(), None).unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    value_wide_compute(&mut board, &mut caches, (7, 8));
     let after_outer = caches.copy();
 
     let inner = caches.snapshot();
     board.play(xy_to_move(8, 8).unwrap(), None).unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    value_wide_compute(&mut board, &mut caches, (8, 8));
 
-    board.undo().unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    let undone = board.undo().unwrap();
+    let (ux, uy) = move_to_xy(undone.move_).unwrap();
+    value_wide_compute(&mut board, &mut caches, (ux, uy));
     caches.restore_snapshot(&inner);
     assert_eq!(caches.board_shadow, after_outer.board_shadow);
     assert_eq!(caches.shape_cache, after_outer.shape_cache);
     assert_eq!(caches.value_cache, after_outer.value_cache);
     assert_eq!(caches.attack_cache, after_outer.attack_cache);
 
-    board.undo().unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    let undone = board.undo().unwrap();
+    let (ux, uy) = move_to_xy(undone.move_).unwrap();
+    value_wide_compute(&mut board, &mut caches, (ux, uy));
     caches.restore_snapshot(&outer);
 
     let mut full = EvalCaches::new();
@@ -131,7 +134,8 @@ fn value_wide_compute_matches_full_recompute_after_multiple_steps() {
     ];
     for move_ in sequence {
         board.play(move_, None).unwrap();
-        value_wide_compute(&mut board, &mut caches);
+        let (mx, my) = move_to_xy(move_).unwrap();
+        value_wide_compute(&mut board, &mut caches, (mx, my));
         let mut full = EvalCaches::new();
         recompute_all(&mut board, &mut full);
         assert_eq!(caches.board_shadow, full.board_shadow);
@@ -205,7 +209,7 @@ fn value_log_not_written_without_active_snapshot() {
     let mut caches = EvalCaches::new();
     recompute_all(&mut board, &mut caches);
     board.play(xy_to_move(8, 7).unwrap(), None).unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    value_wide_compute(&mut board, &mut caches, (8, 7));
     assert_eq!(caches.value_log_len(), 0);
 }
 
@@ -217,7 +221,7 @@ fn value_log_grows_after_snapshot_and_play() {
     recompute_all(&mut board, &mut caches);
     let snapshot = caches.snapshot();
     board.play(xy_to_move(8, 7).unwrap(), None).unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    value_wide_compute(&mut board, &mut caches, (8, 7));
     assert!(caches.value_log_len() > 0);
     board.undo().unwrap();
     caches.restore_snapshot(&snapshot);
@@ -234,12 +238,13 @@ fn snapshot_value_log_len_field_is_recorded() {
     assert_eq!(snap1.value_log_len, 0);
 
     board.play(xy_to_move(8, 7).unwrap(), None).unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    value_wide_compute(&mut board, &mut caches, (8, 7));
     let snap2 = caches.snapshot();
     assert!(snap2.value_log_len > 0);
 
-    board.undo().unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    let undone = board.undo().unwrap();
+    let (ux, uy) = move_to_xy(undone.move_).unwrap();
+    value_wide_compute(&mut board, &mut caches, (ux, uy));
     caches.restore_snapshot(&snap2);
     board.undo().unwrap();
     caches.restore_snapshot(&snap1);
@@ -258,10 +263,11 @@ fn restore_snapshot_reverts_value_and_attack_caches() {
 
     let snap = caches.snapshot();
     board.play(xy_to_move(7, 8).unwrap(), None).unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    value_wide_compute(&mut board, &mut caches, (7, 8));
 
-    board.undo().unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    let undone = board.undo().unwrap();
+    let (ux, uy) = move_to_xy(undone.move_).unwrap();
+    value_wide_compute(&mut board, &mut caches, (ux, uy));
     caches.restore_snapshot(&snap);
 
     assert_eq!(caches.value_cache[0], before_value);
@@ -281,20 +287,22 @@ fn double_snapshot_restores_independently() {
 
     let outer = caches.snapshot();
     board.play(xy_to_move(8, 7).unwrap(), None).unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    value_wide_compute(&mut board, &mut caches, (8, 7));
     let state_after_outer = caches.value_cache[0].clone();
 
     let inner = caches.snapshot();
     board.play(xy_to_move(9, 7).unwrap(), None).unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    value_wide_compute(&mut board, &mut caches, (9, 7));
 
-    board.undo().unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    let undone = board.undo().unwrap();
+    let (ux, uy) = move_to_xy(undone.move_).unwrap();
+    value_wide_compute(&mut board, &mut caches, (ux, uy));
     caches.restore_snapshot(&inner);
     assert_eq!(caches.value_cache[0], state_after_outer);
 
-    board.undo().unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    let undone = board.undo().unwrap();
+    let (ux, uy) = move_to_xy(undone.move_).unwrap();
+    value_wide_compute(&mut board, &mut caches, (ux, uy));
     caches.restore_snapshot(&outer);
     assert_eq!(caches.value_cache[0], initial_value);
     assert_eq!(caches.attack_cache[0], initial_attack);
@@ -309,7 +317,7 @@ fn value_log_cleared_on_reset() {
     recompute_all(&mut board, &mut caches);
     let snap = caches.snapshot();
     board.play(xy_to_move(8, 7).unwrap(), None).unwrap();
-    value_wide_compute(&mut board, &mut caches);
+    value_wide_compute(&mut board, &mut caches, (8, 7));
     assert!(caches.value_log_len() > 0);
     caches.restore_snapshot(&snap);
     caches.reset();
@@ -517,7 +525,7 @@ fn value_wide_incremental_snapshots_match_expected_sequence() {
                 Some(if ply % 2 == 1 { 1 } else { -1 }),
             )
             .unwrap();
-        value_wide_compute(&mut board, &mut caches);
+        value_wide_compute(&mut board, &mut caches, (x, y));
         for ((px, py), values) in points {
             assert_eq!(
                 (
