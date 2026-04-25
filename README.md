@@ -17,7 +17,8 @@
 
 ## 当前状态
 
-本仓库仍处于重构早期，但 classic 主链已经从基础状态机推进到搜索和战术层。
+本仓库的 classic 主链已经从基础状态机推进到搜索、战术层、Gomocup 入口和本地 GUI。
+当前重点已经从“能否跑通主链”转为“扩大差分覆盖、守住语义一致性，并继续做可验证的串行热点优化”。
 
 ### 已完成
 
@@ -43,6 +44,7 @@
 - `RootSearcher` 的 VCF 优先、VCT 触发、VCT 根着验证和 trace
 - Gomocup 协议入口
 - 命令行 Gomocup engine 入口
+- 本地 Web GUI 人机对战入口
 - 与 `opponent/zhou` 的 9 开局黑白双边对战验证
 - reference / Rust 双端差分测试脚手架
 - 12 个 root 搜索差分 case
@@ -90,17 +92,17 @@
 - `scripts/run_diff.py` 可批量运行 `cases/diff/*.json`，当前 12 个 root case 全部通过
 - 单线程兼容模式下，差分默认比较 `root.nodes`，用于尽早发现搜索路径漂移
 - Lazy SMP 是 experimental 功能，默认关闭；开启后允许 TT 命中、节点数和 best move 变化，不作为 reference 等价路径
-- 串行主线已完成一轮热点优化：move ordering 的 `getmi` 预计算、movegen/eval 临时表固定数组化、局部 shape 读取避免整线复制；固定 slow probe 在保持 `nodes` 不变的前提下降低到约 `765ms`
+- 串行主线已完成一轮热点优化：move ordering 的 `getmi` 预计算、movegen/eval 临时表固定数组化、局部 shape 读取避免整线复制、局部 shape 读取直接按 line index 扫描；固定 slow probe 在保持 `nodes` 不变的前提下，最新单次 release probe 约 `0.63s`
 - `patterns::line` 保留完整 line 提取路径作为 reference 形态和对照 oracle；热路径 `compute_direction_shape` 使用局部读取路径，并用内部测试逐点对比新旧结果
 
 ### 还没有完成
 
-- GUI 或其它外部集成
 - movegen / eval / VCF / VCT 的细粒度双端差分覆盖
 - Python fallback 与 Cython 加速路径的系统性交叉验证
 - Lazy SMP 的策略重设计；当前朴素 helper 填表没有稳定性能收益
+- GUI 仍是轻量本地 Web UI，不是 reference pygame GUI 的逐行为复刻；后续可继续补局面保存、更多参数面板和引擎日志面板
 
-也就是说，**当前已经有单线程 classic 搜索主链、战术层、Gomocup stdin/stdout 入口、一轮 zhou 对战对齐验证、root 搜索层面的最小双端差分脚手架，以及可选 Lazy SMP 实验路径；但还没有覆盖 eval / movegen / VCF / VCT 的完整差分体系，Lazy SMP 也还不是可推荐的主线性能方案。**
+也就是说，**当前已经有单线程 classic 搜索主链、战术层、Gomocup stdin/stdout 入口、本地 Web GUI、一轮 zhou 对战对齐验证、root 搜索层面的最小双端差分脚手架，以及可选 Lazy SMP 实验路径；但还没有覆盖 eval / movegen / VCF / VCT 的完整差分体系，Lazy SMP 也还不是可推荐的主线性能方案。**
 
 ## 当前实现原则
 
@@ -159,7 +161,8 @@ rust_gomoku/
 │   │   └── mod.rs
 │   ├── bin/
 │   │   ├── diff_probe.rs
-│   │   └── gomocup_engine.rs
+│   │   ├── gomocup_engine.rs
+│   │   └── gomoku_gui.rs
 │   ├── types.rs
 │   └── zobrist.rs
 ├── tests/
@@ -185,6 +188,8 @@ rust_gomoku/
 - `scripts/extract_static_data.py`：负责重新生成和校验静态数据
 - `cases/diff/`：reference / Rust 双端差分固定局面
 - `src/bin/diff_probe.rs`：Rust 侧差分探针
+- `src/bin/gomocup_engine.rs`：Gomocup stdin/stdout 协议入口
+- `src/bin/gomoku_gui.rs`：本地 Web GUI 人机对战入口
 - `scripts/diff_reference.py`：Python reference 侧差分探针
 - `scripts/run_diff.py`：批量运行差分 case
 
@@ -258,7 +263,7 @@ cargo test
 python3 scripts/run_diff.py --profile all --jobs 10
 ```
 
-当前全量测试通过规模：187 个 Rust 测试通过。
+当前全量测试通过规模：188 个 Rust 测试通过。
 
 Gomocup CLI smoke：
 
@@ -272,7 +277,7 @@ printf 'START 15\nBEGIN\nEND\n' | cargo run --quiet --bin gomocup_engine -- --de
 cargo run --release --bin gomoku_gui
 ```
 
-启动后打开 `http://127.0.0.1:7878`。GUI 支持选择执黑/执白、重新开局、悔棋、异步引擎思考、棋盘轮询刷新和参数/状态信息面板。默认使用当前配置 `depth=8,width=40,root_vct_depth=8`；如果需要更快的交互 smoke，可用：
+启动后打开 `http://127.0.0.1:7878`。GUI 支持选择执黑/执白、点击执黑/执白重新开局、悔棋、异步引擎思考、棋盘轮询刷新、棋子手数显示、最后一手红色标记和参数/状态信息面板。快捷键：`U` 悔棋，`R` 按当前执棋方重新开局。默认使用当前配置 `depth=8,width=40,root_vct_depth=8`；如果需要更快的交互 smoke，可用：
 
 ```bash
 cargo run --release --bin gomoku_gui -- --depth 6 --width 20
@@ -309,6 +314,7 @@ Lazy SMP 当前结论：
 - `value_wide_compute` 的 `comp` 固定数组化后：约 `0.842s`
 - `shape_raw_from_cells` 小循环手写后：约 `0.806s`
 - `compute_direction_shape` 改用局部 point shape 读取后：约 `0.765s`
+- 局部 point shape 读取继续改为直接按逻辑 line index 扫描后：最新单次 release probe 约 `0.63s`
 - 旧完整 line 提取函数仍保留，不在热路径上；它用于保留 reference 形态，并作为局部读取路径的对照 oracle，降低斜线边界和 sentinel 语义漂移风险
 
 Gomocup / zhou 对战验证：
@@ -369,6 +375,7 @@ python3 scripts/run_diff.py --profile slow --jobs 10
 - 串行主线已经做过一轮低风险热点优化，但更激进的候选范围、VCT 验证深度或并行策略仍需单独对战验证
 - Rust 默认固定搜索 `depth=8, width=40, root_vct_depth=8` 是明确的运行参数偏离；带时间控制时搜索上限为 `depth=25, width=40`，实际完成深度由时间提前停止决定；需要与 reference 做严格差分时，应在 case 或协议 `INFO root_vct_depth 4` 等参数中显式设成 reference 对应值
 - 已有最小 reference / Rust 差分脚手架，但覆盖范围还只到 root 搜索层面
+- 本地 Web GUI 是用于人机对战和调试的 Rust 侧集成入口，不作为 reference pygame GUI 的语义等价证明
 - `RootTrace.vct_ms` 是耗时调试字段，不应纳入确定性回归断言
 - `root.nodes` 只应在单线程兼容模式下强断言；并行或优化模式应改为比较 move/score/depth/trace 等语义字段
 - root tactical fast path 当前仍应保持 VCF 优先于 VCT，VCT 只在 trigger 命中后运行
@@ -415,7 +422,8 @@ python3 scripts/run_diff.py --profile slow --jobs 10
 4. 已放弃 root-split full-window 方案，除非重新设计共享 alpha / PV 顺序，否则不再作为主方案。
 5. 若尝试新的并行策略，必须补重复运行稳定性测试和 zhou 18 线对战对比。
 6. 更现实的短期优化方向是继续做串行热点 profiling、差分夹具扩展和局部数据结构优化。
+7. `evaluate_board_main` 的全局评估增量化风险较高，暂不建议直接替换主线；如果后续要做，应先以 shadow mode 同时计算 full scan 和 incremental summary，并用强断言长期验证完全一致。
 
 ## 一句话总结
 
-当前仓库已经完成了 **基础状态机 + 配置 + pattern + eval + 单线程 classic 搜索 + VCF/VCT 战术路径 + Gomocup 协议入口** 的 Rust 化，并建立了对应回归测试、一轮 zhou 对战对齐验证、root 搜索层面的 reference / Rust 差分脚手架，以及默认关闭的 Lazy SMP 实验路径；下一阶段重点是 **扩展差分覆盖、继续串行热点优化，并谨慎评估并行策略是否值得进入主线**。
+当前仓库已经完成了 **基础状态机 + 配置 + pattern + eval + 单线程 classic 搜索 + VCF/VCT 战术路径 + Gomocup 协议入口 + 本地 Web GUI** 的 Rust 化，并建立了对应回归测试、一轮 zhou 对战对齐验证、root 搜索层面的 reference / Rust 差分脚手架，以及默认关闭的 Lazy SMP 实验路径；下一阶段重点是 **扩展差分覆盖、继续可验证的串行热点优化，并谨慎评估并行策略是否值得进入主线**。
