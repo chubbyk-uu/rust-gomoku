@@ -5,7 +5,7 @@ use crate::config::EngineConfig;
 use crate::constants::{BLACK, BOARD_SIZE, EMPTY, WHITE};
 use crate::eval::caches::EvalCaches;
 use crate::patterns::buckets::bucket_for_lines;
-use crate::patterns::line::shape_raw_from_board_python;
+use crate::patterns::line::shape_raw_from_board_point_python;
 use crate::patterns::shapes::{ShapeLabel, DIAGONAL_DOWN, DIAGONAL_UP, HORIZONTAL, VERTICAL};
 
 const FOUR_DIRECTIONS: [i32; 4] = [HORIZONTAL, VERTICAL, DIAGONAL_DOWN, DIAGONAL_UP];
@@ -28,7 +28,7 @@ pub fn compute_direction_shape(
     board.grid_rows_mut()[y][x] = side;
     let result = {
         let (pivot, point_index) = pivot_and_point_index(x, y, direction);
-        shape_raw_from_board_python(board, pivot, direction, point_index, true)
+        shape_raw_from_board_point_python(board, pivot, direction, point_index, true)
             .expect("direction checked in pivot_and_point_index")
     };
     board.grid_rows_mut()[y][x] = EMPTY;
@@ -185,7 +185,7 @@ pub fn value_wide_compute(board: &mut Board, caches: &mut EvalCaches) {
     let vertical_flag = 2_u8;
     let diag_down_flag = 4_u8;
     let diag_up_flag = 8_u8;
-    let mut comp = vec![vec![0_u8; size]; size];
+    let mut comp = [[0_u8; BOARD_SIZE]; BOARD_SIZE];
 
     {
         let grid = board.grid_rows();

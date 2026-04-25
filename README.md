@@ -86,6 +86,8 @@
 - `scripts/run_diff.py` 可批量运行 `cases/diff/*.json`，当前 12 个 root case 全部通过
 - 单线程兼容模式下，差分默认比较 `root.nodes`，用于尽早发现搜索路径漂移
 - Lazy SMP 是 experimental 功能，默认关闭；开启后允许 TT 命中、节点数和 best move 变化，不作为 reference 等价路径
+- 串行主线已完成一轮热点优化：move ordering 的 `getmi` 预计算、movegen/eval 临时表固定数组化、局部 shape 读取避免整线复制；固定 slow probe 在保持 `nodes` 不变的前提下降低到约 `765ms`
+- `patterns::line` 保留完整 line 提取路径作为 reference 形态和对照 oracle；热路径 `compute_direction_shape` 使用局部读取路径，并用内部测试逐点对比新旧结果
 
 ### 还没有完成
 
@@ -280,6 +282,18 @@ Lazy SMP 当前结论：
 - `d8/w30`、同开局 `(7,7)`、Rust 执黑对 zhou 的单局 smoke 中，Lazy2 与串行棋谱一致，但 Rust 平均耗时略慢。
 - 更早的 Lazy8 / 多开局 smoke 出现过走法漂移，说明共享 TT 会改变主线程 move ordering；这是 experimental 模式允许的行为，但不能用于 reference 等价验证。
 - 后续如果继续推进并行，应先重设计 helper 写入策略或使用更保守的后台分析模式，而不是继续增加 worker 数。
+
+串行热点优化记录：
+
+- 基准 case：`root_deep_opening_10_4_d8_w15.json`
+- 校验字段：move `(9,4)`、score `-14`、depth `8`、nodes `122196` 始终不变
+- 初始 release probe：约 `1.330s`
+- `getmi` 每候选预计算后：约 `0.968s`
+- eval cache 固定数组化与 line 栈数组化后：约 `0.897s`
+- `value_wide_compute` 的 `comp` 固定数组化后：约 `0.842s`
+- `shape_raw_from_cells` 小循环手写后：约 `0.806s`
+- `compute_direction_shape` 改用局部 point shape 读取后：约 `0.765s`
+- 旧完整 line 提取函数仍保留，不在热路径上；它用于保留 reference 形态，并作为局部读取路径的对照 oracle，降低斜线边界和 sentinel 语义漂移风险
 
 Gomocup / zhou 对战验证：
 
