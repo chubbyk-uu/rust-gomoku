@@ -91,8 +91,8 @@ pub fn covered_moves(board: &Board) -> Vec<Move> {
         return vec![xy_to_move(BOARD_SIZE / 2, BOARD_SIZE / 2).expect("center move is valid")];
     }
 
-    let mut seen = vec![false; BOARD_AREA];
-    let mut covered = Vec::new();
+    let mut seen = [false; BOARD_AREA];
+    let mut covered = Vec::with_capacity(BOARD_AREA);
     for played in board.move_history() {
         for &candidate in &COVER_NEIGHBORS[played.move_ as usize] {
             if !seen[candidate as usize] {
@@ -112,7 +112,7 @@ pub fn apply_hostile_three_extension(
     board: &Board,
     move_: Move,
     side: i8,
-    vbw_map: &mut std::collections::HashMap<Move, f64>,
+    vbw_map: &mut [f64; BOARD_AREA],
 ) {
     let (x, y) = move_to_xy(move_).expect("move is valid");
     let hostile_side = -side;
@@ -157,7 +157,7 @@ pub fn apply_hostile_three_extension(
     }
 
     for target in decode_bonus_targets(move_, direction, encoded) {
-        *vbw_map.entry(target).or_insert(0.0) += 10_000.0;
+        vbw_map[target as usize] += 10_000.0;
     }
 }
 
@@ -174,9 +174,9 @@ pub fn generate_candidates(
     let moves = covered_moves(board);
     let _wide = wide.unwrap_or(config.root_search.wide as usize);
 
-    let mut vbw_map = std::collections::HashMap::<Move, f64>::new();
-    let mut self_attack_map = std::collections::HashMap::<Move, i32>::new();
-    let mut opp_attack_map = std::collections::HashMap::<Move, i32>::new();
+    let mut vbw_map = [0.0_f64; BOARD_AREA];
+    let mut self_attack_map = [0_i32; BOARD_AREA];
+    let mut opp_attack_map = [0_i32; BOARD_AREA];
     let mut at1pri = 0_i32;
     let mut at2pri = 0_i32;
     let mut sglflag = 0_i32;
@@ -187,9 +187,10 @@ pub fn generate_candidates(
         let vbw = move_value(caches, x, y, side, config).trunc();
         let att1 = attack_level(caches, x, y, side);
         let att2 = attack_level(caches, x, y, -side);
-        vbw_map.insert(move_, vbw);
-        self_attack_map.insert(move_, att1);
-        opp_attack_map.insert(move_, att2);
+        let move_index = move_ as usize;
+        vbw_map[move_index] = vbw;
+        self_attack_map[move_index] = att1;
+        opp_attack_map[move_index] = att2;
 
         if vbw <= 0.0 {
             at2pri = at2pri.max(att2);
@@ -211,7 +212,7 @@ pub fn generate_candidates(
         }
     }
 
-    let mut candidates = Vec::new();
+    let mut candidates = Vec::with_capacity(moves.len());
     for &move_ in &moves {
         if let Some(allowed) = root_allowed_moves {
             if !allowed.contains(&move_) {
@@ -219,10 +220,11 @@ pub fn generate_candidates(
             }
         }
 
-        let mut vbw = *vbw_map.get(&move_).unwrap_or(&0.0);
+        let move_index = move_ as usize;
+        let mut vbw = vbw_map[move_index];
         if hsflag.is_some() {
             vbw -= 5000.0;
-            if self_attack_map.get(&move_).copied().unwrap_or(0) >= 4 {
+            if self_attack_map[move_index] >= 4 {
                 vbw += 8000.0;
             }
         }
@@ -237,8 +239,8 @@ pub fn generate_candidates(
         let candidate = Candidate {
             move_,
             order_score: score,
-            self_attack: self_attack_map.get(&move_).copied().unwrap_or(0),
-            opp_attack: opp_attack_map.get(&move_).copied().unwrap_or(0),
+            self_attack: self_attack_map[move_index],
+            opp_attack: opp_attack_map[move_index],
         };
         if score >= f64::from(WIN) {
             candidates = vec![candidate];

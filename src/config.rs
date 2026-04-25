@@ -31,6 +31,8 @@ pub struct RuntimeOptions {
     pub dynamic_board_margin: i32,
     pub compute_vct: bool,
     pub root_vct_depth: i32,
+    /// Experimental Lazy SMP helper search. Defaults to off because it is not
+    /// reference-equivalent and has not shown stable speedups yet.
     pub lazy_smp: bool,
     pub lazy_smp_workers: usize,
 }

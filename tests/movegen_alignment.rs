@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use rust_gomoku::constants::BOARD_AREA;
 use rust_gomoku::{
     apply_hostile_three_extension, attack_level, covered_moves, generate_candidates,
     load_default_config, move_to_xy, move_value, movegen_backend_name, recompute_all, xy_to_move,
@@ -134,7 +135,7 @@ fn hostile_three_extension_matches_expected_bonus_on_known_fallback_position() {
     recompute_all(&mut board, &mut caches);
     let cfg = load_default_config();
     let side = board.side_to_move();
-    let mut vbw_map: HashMap<_, f64> = HashMap::new();
+    let mut vbw_map = [0.0_f64; BOARD_AREA];
     let mut hsflag = None::<u16>;
     let mut sglflag = 0_i32;
     for move_ in covered_moves(&board) {
@@ -142,7 +143,7 @@ fn hostile_three_extension_matches_expected_bonus_on_known_fallback_position() {
         let value = move_value(&caches, x, y, side, &cfg);
         let att1 = attack_level(&caches, x, y, side);
         let att2 = attack_level(&caches, x, y, -side);
-        vbw_map.insert(move_, value);
+        vbw_map[move_ as usize] = value;
         if value <= 0.0 {
             continue;
         }
@@ -159,10 +160,11 @@ fn hostile_three_extension_matches_expected_bonus_on_known_fallback_position() {
     apply_hostile_three_extension(&board, hsflag.unwrap(), side, &mut vbw_map);
     let changed: HashMap<_, _> = vbw_map
         .iter()
-        .filter_map(|(move_, value)| {
-            let old = before[move_];
+        .enumerate()
+        .filter_map(|(move_index, value)| {
+            let old = before[move_index];
             if (*value - old).abs() > f64::EPSILON {
-                Some((move_to_xy(*move_).unwrap(), *value - old))
+                Some((move_to_xy(move_index as u16).unwrap(), *value - old))
             } else {
                 None
             }

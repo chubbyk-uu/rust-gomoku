@@ -104,24 +104,34 @@ pub fn order_candidates(
     side: Side,
     tt_best_move: Option<Move>,
 ) -> Vec<Candidate> {
-    let mut ordered = candidates.to_vec();
+    let mut ordered: Vec<(Candidate, bool, i32)> = candidates
+        .iter()
+        .map(|candidate| {
+            let (x, y) = move_to_xy(candidate.move_).expect("candidate move is in range");
+            (
+                *candidate,
+                tt_best_move == Some(candidate.move_),
+                getmi(board, x, y, side),
+            )
+        })
+        .collect();
     ordered.sort_by(|a, b| {
-        let a_tt = tt_best_move == Some(a.move_);
-        let b_tt = tt_best_move == Some(b.move_);
+        let (a_candidate, a_tt, a_mi) = a;
+        let (b_candidate, b_tt, b_mi) = b;
         b_tt.cmp(&a_tt)
             .then_with(|| {
-                b.order_score
-                    .partial_cmp(&a.order_score)
+                b_candidate
+                    .order_score
+                    .partial_cmp(&a_candidate.order_score)
                     .expect("candidate scores are finite")
             })
-            .then_with(|| {
-                let (ax, ay) = move_to_xy(a.move_).expect("candidate move is in range");
-                let (bx, by) = move_to_xy(b.move_).expect("candidate move is in range");
-                getmi(board, bx, by, side).cmp(&getmi(board, ax, ay, side))
-            })
-            .then_with(|| a.move_.cmp(&b.move_))
+            .then_with(|| b_mi.cmp(a_mi))
+            .then_with(|| a_candidate.move_.cmp(&b_candidate.move_))
     });
     ordered
+        .into_iter()
+        .map(|(candidate, _, _)| candidate)
+        .collect()
 }
 
 pub fn order_candidates_root_classic(

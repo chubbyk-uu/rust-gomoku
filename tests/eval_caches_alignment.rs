@@ -7,7 +7,7 @@ fn eval_caches_start_with_zeroed_storage() {
     assert_eq!(caches.board_shadow.len(), BOARD_SIZE);
     assert_eq!(caches.shape_cache.len(), 2);
     assert_eq!(caches.board_shadow[0][0], 0);
-    assert_eq!(caches.shape_cache[0][0][0], vec![0, 0, 0, 0]);
+    assert_eq!(caches.shape_cache[0][0][0], [0, 0, 0, 0]);
     assert_eq!(caches.value_cache[1][BOARD_SIZE - 1][BOARD_SIZE - 1], 0);
 }
 
@@ -27,7 +27,7 @@ fn eval_caches_reset_restores_zero_state() {
     caches.reset();
     assert!(!caches.initialized);
     assert_eq!(caches.board_shadow[0][0], 0);
-    assert_eq!(caches.shape_cache[0][0][0], vec![0, 0, 0, 0]);
+    assert_eq!(caches.shape_cache[0][0][0], [0, 0, 0, 0]);
     assert_eq!(caches.value_cache[1][0][0], 0);
     assert_eq!(caches.attack_cache[1][0][0], 0);
 }

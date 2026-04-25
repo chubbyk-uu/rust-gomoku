@@ -6,10 +6,14 @@ pub fn caches_backend_name() -> &'static str {
     "python"
 }
 
+pub type BoardShadow = [[i8; BOARD_SIZE]; BOARD_SIZE];
+pub type ValueCache = [[[i32; BOARD_SIZE]; BOARD_SIZE]; 2];
+pub type ShapeCache = [[[[i32; 4]; BOARD_SIZE]; BOARD_SIZE]; 2];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvalSnapshot {
     pub initialized: bool,
-    pub board_shadow: Vec<Vec<i8>>,
+    pub board_shadow: BoardShadow,
     pub shape_log_len: usize,
     pub value_log_len: usize,
 }
@@ -17,10 +21,10 @@ pub struct EvalSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvalCaches {
     pub initialized: bool,
-    pub board_shadow: Vec<Vec<i8>>,
-    pub shape_cache: Vec<Vec<Vec<Vec<i32>>>>,
-    pub value_cache: Vec<Vec<Vec<i32>>>,
-    pub attack_cache: Vec<Vec<Vec<i32>>>,
+    pub board_shadow: BoardShadow,
+    pub shape_cache: ShapeCache,
+    pub value_cache: ValueCache,
+    pub attack_cache: ValueCache,
     pub(crate) shape_log: Vec<(usize, usize, usize, usize, i32)>,
     pub(crate) value_log: Vec<(usize, usize, usize, i32, i32)>,
     pub(crate) active_snapshot_count: usize,
@@ -40,8 +44,8 @@ impl EvalCaches {
             shape_cache: new_shape_cache(),
             value_cache: new_value_cache(),
             attack_cache: new_value_cache(),
-            shape_log: Vec::new(),
-            value_log: Vec::new(),
+            shape_log: Vec::with_capacity(512),
+            value_log: Vec::with_capacity(256),
             active_snapshot_count: 0,
         }
     }
@@ -68,7 +72,7 @@ impl EvalCaches {
         self.active_snapshot_count += 1;
         EvalSnapshot {
             initialized: self.initialized,
-            board_shadow: self.board_shadow.clone(),
+            board_shadow: self.board_shadow,
             shape_log_len: self.shape_log.len(),
             value_log_len: self.value_log.len(),
         }
@@ -76,7 +80,7 @@ impl EvalCaches {
 
     pub fn restore_snapshot(&mut self, snapshot: &EvalSnapshot) {
         self.initialized = snapshot.initialized;
-        self.board_shadow = snapshot.board_shadow.clone();
+        self.board_shadow = snapshot.board_shadow;
 
         while self.shape_log.len() > snapshot.shape_log_len {
             let (player, x, y, direction, old_value) =
@@ -108,10 +112,10 @@ impl EvalCaches {
 
     pub fn restore_from(&mut self, other: &Self) {
         self.initialized = other.initialized;
-        self.board_shadow = other.board_shadow.clone();
-        self.shape_cache = other.shape_cache.clone();
-        self.value_cache = other.value_cache.clone();
-        self.attack_cache = other.attack_cache.clone();
+        self.board_shadow = other.board_shadow;
+        self.shape_cache = other.shape_cache;
+        self.value_cache = other.value_cache;
+        self.attack_cache = other.attack_cache;
         self.shape_log.clear();
         self.value_log.clear();
         self.active_snapshot_count = 0;
@@ -122,20 +126,14 @@ impl EvalCaches {
     }
 }
 
-fn new_board_matrix() -> Vec<Vec<i8>> {
-    vec![vec![0; BOARD_SIZE]; BOARD_SIZE]
+fn new_board_matrix() -> BoardShadow {
+    [[0; BOARD_SIZE]; BOARD_SIZE]
 }
 
-fn new_shape_cache() -> Vec<Vec<Vec<Vec<i32>>>> {
-    vec![
-        vec![vec![vec![0; 4]; BOARD_SIZE]; BOARD_SIZE],
-        vec![vec![vec![0; 4]; BOARD_SIZE]; BOARD_SIZE],
-    ]
+fn new_shape_cache() -> ShapeCache {
+    [[[[0; 4]; BOARD_SIZE]; BOARD_SIZE]; 2]
 }
 
-fn new_value_cache() -> Vec<Vec<Vec<i32>>> {
-    vec![
-        vec![vec![0; BOARD_SIZE]; BOARD_SIZE],
-        vec![vec![0; BOARD_SIZE]; BOARD_SIZE],
-    ]
+fn new_value_cache() -> ValueCache {
+    [[[0; BOARD_SIZE]; BOARD_SIZE]; 2]
 }

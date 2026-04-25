@@ -47,8 +47,8 @@
 - reference / Rust 双端差分测试脚手架
 - 12 个 root 搜索差分 case
 - reference 静态数据提取脚本
-- 可选 Lazy SMP 并行搜索入口
-- 共享固定桶 TT，为 Lazy SMP 辅助线程填表预留并发结构
+- 可选 Lazy SMP 实验入口，默认关闭
+- 无锁固定桶 TT，为后续并发搜索保留基础设施
 - 一批与 reference 对齐的 Rust 自动测试
 
 ### 当前已对齐的能力
@@ -68,7 +68,7 @@
 - movegen 的候选点覆盖、forcing class 折叠、hostile-three 扩展
 - ordering 的 tuple 排序和 root classic selection-sort 语义
 - TT 的 probe / store / replacement / alpha-beta window 行为
-- TT 已从惰性 `HashMap` 改为固定桶共享表；默认串行行为继续由差分测试约束
+- TT 已从惰性 `HashMap` 改为无锁固定桶表；默认串行行为继续由差分测试约束
 - alphabeta 的终局分数、深度、node limit、deadline、fallback 行为
 - root 搜索的空盘中心、动态棋盘窗口、classic fallback RNG、固定开局回归
 - root tactical fast path 在 VCF/VCT 返回前不初始化 eval caches，保持与 reference 结构更接近
@@ -85,16 +85,16 @@
 - `scripts/diff_reference.py` 调用 `reference/pygomoku` 输出同结构 JSON
 - `scripts/run_diff.py` 可批量运行 `cases/diff/*.json`，当前 12 个 root case 全部通过
 - 单线程兼容模式下，差分默认比较 `root.nodes`，用于尽早发现搜索路径漂移
-- Lazy SMP 默认关闭；开启后允许 TT 命中和节点数变化，不作为 reference 等价路径
+- Lazy SMP 是 experimental 功能，默认关闭；开启后允许 TT 命中、节点数和 best move 变化，不作为 reference 等价路径
 
 ### 还没有完成
 
 - GUI 或其它外部集成
 - movegen / eval / VCF / VCT 的细粒度双端差分覆盖
 - Python fallback 与 Cython 加速路径的系统性交叉验证
-- Lazy SMP 的更大规模对战评估和参数调优
+- Lazy SMP 的策略重设计；当前朴素 helper 填表没有稳定性能收益
 
-也就是说，**当前已经有单线程 classic 搜索主链、战术层、Gomocup stdin/stdout 入口、一轮 zhou 对战对齐验证、root 搜索层面的最小双端差分脚手架，以及第一版可选 Lazy SMP 并行路径；但还没有覆盖 eval / movegen / VCF / VCT 的完整差分体系，也还没有对 Lazy SMP 做充分对战验收。**
+也就是说，**当前已经有单线程 classic 搜索主链、战术层、Gomocup stdin/stdout 入口、一轮 zhou 对战对齐验证、root 搜索层面的最小双端差分脚手架，以及可选 Lazy SMP 实验路径；但还没有覆盖 eval / movegen / VCF / VCT 的完整差分体系，Lazy SMP 也还不是可推荐的主线性能方案。**
 
 ## 当前实现原则
 
@@ -112,10 +112,11 @@
 - `AlphaBetaSearcher`、`VCFSearcher`、`VCTSearcher` 当前持有各自搜索状态，适合作为线程本地 worker 状态
 - root tactical fast path 仍只在主线程执行；辅助线程不跑 VCF/VCT/root trace
 - Lazy SMP 只在进入 alphabeta 主链后启动，辅助线程使用线程本地 `Board / EvalCaches / AlphaBetaSearcher`
-- Lazy SMP 辅助线程共享 TT，只负责填表；最终返回值仍取主线程 root search 结果
+- Lazy SMP 辅助线程共享无锁 TT，只负责填表；最终返回值仍取主线程 root search 结果
 - 默认必须保留稳定的单线程兼容模式，且 `node_limit / time_limit` 下当前不启用 Lazy SMP
 - 已放弃 root-split full-window 方案：它会丢掉串行 PV 搜索的 alpha/null-window 剪枝，实测容易增大搜索量并降低棋力
-- Lazy SMP 是可选性能/棋力路径，不作为 reference 等价路径；开启后不强制 `nodes` 或 best move 与串行严格一致
+- Lazy SMP 当前仅作为 experimental 开关保留，不作为 reference 等价路径，也不建议默认用于对战；开启后不强制 `nodes` 或 best move 与串行严格一致
+- 当前实测显示朴素 Lazy SMP helper 在 `d6/w20` 和 `d8/w30` 下没有稳定提速，主要价值是保留并行架构边界和验证工具
 
 ## 目录说明
 
@@ -271,14 +272,14 @@ Lazy SMP 单局探针：
 cargo run --quiet --bin diff_probe -- --case cases/diff/root_deep_opening_10_4_d8_w15.json --lazy-smp --lazy-smp-workers 4
 ```
 
-当前初步 release 计时只用于判断方向，不作为正式 benchmark：
+Lazy SMP 当前结论：
 
-- case：`root_deep_opening_10_4_d8_w15.json`
-- 串行：约 `2.01s`，`122196` 主线程节点
-- Lazy SMP 2 workers：约 `1.86s`，`102740` 主线程节点
-- Lazy SMP 4 workers：约 `1.72s`，`86305` 主线程节点
-- Lazy SMP 10 workers：约 `1.96s`，`76982` 主线程节点
-- 结论：当前 4 workers 在该局面最好，10 workers 已出现额外调度/TT 竞争成本；后续需要用更多局面和对战评估调参
+- 这是 experimental 功能，默认关闭。
+- 它保留了并行搜索的工程边界：线程本地 `Board / EvalCaches / AlphaBetaSearcher`、共享无锁 TT、stop signal、CLI / protocol 开关和探针参数。
+- 朴素 helper 填表策略当前没有稳定性能收益，不建议作为默认对战模式。
+- `d8/w30`、同开局 `(7,7)`、Rust 执黑对 zhou 的单局 smoke 中，Lazy2 与串行棋谱一致，但 Rust 平均耗时略慢。
+- 更早的 Lazy8 / 多开局 smoke 出现过走法漂移，说明共享 TT 会改变主线程 move ordering；这是 experimental 模式允许的行为，但不能用于 reference 等价验证。
+- 后续如果继续推进并行，应先重设计 helper 写入策略或使用更保守的后台分析模式，而不是继续增加 worker 数。
 
 Gomocup / zhou 对战验证：
 

@@ -77,6 +77,28 @@ pub fn shape_raw_from_cells_python(cells: &[i32], point_index: usize, freestyle:
     ((trt & 0xF0) << 12) | (trt & 0xF)
 }
 
+pub fn shape_raw_from_board_python(
+    board: &Board,
+    pivot: usize,
+    direction: i32,
+    point_index: usize,
+    freestyle: bool,
+) -> Result<i32, PatternError> {
+    let mut cells = [SENTINEL; BOARD_SIZE + 4];
+    fill_cells_python(
+        &mut cells,
+        board.grid_rows(),
+        board.size(),
+        pivot,
+        direction,
+    )?;
+    Ok(shape_raw_from_cells_python(
+        &cells[..board.size() + 4],
+        point_index,
+        freestyle,
+    ))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
     pub cells: Vec<i32>,
@@ -417,6 +439,17 @@ fn extract_cells_python(
     direction: i32,
 ) -> Result<Vec<i32>, PatternError> {
     let mut cells = vec![SENTINEL; size + 4];
+    fill_cells_python(&mut cells, grid, size, pivot, direction)?;
+    Ok(cells)
+}
+
+fn fill_cells_python(
+    cells: &mut [i32],
+    grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
+    size: usize,
+    pivot: usize,
+    direction: i32,
+) -> Result<(), PatternError> {
     match direction {
         HORIZONTAL => {
             for y in 0..size {
@@ -457,7 +490,7 @@ fn extract_cells_python(
             return Err(PatternError::InvalidDirection(direction));
         }
     }
-    Ok(cells)
+    Ok(())
 }
 
 fn comb(x: usize, y: usize) -> i32 {

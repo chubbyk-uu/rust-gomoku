@@ -424,8 +424,8 @@ fn value_wide_matches_expected_on_handpicked_points() {
         assert_eq!(caches.attack_cache[0][x][y], attack_black);
         assert_eq!(caches.value_cache[1][x][y], bucket_white);
         assert_eq!(caches.attack_cache[1][x][y], attack_white);
-        assert_eq!(caches.shape_cache[0][x][y], shape_black.to_vec());
-        assert_eq!(caches.shape_cache[1][x][y], shape_white.to_vec());
+        assert_eq!(caches.shape_cache[0][x][y], shape_black);
+        assert_eq!(caches.shape_cache[1][x][y], shape_white);
     }
 }
 

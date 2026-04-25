@@ -5,7 +5,7 @@ use crate::config::EngineConfig;
 use crate::constants::{BLACK, BOARD_SIZE, EMPTY, WHITE};
 use crate::eval::caches::EvalCaches;
 use crate::patterns::buckets::bucket_for_lines;
-use crate::patterns::line::Line;
+use crate::patterns::line::shape_raw_from_board_python;
 use crate::patterns::shapes::{ShapeLabel, DIAGONAL_DOWN, DIAGONAL_UP, HORIZONTAL, VERTICAL};
 
 const FOUR_DIRECTIONS: [i32; 4] = [HORIZONTAL, VERTICAL, DIAGONAL_DOWN, DIAGONAL_UP];
@@ -28,9 +28,8 @@ pub fn compute_direction_shape(
     board.grid_rows_mut()[y][x] = side;
     let result = {
         let (pivot, point_index) = pivot_and_point_index(x, y, direction);
-        Line::from_board(board, pivot, direction)
+        shape_raw_from_board_python(board, pivot, direction, point_index, true)
             .expect("direction checked in pivot_and_point_index")
-            .shape_raw(point_index, true)
     };
     board.grid_rows_mut()[y][x] = EMPTY;
     result

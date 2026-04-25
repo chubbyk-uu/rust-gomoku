@@ -2,5 +2,8 @@
 /.codex
 /.codex/
 /reference/
+/opponent/
 __pycache__/
 *.pyc
+flamegraph.svg
+perf.data*
