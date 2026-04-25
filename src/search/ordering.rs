@@ -104,34 +104,37 @@ pub fn order_candidates(
     side: Side,
     tt_best_move: Option<Move>,
 ) -> Vec<Candidate> {
-    let mut ordered: Vec<(Candidate, bool, i32)> = candidates
+    let mut ordered: Vec<(Candidate, bool)> = candidates
         .iter()
-        .map(|candidate| {
-            let (x, y) = move_to_xy(candidate.move_).expect("candidate move is in range");
-            (
-                *candidate,
-                tt_best_move == Some(candidate.move_),
-                getmi(board, x, y, side),
-            )
-        })
+        .map(|candidate| (*candidate, tt_best_move == Some(candidate.move_)))
         .collect();
+    let mut mi_cache = [0_i32; BOARD_AREA];
     ordered.sort_by(|a, b| {
-        let (a_candidate, a_tt, a_mi) = a;
-        let (b_candidate, b_tt, b_mi) = b;
-        b_tt.cmp(&a_tt)
+        let (a_candidate, a_tt) = a;
+        let (b_candidate, b_tt) = b;
+        b_tt.cmp(a_tt)
             .then_with(|| {
                 b_candidate
                     .order_score
                     .partial_cmp(&a_candidate.order_score)
                     .expect("candidate scores are finite")
             })
-            .then_with(|| b_mi.cmp(a_mi))
+            .then_with(|| {
+                let mut cached_mi = |c: &Candidate| {
+                    let idx = c.move_ as usize;
+                    if mi_cache[idx] == 0 {
+                        let (x, y) = move_to_xy(c.move_).expect("candidate move is in range");
+                        mi_cache[idx] = getmi(board, x, y, side);
+                    }
+                    mi_cache[idx]
+                };
+                let a_mi = cached_mi(a_candidate);
+                let b_mi = cached_mi(b_candidate);
+                b_mi.cmp(&a_mi)
+            })
             .then_with(|| a_candidate.move_.cmp(&b_candidate.move_))
     });
-    ordered
-        .into_iter()
-        .map(|(candidate, _, _)| candidate)
-        .collect()
+    ordered.into_iter().map(|(candidate, _)| candidate).collect()
 }
 
 pub fn order_candidates_root_classic(
@@ -140,7 +143,7 @@ pub fn order_candidates_root_classic(
     side: Side,
 ) -> Vec<Candidate> {
     let mut ordered = candidates.to_vec();
-    let mut mis = vec![0_i32; BOARD_AREA];
+    let mut mis = [0_i32; BOARD_AREA];
     let limit = ordered.len();
     for i in 0..limit {
         let mut best_index = i;

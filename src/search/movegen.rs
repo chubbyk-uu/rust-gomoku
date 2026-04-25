@@ -45,26 +45,27 @@ const COVER_DIRS: [(isize, isize); 32] = [
     (3, 3),
 ];
 
-static COVER_NEIGHBORS: LazyLock<Vec<Vec<Move>>> = LazyLock::new(|| {
-    (0..BOARD_AREA)
-        .map(|move_index| {
+const COVER_NEIGHBOR_CAP: usize = 32;
+const COVER_SENTINEL: Move = u16::MAX;
+
+static COVER_NEIGHBORS: LazyLock<[[Move; COVER_NEIGHBOR_CAP]; BOARD_AREA]> =
+    LazyLock::new(|| {
+        let mut table = [[COVER_SENTINEL; COVER_NEIGHBOR_CAP]; BOARD_AREA];
+        for move_index in 0..BOARD_AREA {
             let x = move_index % BOARD_SIZE;
             let y = move_index / BOARD_SIZE;
-            COVER_DIRS
-                .iter()
-                .filter_map(|&(dx, dy)| {
-                    let xx = x as isize + dx;
-                    let yy = y as isize + dy;
-                    if xx >= 0 && yy >= 0 && xx < BOARD_SIZE as isize && yy < BOARD_SIZE as isize {
-                        Some((yy as usize * BOARD_SIZE + xx as usize) as Move)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        })
-        .collect()
-});
+            let mut count = 0;
+            for &(dx, dy) in COVER_DIRS.iter() {
+                let xx = x as isize + dx;
+                let yy = y as isize + dy;
+                if xx >= 0 && yy >= 0 && xx < BOARD_SIZE as isize && yy < BOARD_SIZE as isize {
+                    table[move_index][count] = (yy as usize * BOARD_SIZE + xx as usize) as Move;
+                    count += 1;
+                }
+            }
+        }
+        table
+    });
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Candidate {
@@ -92,20 +93,20 @@ pub fn covered_moves(board: &Board) -> Vec<Move> {
     }
 
     let mut seen = [false; BOARD_AREA];
-    let mut covered = Vec::with_capacity(BOARD_AREA);
     for played in board.move_history() {
-        for &candidate in &COVER_NEIGHBORS[played.move_ as usize] {
+        for &candidate in COVER_NEIGHBORS[played.move_ as usize].iter() {
+            if candidate == COVER_SENTINEL {
+                break;
+            }
             if !seen[candidate as usize] {
                 let (x, y) = move_to_xy(candidate).expect("covered neighbor move is in range");
                 if board.grid_rows()[y][x] == EMPTY {
                     seen[candidate as usize] = true;
-                    covered.push(candidate);
                 }
             }
         }
     }
-    covered.sort_unstable();
-    covered
+    (0..BOARD_AREA as Move).filter(|&m| seen[m as usize]).collect()
 }
 
 pub fn apply_hostile_three_extension(

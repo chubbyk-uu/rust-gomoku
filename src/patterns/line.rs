@@ -129,26 +129,34 @@ pub(crate) fn shape_raw_from_board_point_python(
             freestyle,
             |slot| slot_line_index(size, slot).map_or(SENTINEL, |i| i32::from(grid[pivot][i])),
         )),
-        DIAGONAL_DOWN => Ok(shape_raw_from_line_slots(
-            size,
-            point_index,
-            freestyle,
-            |slot| {
-                slot_line_index(size, slot)
-                    .and_then(|i| diagonal_index_range(size, pivot).contains(&i).then_some(i))
-                    .map_or(SENTINEL, |i| i32::from(grid[i][pivot - i]))
-            },
-        )),
-        DIAGONAL_UP => Ok(shape_raw_from_line_slots(
-            size,
-            point_index,
-            freestyle,
-            |slot| {
-                slot_line_index(size, slot)
-                    .and_then(|i| diagonal_index_range(size, pivot).contains(&i).then_some(i))
-                    .map_or(SENTINEL, |i| i32::from(grid[size - 1 - i][pivot - i]))
-            },
-        )),
+        DIAGONAL_DOWN => {
+            let r = diagonal_index_range(size, pivot);
+            let (lo, hi) = (r.start, r.end);
+            Ok(shape_raw_from_line_slots(
+                size,
+                point_index,
+                freestyle,
+                |slot| {
+                    slot_line_index(size, slot)
+                        .and_then(|i| (i >= lo && i < hi).then_some(i))
+                        .map_or(SENTINEL, |i| i32::from(grid[i][pivot - i]))
+                },
+            ))
+        }
+        DIAGONAL_UP => {
+            let r = diagonal_index_range(size, pivot);
+            let (lo, hi) = (r.start, r.end);
+            Ok(shape_raw_from_line_slots(
+                size,
+                point_index,
+                freestyle,
+                |slot| {
+                    slot_line_index(size, slot)
+                        .and_then(|i| (i >= lo && i < hi).then_some(i))
+                        .map_or(SENTINEL, |i| i32::from(grid[size - 1 - i][pivot - i]))
+                },
+            ))
+        }
         _ => Err(PatternError::InvalidDirection(direction)),
     }
 }
