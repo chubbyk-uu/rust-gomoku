@@ -1,6 +1,11 @@
 //! Root iterative-deepening search for the classic mainline.
 
 use std::collections::HashSet;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::board::{move_to_xy, xy_to_move, Board};
@@ -81,6 +86,12 @@ pub struct RootTrace {
     pub vct_accepted: bool,
     pub vct_reject_reason: Option<&'static str>,
     pub vct_ms: Option<f64>,
+    pub alphabeta_ms: Option<f64>,
+    pub overlap_used: bool,
+    pub overlap_ab_ms: Option<f64>,
+    pub overlap_ab_cancelled: bool,
+    pub overlap_wait_ms: Option<f64>,
+    pub tt_snapshot_ms: Option<f64>,
     pub tactical_path: &'static str,
     pub root_profiles: Vec<RootDepthProfile>,
 }
@@ -97,6 +108,12 @@ impl Default for RootTrace {
             vct_accepted: false,
             vct_reject_reason: None,
             vct_ms: None,
+            alphabeta_ms: None,
+            overlap_used: false,
+            overlap_ab_ms: None,
+            overlap_ab_cancelled: false,
+            overlap_wait_ms: None,
+            tt_snapshot_ms: None,
             tactical_path: "alphabeta",
             root_profiles: Vec::new(),
         }
@@ -136,6 +153,10 @@ impl ClassicFallbackRng {
 
 pub fn new_classic_fallback_rng() -> ClassicFallbackRng {
     ClassicFallbackRng::new(CLASSIC_RAND_SEED).expect("classic fallback seed stays supported")
+}
+
+fn elapsed_ms(start: Instant) -> f64 {
+    (start.elapsed().as_secs_f64() * 1000.0 * 1000.0).round() / 1000.0
 }
 
 fn shape_label(shape: i32) -> i32 {
@@ -264,6 +285,14 @@ pub struct RootSearcher {
     pub vct: VCTSearcher,
     pub fallback_rng: ClassicFallbackRng,
     pub last_trace: Option<RootTrace>,
+}
+
+struct AlphaBetaThreadResult {
+    result: SearchResult,
+    trace: RootTrace,
+    searcher: RootSearcher,
+    elapsed_ms: f64,
+    cancelled: bool,
 }
 
 impl RootSearcher {
@@ -436,76 +465,20 @@ impl RootSearcher {
         Some(filtered)
     }
 
-    pub fn search(&mut self, board: &mut Board, limits: Option<SearchLimits>) -> SearchResult {
-        let limits = limits.unwrap_or_else(|| SearchLimits::fixed_from_config(&self.config));
+    fn can_overlap_vct_alphabeta(&self, limits: &SearchLimits) -> bool {
+        self.config.runtime.overlap_vct_alphabeta
+            && limits.time_limit_ms.is_none()
+            && limits.node_limit.is_none()
+    }
 
-        if board.move_count() == 0 {
-            self.last_trace = Some(RootTrace::default());
-            let center =
-                xy_to_move(board.size() / 2, board.size() / 2).expect("center stays valid");
-            return SearchResult {
-                move_: center,
-                score: 0,
-                depth: 0,
-                nodes: 0,
-            };
-        }
-
-        let side = board.side_to_move();
-        let mut trace = RootTrace::default();
-        self.last_trace = Some(trace.clone());
-
-        if self.config.runtime.compute_vcf {
-            trace.used_vcf = true;
-            let vcf_result = self
-                .vcf
-                .search(board, side, self.config.runtime.root_vcf_depth);
-            if vcf_result.found {
-                trace.vcf_found = true;
-                trace.tactical_path = "vcf";
-                self.last_trace = Some(trace);
-                return SearchResult {
-                    move_: vcf_result
-                        .move_
-                        .expect("successful VCF search returns a move"),
-                    score: INF,
-                    depth: 0,
-                    nodes: 0,
-                };
-            }
-        }
-
-        if self.config.runtime.compute_vct && self.config.runtime.root_vct_depth > 0 {
-            trace.used_vct = true;
-            if has_vct_trigger(board, side) {
-                trace.vct_triggered = true;
-                let vct_start = Instant::now();
-                let vct_result = self
-                    .vct
-                    .search(board, side, self.config.runtime.root_vct_depth);
-                trace.vct_ms =
-                    Some((vct_start.elapsed().as_secs_f64() * 1000.0 * 1000.0).round() / 1000.0);
-                trace.vct_found = vct_result.found;
-                trace.vct_move = vct_result.move_;
-                if let Some(move_) = vct_result.move_.filter(|_| vct_result.found) {
-                    let (accepted, reason) = self.verify_root_vct_move(board, side, move_);
-                    trace.vct_accepted = accepted;
-                    trace.vct_reject_reason = reason;
-                    if accepted {
-                        trace.tactical_path = "vct";
-                        self.last_trace = Some(trace);
-                        return SearchResult {
-                            move_,
-                            score: INF,
-                            depth: 0,
-                            nodes: 0,
-                        };
-                    }
-                }
-            }
-        }
-        self.last_trace = Some(trace.clone());
-
+    fn search_alphabeta_only(
+        &mut self,
+        board: &mut Board,
+        side: Side,
+        limits: SearchLimits,
+        trace: &mut RootTrace,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> SearchResult {
         let mut caches = EvalCaches::new();
         recompute_all(board, &mut caches);
 
@@ -516,8 +489,32 @@ impl RootSearcher {
         let deadline = limits
             .time_limit_ms
             .map(|ms| Instant::now() + Duration::from_secs_f64(ms / 1000.0));
+        if cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+        {
+            return SearchResult {
+                move_: fallback_ai_move(board, &caches, side, &mut self.fallback_rng)
+                    .expect("fallback move exists on non-terminal board"),
+                score: best_score,
+                depth: 0,
+                nodes: 0,
+            };
+        }
         let root_allowed_moves =
             self.apply_opponent_vcf_filter(board, side, self.root_allowed_moves(board));
+        if cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+        {
+            return SearchResult {
+                move_: fallback_ai_move(board, &caches, side, &mut self.fallback_rng)
+                    .expect("fallback move exists on non-terminal board"),
+                score: best_score,
+                depth: 0,
+                nodes: 0,
+            };
+        }
         if let Some(allowed) = &root_allowed_moves {
             let mut root_legal_moves: Vec<_> = allowed
                 .iter()
@@ -550,11 +547,18 @@ impl RootSearcher {
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 break;
             }
+            if cancel
+                .as_ref()
+                .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+            {
+                break;
+            }
             let depth_start = Instant::now();
             let mut stats = SearchStats {
                 node_limit: limits.node_limit,
                 deadline,
                 root_profile: self.config.runtime.root_profile,
+                cancel: cancel.clone(),
                 ..SearchStats::default()
             };
             let (score, move_) = self.alphabeta.search(
@@ -610,12 +614,179 @@ impl RootSearcher {
             fallback_ai_move(board, &caches, side, &mut self.fallback_rng)
                 .expect("fallback move exists on non-terminal board")
         });
-        self.last_trace = Some(trace);
         SearchResult {
             move_,
             score: best_score,
             depth: completed_depth,
             nodes: total_nodes,
         }
+    }
+
+    fn search_vct_and_alphabeta_overlap(
+        &mut self,
+        board: &Board,
+        side: Side,
+        limits: SearchLimits,
+        mut trace: RootTrace,
+    ) -> SearchResult {
+        trace.overlap_used = true;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel_flag = cancel.clone();
+        let worker_cancel = Some(worker_cancel_flag.clone());
+        let mut worker_board = board.clone();
+        let worker_config = self.config.clone();
+        let tt_snapshot_start = Instant::now();
+        let worker_tt = self.tt.fork_snapshot();
+        trace.tt_snapshot_ms = Some(elapsed_ms(tt_snapshot_start));
+        let worker_fallback_rng = self.fallback_rng.clone();
+
+        let ab_handle = thread::spawn(move || {
+            let mut worker = RootSearcher::with_tt(worker_config, worker_tt);
+            worker.fallback_rng = worker_fallback_rng;
+            let mut worker_trace = RootTrace::default();
+            let ab_start = Instant::now();
+            let result = worker.search_alphabeta_only(
+                &mut worker_board,
+                side,
+                limits,
+                &mut worker_trace,
+                worker_cancel,
+            );
+            let elapsed_ms = elapsed_ms(ab_start);
+            let cancelled = worker_cancel_flag.load(Ordering::Relaxed);
+            AlphaBetaThreadResult {
+                result,
+                trace: worker_trace,
+                searcher: worker,
+                elapsed_ms,
+                cancelled,
+            }
+        });
+
+        let vct_start = Instant::now();
+        let vct_result = self
+            .vct
+            .search(board, side, self.config.runtime.root_vct_depth);
+        trace.vct_ms = Some(elapsed_ms(vct_start));
+        trace.vct_found = vct_result.found;
+        trace.vct_move = vct_result.move_;
+        if let Some(move_) = vct_result.move_.filter(|_| vct_result.found) {
+            let (accepted, reason) = self.verify_root_vct_move(board, side, move_);
+            trace.vct_accepted = accepted;
+            trace.vct_reject_reason = reason;
+            if accepted {
+                cancel.store(true, Ordering::Relaxed);
+                let wait_start = Instant::now();
+                let ab_result = ab_handle
+                    .join()
+                    .expect("overlapped alphabeta worker stays healthy");
+                trace.overlap_wait_ms = Some(elapsed_ms(wait_start));
+                trace.overlap_ab_ms = Some(ab_result.elapsed_ms);
+                trace.overlap_ab_cancelled = true;
+                trace.tactical_path = "vct";
+                self.last_trace = Some(trace);
+                return SearchResult {
+                    move_,
+                    score: INF,
+                    depth: 0,
+                    nodes: 0,
+                };
+            }
+        }
+
+        let wait_start = Instant::now();
+        let ab_result = ab_handle
+            .join()
+            .expect("overlapped alphabeta worker stays healthy");
+        trace.overlap_wait_ms = Some(elapsed_ms(wait_start));
+        trace.overlap_ab_ms = Some(ab_result.elapsed_ms);
+        trace.overlap_ab_cancelled = ab_result.cancelled;
+        self.tt = ab_result.searcher.tt;
+        self.alphabeta = ab_result.searcher.alphabeta;
+        self.fallback_rng = ab_result.searcher.fallback_rng;
+        trace.alphabeta_ms = Some(ab_result.elapsed_ms);
+        trace.root_profiles = ab_result.trace.root_profiles;
+        self.last_trace = Some(trace);
+        ab_result.result
+    }
+
+    pub fn search(&mut self, board: &mut Board, limits: Option<SearchLimits>) -> SearchResult {
+        let limits = limits.unwrap_or_else(|| SearchLimits::fixed_from_config(&self.config));
+
+        if board.move_count() == 0 {
+            self.last_trace = Some(RootTrace::default());
+            let center =
+                xy_to_move(board.size() / 2, board.size() / 2).expect("center stays valid");
+            return SearchResult {
+                move_: center,
+                score: 0,
+                depth: 0,
+                nodes: 0,
+            };
+        }
+
+        let side = board.side_to_move();
+        let mut trace = RootTrace::default();
+        self.last_trace = Some(trace.clone());
+
+        if self.config.runtime.compute_vcf {
+            trace.used_vcf = true;
+            let vcf_result = self
+                .vcf
+                .search(board, side, self.config.runtime.root_vcf_depth);
+            if vcf_result.found {
+                trace.vcf_found = true;
+                trace.tactical_path = "vcf";
+                self.last_trace = Some(trace);
+                return SearchResult {
+                    move_: vcf_result
+                        .move_
+                        .expect("successful VCF search returns a move"),
+                    score: INF,
+                    depth: 0,
+                    nodes: 0,
+                };
+            }
+        }
+
+        if self.config.runtime.compute_vct && self.config.runtime.root_vct_depth > 0 {
+            trace.used_vct = true;
+            if has_vct_trigger(board, side) {
+                trace.vct_triggered = true;
+                if self.can_overlap_vct_alphabeta(&limits) {
+                    return self.search_vct_and_alphabeta_overlap(board, side, limits, trace);
+                }
+
+                let vct_start = Instant::now();
+                let vct_result = self
+                    .vct
+                    .search(board, side, self.config.runtime.root_vct_depth);
+                trace.vct_ms = Some(elapsed_ms(vct_start));
+                trace.vct_found = vct_result.found;
+                trace.vct_move = vct_result.move_;
+                if let Some(move_) = vct_result.move_.filter(|_| vct_result.found) {
+                    let (accepted, reason) = self.verify_root_vct_move(board, side, move_);
+                    trace.vct_accepted = accepted;
+                    trace.vct_reject_reason = reason;
+                    if accepted {
+                        trace.tactical_path = "vct";
+                        self.last_trace = Some(trace);
+                        return SearchResult {
+                            move_,
+                            score: INF,
+                            depth: 0,
+                            nodes: 0,
+                        };
+                    }
+                }
+            }
+        }
+        self.last_trace = Some(trace.clone());
+
+        let ab_start = Instant::now();
+        let result = self.search_alphabeta_only(board, side, limits, &mut trace, None);
+        trace.alphabeta_ms = Some(elapsed_ms(ab_start));
+        self.last_trace = Some(trace);
+        result
     }
 }

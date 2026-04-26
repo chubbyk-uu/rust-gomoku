@@ -171,6 +171,51 @@ fn root_vct_triggered_and_accepted_on_dual_a3_win() {
     assert!(trace.vct_accepted);
     assert!(trace.vct_ms.is_some());
     assert_eq!(trace.tactical_path, "vct");
+    assert_eq!(trace.overlap_used, false);
+    assert_eq!(move_to_xy(result.move_).unwrap(), (7, 7));
+    assert_eq!(result.score, INF);
+}
+
+#[test]
+fn root_overlap_vct_alphabeta_keeps_accepted_vct_priority() {
+    let mut board = Board::new();
+    let sequence = [
+        (6, 7, 1),
+        (0, 0, -1),
+        (8, 7, 1),
+        (1, 3, -1),
+        (7, 6, 1),
+        (3, 1, -1),
+        (7, 8, 1),
+        (14, 14, -1),
+    ];
+    for (x, y, side) in sequence {
+        board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
+    }
+
+    let mut config = load_default_config();
+    config.runtime.overlap_vct_alphabeta = true;
+    let mut searcher = RootSearcher::new(config);
+    let result = searcher.search(
+        &mut board,
+        Some(SearchLimits {
+            max_depth: 2,
+            root_width: 8,
+            ..SearchLimits::default()
+        }),
+    );
+
+    let trace = searcher.last_trace.as_ref().expect("trace is recorded");
+    assert!(trace.vct_triggered);
+    assert!(trace.vct_found);
+    assert!(trace.vct_accepted);
+    assert_eq!(trace.tactical_path, "vct");
+    assert!(trace.overlap_used);
+    assert!(trace.vct_ms.is_some());
+    assert!(trace.overlap_ab_ms.is_some());
+    assert!(trace.overlap_wait_ms.is_some());
+    assert!(trace.tt_snapshot_ms.is_some());
+    assert!(trace.overlap_ab_cancelled);
     assert_eq!(move_to_xy(result.move_).unwrap(), (7, 7));
     assert_eq!(result.score, INF);
 }
@@ -204,6 +249,52 @@ fn root_vct_triggered_but_finds_no_win() {
     assert!(!trace.vct_accepted);
     assert!(trace.vct_ms.is_some());
     assert_eq!(trace.tactical_path, "alphabeta");
+    assert_eq!(trace.overlap_used, false);
+    assert!(trace.alphabeta_ms.is_some());
+}
+
+#[test]
+fn root_overlap_vct_alphabeta_matches_serial_when_vct_misses() {
+    let mut board = Board::new();
+    let sequence = [
+        (5, 7, 1),
+        (4, 7, -1),
+        (6, 7, 1),
+        (0, 1, -1),
+        (7, 7, 1),
+        (1, 1, -1),
+    ];
+    for (x, y, side) in sequence {
+        board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
+    }
+    let limits = SearchLimits {
+        max_depth: 4,
+        root_width: 20,
+        ..SearchLimits::default()
+    };
+
+    let mut serial = RootSearcher::new(load_default_config());
+    let serial_result = serial.search(&mut board.clone(), Some(limits));
+
+    let mut config = load_default_config();
+    config.runtime.overlap_vct_alphabeta = true;
+    let mut overlapped = RootSearcher::new(config);
+    let overlapped_result = overlapped.search(&mut board, Some(limits));
+
+    assert_eq!(overlapped_result, serial_result);
+    let trace = overlapped.last_trace.as_ref().expect("trace is recorded");
+    assert!(trace.vct_triggered);
+    assert!(!trace.vct_found);
+    assert!(!trace.vct_accepted);
+    assert_eq!(trace.tactical_path, "alphabeta");
+    assert!(trace.overlap_used);
+    assert!(trace.vct_ms.is_some());
+    assert!(trace.alphabeta_ms.is_some());
+    assert!(trace.overlap_ab_ms.is_some());
+    assert_eq!(trace.alphabeta_ms, trace.overlap_ab_ms);
+    assert!(trace.overlap_wait_ms.is_some());
+    assert!(trace.tt_snapshot_ms.is_some());
+    assert!(!trace.overlap_ab_cancelled);
 }
 
 #[test]

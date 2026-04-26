@@ -18,7 +18,7 @@
 - Rust/reference 固定开局 Gomocup 对战脚本
 - 仓库内保留 `opponent/zhou` 作为轻量基线对手
 
-当前主线是确定性串行搜索。Lazy SMP、root YBWC 等并行实验已经从主线移除，因为实测没有稳定收益且会改变搜索路径或棋力。后续并行应在独立分支重新设计，不在当前串行基线上补丁式接入。
+默认主线是确定性串行搜索。Lazy SMP、root YBWC 等并行实验已经从主线移除，因为实测没有稳定收益且会改变搜索路径或棋力。当前只保留一个默认关闭的实验开关：`overlap_vct_alphabeta`，用于在 VCF 未命中且 VCT trigger 命中后重叠执行 VCT 与 alphabeta。
 
 ## 默认参数
 
@@ -35,6 +35,7 @@
 | `vct_verify_opponent_vcf_depth` | `4` |
 | `root_vct_depth` | `8` |
 | `compute_vcf` / `compute_vct` | 开启 |
+| `overlap_vct_alphabeta` | 关闭 |
 | `nonroot_vcf` | 关闭 |
 | `static_board` | 开启 |
 | `dynamic_board_margin` | `4` |
@@ -44,6 +45,7 @@
 - Rust 默认运行参数有意高于 reference 的常用对战参数。
 - 需要与 Python reference 严格对齐时，通常显式设置 `depth=6,width=20,root_vct_depth=4`。
 - `static_board=true` 只影响 root allowed window；正常 alphabeta 候选仍来自已有棋子附近的 covered moves。
+- `overlap_vct_alphabeta=false` 是默认值；开启后不会使用共享 TT，只在固定搜索、无 node/time limit 时尝试重叠 VCT 与 alphabeta。
 
 ## Reference 路径
 
@@ -145,6 +147,7 @@ target/release/gomocup_engine --depth 6 --width 20 --root-profile
 - `INFO nonroot_vcf 0|1`
 - `INFO compute_vct 0|1`
 - `INFO root_vct_depth N`
+- `INFO overlap_vct_alphabeta 0|1`
 - `INFO static 0|1`
 - `INFO dynamic_board_margin N`
 - `INFO root_profile 0|1`
@@ -257,6 +260,15 @@ tests/               Rust 自动测试
 - 不为提升速度改变候选排序或搜索语义
 - 不把 `opponent/zhou` 当作主语义来源
 
+实验性 `overlap_vct_alphabeta` 不属于 Lazy SMP/YBWC：它只在 VCF miss 后让 VCT 和 alphabeta 同时运行；如果 VCT accepted，取消并丢弃 alphabeta；如果 VCT miss/rejected，等待并采用 alphabeta 结果。该开关默认关闭，开启前应跑固定慢局面和 Rust/reference 对战验证。
+
+当前测试结论：
+
+- 9 开局 18 局对 reference 开启 overlap 后仍为 Rust `17 胜 / 1 负`，未发现棋力退化。
+- 慢局面 `[12,12]` Rust 执黑中，28 个 Rust 搜索有 15 次触发 overlap，但 VCT accepted 为 0。
+- 该慢局面 VCT 总耗时约 `2.7s`，alphabeta 总耗时约 `62.6s`，所以 overlap 理论收益上限较低。
+- 当前最大耗时瓶颈仍在 alphabeta，而不是 VCT。
+
 ## 下一步
 
 优先级较高：
@@ -265,7 +277,7 @@ tests/               Rust 自动测试
 2. 从真实对战慢手中抽取更多固定局面 case。
 3. 继续做串行热点 profiling 和低风险数据结构优化。
 4. 补协议边界用例，继续对齐 reference。
-5. 若重启并行，必须新建分支，并先设计验证标准。
+5. 若继续 alphabeta 并行，先用 root candidate profile 判断 PV 首候选和后续候选耗时占比，再设计确定性 lazy split / PV-safe 方案。
 
 ## 当前结论
 

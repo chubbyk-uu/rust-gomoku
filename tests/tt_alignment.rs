@@ -315,3 +315,33 @@ fn tt_clone_shares_storage() {
     });
     assert_eq!(cloned.probe(5, 3, -10, 10).value, Some(123));
 }
+
+#[test]
+fn tt_fork_snapshot_copies_entries_without_sharing_storage() {
+    let table = TranspositionTable::new(2);
+    table.store(TTEntry {
+        key: 5,
+        value: 123,
+        flag: HASHF_EXACT,
+        depth: 3,
+        priority: 7,
+        best_move: Some(9),
+    });
+
+    let snapshot = table.fork_snapshot();
+    assert!(!table.is_shared_with(&snapshot));
+    assert_eq!(snapshot.bucket_mask, table.bucket_mask);
+    assert_eq!(snapshot.bucket_count(), table.bucket_count());
+    assert_eq!(snapshot.probe(5, 3, -10, 10).value, Some(123));
+
+    table.store(TTEntry {
+        key: 5,
+        value: 456,
+        flag: HASHF_EXACT,
+        depth: 3,
+        priority: 8,
+        best_move: Some(10),
+    });
+    assert_eq!(table.probe(5, 3, -10, 10).value, Some(456));
+    assert_eq!(snapshot.probe(5, 3, -10, 10).value, Some(123));
+}

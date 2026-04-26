@@ -16,8 +16,9 @@
 ## 当前仓库状态
 
 - Rust 主线已经覆盖 board / zobrist / config / patterns / eval / movegen / ordering / TT / alphabeta / root / VCF / VCT / Gomocup / GUI。
-- 当前主线是确定性串行搜索。
+- 默认主线是确定性串行搜索。
 - Lazy SMP、root YBWC 等并行实验已经从主线移除，原因是实测收益不稳定且会改变搜索路径或棋力。
+- `overlap_vct_alphabeta` 是默认关闭的实验开关，只允许在 VCF miss 后重叠 VCT 与 alphabeta，且不能使用共享 TT 影响默认决策。
 - 完整 Python reference 不随本仓库提交；本机约定路径为 `~/python_ws/pygomoku`。
 - 需要运行 Python reference 差分时，优先使用 `PYGOMOKU_REF_ROOT=/path/to/pygomoku`。
 - 仓库内只保留 `opponent/zhou` 作为轻量基线对手，不把 zhou 当作主语义来源。
@@ -55,8 +56,8 @@ Agent 进入本仓库后，优先阅读：
 
 - 默认主线保持单线程、确定、可回归。
 - 性能优化先在串行路径做。
-- 并行只能在独立分支中重新设计，主线只保留确定串行路径。
-- 并行方案不能默认影响串行路径结果。
+- 高风险并行只能在独立分支中重新设计，主线默认只保留确定串行路径。
+- 并行方案不能默认影响串行路径结果；实验开关必须默认关闭。
 
 ### 4. 小步、可验证
 
@@ -90,7 +91,7 @@ Agent 进入本仓库后，优先阅读：
 - root tactical fast path 保持 VCF 优先于 VCT。
 - VCT 只在 trigger 命中后运行。
 - 默认参数集中在 `src/config.rs`，不要新增散落 magic numbers。
-- 默认固定搜索为 `depth=8,width=40,root_vct_depth=8`。
+- 默认固定搜索为 `depth=8,width=40,root_vct_depth=8,overlap_vct_alphabeta=false`。
 - 与 reference 严格差分时通常显式设为 `depth=6,width=20,root_vct_depth=4`。
 
 ### Gomocup 协议
@@ -156,6 +157,22 @@ Agent 进入本仓库后，优先阅读：
 
 当前主线不保留 Lazy SMP / YBWC 开关。
 
+当前允许存在的并行实验只有 `overlap_vct_alphabeta`，并且必须满足：
+
+- 默认关闭。
+- 只在固定搜索、无 node/time limit 时启用。
+- VCF 仍同步优先。
+- VCT accepted 时取消并丢弃 alphabeta。
+- VCT miss/rejected 时等待并采用 alphabeta。
+- alphabeta worker 使用独立 TT snapshot，不共享写入主 TT。
+
+当前 overlap 实测结论：
+
+- 9 开局 18 局对 reference 未发现棋力退化，仍为 Rust `17 胜 / 1 负`。
+- 慢局面 `[12,12]` Rust 执黑中，15 次 overlap、0 次 VCT accepted。
+- 该慢局面 VCT 总耗时约 `2.7s`，alphabeta 总耗时约 `62.6s`。
+- 因此 overlap 可保留为诊断/实验开关，但不足以解决最大单手耗时。
+
 已验证失败的方向：
 
 - root-split full-window：丢失串行 PV 的 alpha/null-window 剪枝，易增加搜索量并降棋力。
@@ -166,6 +183,7 @@ Agent 进入本仓库后，优先阅读：
 
 - 新建分支，不直接在主线硬塞。
 - 先设计验证标准，再写代码。
+- 先用 root candidate profile 判断 PV 首候选和后续候选耗时占比。
 - 默认串行路径必须完全保留。
 - 固定局面重复运行必须稳定。
 - 与串行相比，固定深度下默认不允许改变 best move / score。
@@ -177,6 +195,7 @@ Agent 进入本仓库后，优先阅读：
 - 不影响决策的 profiling / shadow 计算。
 - 可完全 join 且顺序确定的独立任务。
 - 战术搜索的并行预分析，但最终决策必须可证明等价串行语义。
+- alphabeta 方向只考虑确定性 lazy split / PV-safe 方案；禁止回到 root full-window split 或共享 TT Lazy SMP。
 
 ## 验证策略
 

@@ -1,6 +1,10 @@
 //! Alpha-beta search implementation for the classic mainline.
 
 use std::collections::HashSet;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Instant;
 
 use crate::board::{move_to_xy, Board};
@@ -25,7 +29,7 @@ pub struct RootCandidateProfile {
     pub reason: &'static str,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct SearchStats {
     pub nodes: usize,
     pub leaf_nodes: usize,
@@ -37,6 +41,7 @@ pub struct SearchStats {
     pub time_check_mask: usize,
     pub root_profile: bool,
     pub root_candidates: Vec<RootCandidateProfile>,
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Default for SearchStats {
@@ -52,6 +57,7 @@ impl Default for SearchStats {
             time_check_mask: 0xFF,
             root_profile: false,
             root_candidates: Vec::new(),
+            cancel: None,
         }
     }
 }
@@ -202,6 +208,14 @@ impl AlphaBetaSearcher {
         let original_beta = beta;
 
         let next_node = stats.nodes + 1;
+        if stats
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+        {
+            stats.stop = true;
+            return (0, None);
+        }
         if stats.node_limit.is_some_and(|limit| stats.nodes >= limit) {
             stats.stop = true;
             return (0, None);

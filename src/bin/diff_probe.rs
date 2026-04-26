@@ -36,6 +36,7 @@ struct CaseRuntime {
     nonroot_vcf: Option<bool>,
     compute_vct: Option<bool>,
     root_vct_depth: Option<i32>,
+    overlap_vct_alphabeta: Option<bool>,
     static_board: Option<bool>,
     dynamic_board_margin: Option<i32>,
 }
@@ -79,6 +80,13 @@ struct TraceSummary {
     vct_move: Option<[usize; 2]>,
     vct_accepted: bool,
     vct_reject_reason: Option<String>,
+    vct_ms: Option<f64>,
+    alphabeta_ms: Option<f64>,
+    overlap_used: bool,
+    overlap_ab_ms: Option<f64>,
+    overlap_ab_cancelled: bool,
+    overlap_wait_ms: Option<f64>,
+    tt_snapshot_ms: Option<f64>,
     tactical_path: String,
     root_profiles: Vec<RootDepthProfileSummary>,
 }
@@ -179,6 +187,9 @@ fn run_case(case: DiffCase, root_profile: bool) -> ProbeOutput {
     if let Some(v) = case.runtime.root_vct_depth {
         config.runtime.root_vct_depth = v.max(0);
     }
+    if let Some(v) = case.runtime.overlap_vct_alphabeta {
+        config.runtime.overlap_vct_alphabeta = v;
+    }
     if let Some(v) = case.runtime.static_board {
         config.runtime.static_board = v;
     }
@@ -225,6 +236,13 @@ fn run_case(case: DiffCase, root_profile: bool) -> ProbeOutput {
                     .map(|(x, y)| [x, y]),
                 vct_accepted: trace.vct_accepted,
                 vct_reject_reason: trace.vct_reject_reason.map(|s| s.to_string()),
+                vct_ms: trace.vct_ms,
+                alphabeta_ms: trace.alphabeta_ms,
+                overlap_used: trace.overlap_used,
+                overlap_ab_ms: trace.overlap_ab_ms,
+                overlap_ab_cancelled: trace.overlap_ab_cancelled,
+                overlap_wait_ms: trace.overlap_wait_ms,
+                tt_snapshot_ms: trace.tt_snapshot_ms,
                 tactical_path: trace.tactical_path.to_string(),
                 root_profiles: trace
                     .root_profiles

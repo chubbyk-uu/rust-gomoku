@@ -193,6 +193,12 @@ struct TraceResponse {
     vct_found: bool,
     vct_accepted: bool,
     vct_reject_reason: Option<&'static str>,
+    alphabeta_ms: Option<f64>,
+    overlap_used: bool,
+    overlap_ab_ms: Option<f64>,
+    overlap_ab_cancelled: bool,
+    overlap_wait_ms: Option<f64>,
+    tt_snapshot_ms: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -228,6 +234,12 @@ fn snapshot_state(state: &GameState) -> StateResponse {
         vct_found: trace.vct_found,
         vct_accepted: trace.vct_accepted,
         vct_reject_reason: trace.vct_reject_reason,
+        alphabeta_ms: trace.alphabeta_ms,
+        overlap_used: trace.overlap_used,
+        overlap_ab_ms: trace.overlap_ab_ms,
+        overlap_ab_cancelled: trace.overlap_ab_cancelled,
+        overlap_wait_ms: trace.overlap_wait_ms,
+        tt_snapshot_ms: trace.tt_snapshot_ms,
     });
     let limits = state.search_limits();
     StateResponse {
@@ -784,6 +796,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
         ['VCF 使用/命中', t ? `${yesNo(t.used_vcf)} / ${yesNo(t.vcf_found)}` : '-'],
         ['VCT 使用/触发', t ? `${yesNo(t.used_vct)} / ${yesNo(t.vct_triggered)}` : '-'],
         ['VCT 结果/耗时', t ? `${yesNo(t.vct_found)} / ${t.vct_ms == null ? '-' : t.vct_ms.toFixed(3) + ' ms'}` : '-'],
+        ['AB 耗时', t && t.alphabeta_ms != null ? `${t.alphabeta_ms.toFixed(3)} ms` : '-'],
+        ['Overlap', t ? `${yesNo(t.overlap_used)} / AB ${t.overlap_ab_ms == null ? '-' : t.overlap_ab_ms.toFixed(3) + ' ms'}` : '-'],
+        ['Overlap 等待/TT', t ? `${t.overlap_wait_ms == null ? '-' : t.overlap_wait_ms.toFixed(3) + ' ms'} / ${t.tt_snapshot_ms == null ? '-' : t.tt_snapshot_ms.toFixed(3) + ' ms'}` : '-'],
       ];
       document.getElementById('info').innerHTML = rows.map(([k,v]) => `<div>${k}</div><div>${v}</div>`).join('');
     }

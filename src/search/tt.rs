@@ -89,6 +89,18 @@ impl Default for RawEntry {
 }
 
 impl RawEntry {
+    fn load_words(&self) -> (u64, u64) {
+        (
+            self.key_check.load(Ordering::Relaxed),
+            self.data.load(Ordering::Relaxed),
+        )
+    }
+
+    fn store_words(&self, key_check: u64, data: u64) {
+        self.data.store(data, Ordering::Relaxed);
+        self.key_check.store(key_check, Ordering::Relaxed);
+    }
+
     fn load_for_key(&self, key: u64) -> TTEntry {
         let data = self.data.load(Ordering::Relaxed);
         let key_check = self.key_check.load(Ordering::Relaxed);
@@ -177,6 +189,25 @@ impl TranspositionTable {
 
     pub fn is_shared_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.storage, &other.storage)
+    }
+
+    pub fn fork_snapshot(&self) -> Self {
+        let snapshot = Self {
+            bucket_mask: self.bucket_mask,
+            storage: Arc::new(TTStorage::new(self.storage.bucket_count())),
+        };
+        for (src_bucket, dst_bucket) in self
+            .storage
+            .buckets
+            .iter()
+            .zip(snapshot.storage.buckets.iter())
+        {
+            for (src, dst) in src_bucket.iter().zip(dst_bucket.iter()) {
+                let (key_check, data) = src.load_words();
+                dst.store_words(key_check, data);
+            }
+        }
+        snapshot
     }
 
     pub fn store(&self, entry: TTEntry) {
