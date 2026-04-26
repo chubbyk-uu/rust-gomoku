@@ -273,6 +273,7 @@ pub fn generate_candidates(
         root_allowed_moves,
         preferred_move,
         preserve_scan_order,
+        true,
         moves_buf.as_slice(),
     )
 }
@@ -299,6 +300,7 @@ pub(crate) fn generate_candidates_with_coverage(
         root_allowed_moves,
         preferred_move,
         preserve_scan_order,
+        false,
         moves_buf.as_slice(),
     )
 }
@@ -312,6 +314,7 @@ fn generate_candidates_from_moves(
     root_allowed_moves: Option<&HashSet<Move>>,
     preferred_move: Option<Move>,
     preserve_scan_order: bool,
+    presort_for_forcing: bool,
     moves: &[Move],
 ) -> CandidateGenerationResult {
     let _wide = wide.unwrap_or(config.root_search.wide as usize);
@@ -394,7 +397,7 @@ fn generate_candidates_from_moves(
         candidates.push(candidate);
     }
 
-    if !preserve_scan_order {
+    if !preserve_scan_order && presort_for_forcing {
         candidates.sort_unstable_by(|a, b| {
             b.order_score
                 .partial_cmp(&a.order_score)
@@ -404,16 +407,18 @@ fn generate_candidates_from_moves(
     }
 
     if winpri && !candidates.is_empty() {
+        let candidate = best_forcing_candidate(&candidates, preserve_scan_order);
         return CandidateGenerationResult {
-            candidates: vec![candidates[0]],
+            candidates: vec![candidate],
             single_forcing: false,
             hostile_threat: hsflag.is_some(),
             win_priority: true,
         };
     }
     if sglflag > 0 && !candidates.is_empty() {
+        let candidate = best_forcing_candidate(&candidates, preserve_scan_order);
         return CandidateGenerationResult {
-            candidates: vec![candidates[0]],
+            candidates: vec![candidate],
             single_forcing: true,
             hostile_threat: hsflag.is_some(),
             win_priority: winpri,
@@ -426,6 +431,22 @@ fn generate_candidates_from_moves(
         hostile_threat: hsflag.is_some(),
         win_priority: winpri,
     }
+}
+
+fn best_forcing_candidate(candidates: &[Candidate], preserve_scan_order: bool) -> Candidate {
+    if preserve_scan_order {
+        return candidates[0];
+    }
+    candidates
+        .iter()
+        .copied()
+        .max_by(|a, b| {
+            a.order_score
+                .partial_cmp(&b.order_score)
+                .expect("candidate scores are finite")
+                .then_with(|| b.move_.cmp(&a.move_))
+        })
+        .expect("caller checked non-empty candidates")
 }
 
 #[cfg(test)]
@@ -453,6 +474,32 @@ mod tests {
             tracker.collect_moves(&board, &mut buf);
             assert_eq!(buf.as_slice(), covered_moves(&board).as_slice());
         }
+    }
+
+    #[test]
+    fn best_forcing_candidate_matches_presort_order() {
+        let candidates = [
+            Candidate {
+                move_: 12,
+                order_score: 3.0,
+                self_attack: 0,
+                opp_attack: 0,
+            },
+            Candidate {
+                move_: 7,
+                order_score: 5.0,
+                self_attack: 0,
+                opp_attack: 0,
+            },
+            Candidate {
+                move_: 3,
+                order_score: 5.0,
+                self_attack: 0,
+                opp_attack: 0,
+            },
+        ];
+        assert_eq!(best_forcing_candidate(&candidates, false).move_, 3);
+        assert_eq!(best_forcing_candidate(&candidates, true).move_, 12);
     }
 }
 
