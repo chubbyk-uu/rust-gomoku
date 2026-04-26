@@ -15,8 +15,6 @@ pub const DEFAULT_ROOT_VCF_DEPTH: i32 = 8;
 pub const DEFAULT_OPPONENT_VCF_DEPTH: i32 = 7;
 pub const DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH: i32 = 4;
 pub const DEFAULT_ROOT_VCT_DEPTH: i32 = 8;
-pub const DEFAULT_LAZY_SMP: bool = false;
-pub const DEFAULT_LAZY_SMP_WORKERS: usize = 4;
 pub const DEFAULT_ROOT_PROFILE: bool = false;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -49,10 +47,6 @@ pub struct RuntimeOptions {
     pub dynamic_board_margin: i32,
     pub compute_vct: bool,
     pub root_vct_depth: i32,
-    /// Experimental Lazy SMP helper search. It defaults to off because it is
-    /// not reference-equivalent and has not shown stable speedups yet.
-    pub lazy_smp: bool,
-    pub lazy_smp_workers: usize,
     /// Optional root candidate timing probe. Defaults to off and must not
     /// affect search decisions.
     pub root_profile: bool,
@@ -136,8 +130,6 @@ fn default_runtime_options(para: &[f64]) -> RuntimeOptions {
         dynamic_board_margin: DEFAULT_DYNAMIC_BOARD_MARGIN,
         compute_vct: true,
         root_vct_depth: DEFAULT_ROOT_VCT_DEPTH,
-        lazy_smp: DEFAULT_LAZY_SMP,
-        lazy_smp_workers: DEFAULT_LAZY_SMP_WORKERS,
         root_profile: DEFAULT_ROOT_PROFILE,
     }
 }

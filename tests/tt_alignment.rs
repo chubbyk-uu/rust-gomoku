@@ -301,7 +301,7 @@ fn tt_bucket_returns_stored_entries_for_masked_slot() {
 }
 
 #[test]
-fn tt_clone_shares_storage_for_lazy_smp() {
+fn tt_clone_shares_storage() {
     let table = TranspositionTable::new(2);
     let cloned = table.clone();
     assert!(table.is_shared_with(&cloned));

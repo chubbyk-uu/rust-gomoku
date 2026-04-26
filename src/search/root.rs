@@ -1,11 +1,6 @@
 //! Root iterative-deepening search for the classic mainline.
 
 use std::collections::HashSet;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::board::{move_to_xy, xy_to_move, Board};
@@ -441,78 +436,6 @@ impl RootSearcher {
         Some(filtered)
     }
 
-    fn should_use_lazy_smp(&self, limits: &SearchLimits) -> bool {
-        self.config.runtime.lazy_smp
-            && limits.node_limit.is_none()
-            && limits.time_limit_ms.is_none()
-    }
-
-    fn lazy_smp_worker_count(&self) -> usize {
-        if self.config.runtime.lazy_smp_workers > 0 {
-            return self.config.runtime.lazy_smp_workers;
-        }
-        thread::available_parallelism()
-            .map(|count| count.get().saturating_sub(1))
-            .unwrap_or(0)
-            .max(1)
-    }
-
-    fn spawn_lazy_smp_helpers(
-        &self,
-        board: &Board,
-        side: Side,
-        limits: SearchLimits,
-        root_allowed_moves: Option<HashSet<Move>>,
-        stop: Arc<AtomicBool>,
-    ) -> Vec<thread::JoinHandle<()>> {
-        let worker_count = self.lazy_smp_worker_count();
-        (0..worker_count)
-            .map(|_| {
-                let mut config = self.config.clone();
-                config.runtime.lazy_smp = false;
-                let tt = self.tt.clone();
-                let mut board = board.clone();
-                let root_allowed_moves = root_allowed_moves.clone();
-                let stop = stop.clone();
-                thread::spawn(move || {
-                    let mut caches = EvalCaches::new();
-                    recompute_all(&mut board, &mut caches);
-                    let mut searcher =
-                        AlphaBetaSearcher::with_tt(config, tt).with_stop_signal(stop.clone());
-                    for depth in 1..=limits.max_depth {
-                        if stop.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        let mut stats = SearchStats::default();
-                        let _ = searcher.search(
-                            &mut board,
-                            &mut caches,
-                            side,
-                            f64::from(depth),
-                            -INF,
-                            INF,
-                            limits.root_width,
-                            &mut stats,
-                            SearchOptions {
-                                opo: 1,
-                                root: true,
-                                root_allowed_moves: root_allowed_moves.as_ref(),
-                                ..SearchOptions::default()
-                            },
-                        );
-                    }
-                })
-            })
-            .collect()
-    }
-
-    fn stop_lazy_smp_helpers(stop: Arc<AtomicBool>, handles: Vec<thread::JoinHandle<()>>) {
-        stop.store(true, Ordering::Relaxed);
-        for handle in handles {
-            handle.join().expect("lazy smp helper does not panic");
-        }
-    }
-
     pub fn search(&mut self, board: &mut Board, limits: Option<SearchLimits>) -> SearchResult {
         let limits = limits.unwrap_or_else(|| SearchLimits::fixed_from_config(&self.config));
 
@@ -622,19 +545,6 @@ impl RootSearcher {
             }
         }
 
-        let lazy_smp_stop = Arc::new(AtomicBool::new(false));
-        let lazy_smp_handles = if self.should_use_lazy_smp(&limits) {
-            self.spawn_lazy_smp_helpers(
-                board,
-                side,
-                limits,
-                root_allowed_moves.clone(),
-                lazy_smp_stop.clone(),
-            )
-        } else {
-            Vec::new()
-        };
-
         let mut completed_depth = 0_i32;
         for depth in 1..=limits.max_depth {
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -700,7 +610,6 @@ impl RootSearcher {
             fallback_ai_move(board, &caches, side, &mut self.fallback_rng)
                 .expect("fallback move exists on non-terminal board")
         });
-        Self::stop_lazy_smp_helpers(lazy_smp_stop, lazy_smp_handles);
         self.last_trace = Some(trace);
         SearchResult {
             move_,

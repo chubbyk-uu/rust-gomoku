@@ -206,7 +206,6 @@ struct ParamsResponse {
     root_vct_depth: i32,
     static_board: bool,
     dynamic_board_margin: i32,
-    lazy_smp: bool,
 }
 
 fn snapshot_state(state: &GameState) -> StateResponse {
@@ -270,7 +269,6 @@ fn snapshot_state(state: &GameState) -> StateResponse {
             root_vct_depth: state.config.runtime.root_vct_depth,
             static_board: state.config.runtime.static_board,
             dynamic_board_margin: state.config.runtime.dynamic_board_margin,
-            lazy_smp: state.config.runtime.lazy_smp,
         },
     }
 }
@@ -782,7 +780,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
         ['搜索参数', `d${p.depth} / w${p.width}`],
         ['VCF/VCT', `${p.compute_vcf ? 'VCF' + p.root_vcf_depth : 'VCF off'} / ${p.compute_vct ? 'VCT' + p.root_vct_depth : 'VCT off'}`],
         ['窗口', p.static_board ? 'static board' : `dynamic margin ${p.dynamic_board_margin}`],
-        ['Lazy SMP', p.lazy_smp ? 'on' : 'off'],
         ['上次搜索', r ? `${r.ms?.toFixed(3)} ms, depth ${r.depth}, nodes ${r.nodes}, score ${r.score}` : '-'],
         ['VCF 使用/命中', t ? `${yesNo(t.used_vcf)} / ${yesNo(t.vcf_found)}` : '-'],
         ['VCT 使用/触发', t ? `${yesNo(t.used_vct)} / ${yesNo(t.vct_triggered)}` : '-'],

@@ -112,12 +112,7 @@ fn main() {
     let args = parse_args();
     let text = fs::read_to_string(&args.case_path).expect("case file is readable");
     let case: DiffCase = serde_json::from_str(&text).expect("case file is valid JSON");
-    let output = run_case(
-        case,
-        args.lazy_smp,
-        args.lazy_smp_workers,
-        args.root_profile,
-    );
+    let output = run_case(case, args.root_profile);
     println!(
         "{}",
         serde_json::to_string_pretty(&output).expect("probe output serialises")
@@ -127,31 +122,17 @@ fn main() {
 #[derive(Debug)]
 struct ProbeArgs {
     case_path: PathBuf,
-    lazy_smp: bool,
-    lazy_smp_workers: usize,
     root_profile: bool,
 }
 
 fn parse_args() -> ProbeArgs {
     let mut args = std::env::args().skip(1);
     let mut case_path = None;
-    let mut lazy_smp = false;
-    let mut lazy_smp_workers = 0_usize;
     let mut root_profile = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--case" => {
                 case_path = Some(args.next().expect("--case requires a path").into());
-            }
-            "--lazy-smp" => {
-                lazy_smp = true;
-            }
-            "--lazy-smp-workers" => {
-                lazy_smp_workers = args
-                    .next()
-                    .expect("--lazy-smp-workers requires a value")
-                    .parse()
-                    .expect("--lazy-smp-workers must be a non-negative integer");
             }
             "--root-profile" => {
                 root_profile = true;
@@ -160,25 +141,16 @@ fn parse_args() -> ProbeArgs {
         }
     }
     let Some(case_path) = case_path else {
-        eprintln!(
-            "usage: diff_probe --case <case.json> [--lazy-smp] [--lazy-smp-workers <n>] [--root-profile]"
-        );
+        eprintln!("usage: diff_probe --case <case.json> [--root-profile]");
         std::process::exit(2);
     };
     ProbeArgs {
         case_path,
-        lazy_smp,
-        lazy_smp_workers,
         root_profile,
     }
 }
 
-fn run_case(
-    case: DiffCase,
-    lazy_smp: bool,
-    lazy_smp_workers: usize,
-    root_profile: bool,
-) -> ProbeOutput {
+fn run_case(case: DiffCase, root_profile: bool) -> ProbeOutput {
     let mut board = Board::with_side_to_move(case.first_side).expect("first_side is valid");
     for [x, y] in &case.moves {
         let move_ = xy_to_move(*x as usize, *y as usize).expect("case move is in range");
@@ -213,8 +185,6 @@ fn run_case(
     if let Some(v) = case.runtime.dynamic_board_margin {
         config.runtime.dynamic_board_margin = v.max(0);
     }
-    config.runtime.lazy_smp = lazy_smp;
-    config.runtime.lazy_smp_workers = lazy_smp_workers;
     config.runtime.root_profile = root_profile;
 
     let default_limits = SearchLimits::fixed_from_config(&config);

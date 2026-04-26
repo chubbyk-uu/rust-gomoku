@@ -1,10 +1,6 @@
 //! Alpha-beta search implementation for the classic mainline.
 
 use std::collections::HashSet;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
 use std::time::Instant;
 
 use crate::board::{move_to_xy, Board};
@@ -137,7 +133,6 @@ pub struct AlphaBetaSearcher {
     pub config: EngineConfig,
     pub tt: TranspositionTable,
     pub vcf: VCFSearcher,
-    pub stop_signal: Option<Arc<AtomicBool>>,
 }
 
 impl AlphaBetaSearcher {
@@ -146,7 +141,6 @@ impl AlphaBetaSearcher {
             config,
             tt: TranspositionTable::default(),
             vcf: VCFSearcher::default(),
-            stop_signal: None,
         }
     }
 
@@ -155,13 +149,7 @@ impl AlphaBetaSearcher {
             config,
             tt,
             vcf: VCFSearcher::default(),
-            stop_signal: None,
         }
-    }
-
-    pub fn with_stop_signal(mut self, stop_signal: Arc<AtomicBool>) -> Self {
-        self.stop_signal = Some(stop_signal);
-        self
     }
 
     pub fn nonroot_vcf_depth(depth: f64, root_depth: f64) -> i32 {
@@ -214,14 +202,6 @@ impl AlphaBetaSearcher {
         let original_beta = beta;
 
         let next_node = stats.nodes + 1;
-        if self
-            .stop_signal
-            .as_ref()
-            .is_some_and(|stop| stop.load(Ordering::Relaxed))
-        {
-            stats.stop = true;
-            return (0, None);
-        }
         if stats.node_limit.is_some_and(|limit| stats.nodes >= limit) {
             stats.stop = true;
             return (0, None);

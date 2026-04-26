@@ -1,8 +1,7 @@
 use rust_gomoku::{
-    GomocupProtocol, SearchLimits, DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_LAZY_SMP,
-    DEFAULT_LAZY_SMP_WORKERS, DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_ROOT_PROFILE,
-    DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
-    DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
+    GomocupProtocol, SearchLimits, DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_OPPONENT_VCF_DEPTH,
+    DEFAULT_ROOT_PROFILE, DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH,
+    DEFAULT_SEARCH_WIDTH, DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
     DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
 };
 
@@ -254,29 +253,6 @@ fn protocol_info_root_vct_depth_negative_clamps_to_zero() {
 }
 
 #[test]
-fn protocol_info_lazy_smp_updates_runtime() {
-    let mut proto = proto();
-    proto.handle_line("INFO lazy_smp 1");
-    assert!(proto.config.runtime.lazy_smp);
-    proto.handle_line("INFO lazy_smp 0");
-    assert!(!proto.config.runtime.lazy_smp);
-}
-
-#[test]
-fn protocol_info_lazy_smp_workers_updates_runtime() {
-    let mut proto = proto();
-    proto.handle_line("INFO lazy_smp_workers 10");
-    assert_eq!(proto.config.runtime.lazy_smp_workers, 10);
-}
-
-#[test]
-fn protocol_info_lazy_smp_workers_negative_clamps_to_zero() {
-    let mut proto = proto();
-    proto.handle_line("INFO lazy_smp_workers -3");
-    assert_eq!(proto.config.runtime.lazy_smp_workers, 0);
-}
-
-#[test]
 fn protocol_info_root_profile_updates_runtime() {
     let mut proto = proto();
     proto.handle_line("INFO root_profile 1");
@@ -388,8 +364,6 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
     proto.handle_line("INFO nonroot_vcf nope");
     proto.handle_line("INFO compute_vct nope");
     proto.handle_line("INFO root_vct_depth nope");
-    proto.handle_line("INFO lazy_smp nope");
-    proto.handle_line("INFO lazy_smp_workers nope");
     proto.handle_line("INFO root_profile nope");
     proto.handle_line("INFO static zed");
     proto.handle_line("INFO dynamic_board_margin hmm");
@@ -409,11 +383,6 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
     assert!(!proto.config.runtime.nonroot_vcf);
     assert!(proto.config.runtime.compute_vct);
     assert_eq!(proto.config.runtime.root_vct_depth, DEFAULT_ROOT_VCT_DEPTH);
-    assert_eq!(proto.config.runtime.lazy_smp, DEFAULT_LAZY_SMP);
-    assert_eq!(
-        proto.config.runtime.lazy_smp_workers,
-        DEFAULT_LAZY_SMP_WORKERS
-    );
     assert_eq!(proto.config.runtime.root_profile, DEFAULT_ROOT_PROFILE);
     assert!(proto.config.runtime.static_board);
     assert_eq!(
