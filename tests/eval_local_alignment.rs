@@ -1,7 +1,8 @@
+use rust_gomoku::constants::DSHAPE_SIZE;
 use rust_gomoku::{
     attack_level, compute_bucket_and_attack, compute_direction_shape, load_default_config,
     local_backend_name, move_to_xy, move_value, recompute_all, recompute_point_caches,
-    value_wide_compute, xy_to_move, Board, EvalCaches, ShapeLabel, BLACK,
+    value_wide_compute, xy_to_move, Board, EvalCaches, ShapeLabel, BLACK, EMPTY,
 };
 
 #[test]
@@ -142,6 +143,77 @@ fn value_wide_compute_matches_full_recompute_after_multiple_steps() {
         assert_eq!(caches.shape_cache, full.shape_cache);
         assert_eq!(caches.value_cache, full.value_cache);
         assert_eq!(caches.attack_cache, full.attack_cache);
+        assert_global_eval_cache_invariants(&board, &caches);
+    }
+}
+
+fn assert_global_eval_cache_invariants(board: &Board, caches: &EvalCaches) {
+    let mut expected_counts = [[0_u16; DSHAPE_SIZE]; 2];
+    let mut expected_occupied = Vec::new();
+
+    for x in 0..board.size() {
+        for y in 0..board.size() {
+            let cell = board.at(x, y).unwrap();
+            if cell == EMPTY {
+                for (player, counts) in expected_counts.iter_mut().enumerate() {
+                    let bucket = caches.value_cache[player][x][y] as usize;
+                    counts[bucket] += 1;
+                }
+            } else {
+                expected_occupied.push(xy_to_move(x, y).unwrap());
+            }
+            assert_eq!(caches.board_shadow[x][y], cell);
+        }
+    }
+
+    let mut actual_occupied = caches.occupied_moves[..caches.occupied_len].to_vec();
+    expected_occupied.sort_unstable();
+    actual_occupied.sort_unstable();
+
+    assert_eq!(caches.empty_bucket_counts, expected_counts);
+    assert_eq!(actual_occupied, expected_occupied);
+}
+
+fn pick_legal_move(board: &Board, seed: &mut u64) -> rust_gomoku::Move {
+    loop {
+        *seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        let move_ = ((*seed >> 32) % rust_gomoku::BOARD_AREA as u64) as rust_gomoku::Move;
+        if board.is_legal_move(move_) {
+            return move_;
+        }
+    }
+}
+
+#[test]
+fn global_eval_cache_invariants_survive_play_undo_and_snapshots() {
+    let mut board = Board::new();
+    let mut caches = EvalCaches::new();
+    recompute_all(&mut board, &mut caches);
+    assert_global_eval_cache_invariants(&board, &caches);
+
+    let mut seed = 0x5eed_1234_u64;
+    for step in 0..48 {
+        let move_ = pick_legal_move(&board, &mut seed);
+        let snapshot_board = board.clone();
+        let snapshot = (step % 5 == 0).then(|| caches.snapshot());
+
+        board.play(move_, None).unwrap();
+        let (mx, my) = move_to_xy(move_).unwrap();
+        value_wide_compute(&mut board, &mut caches, (mx, my));
+        assert_global_eval_cache_invariants(&board, &caches);
+
+        if step % 3 == 2 {
+            let undone = board.undo().unwrap();
+            let (ux, uy) = move_to_xy(undone.move_).unwrap();
+            value_wide_compute(&mut board, &mut caches, (ux, uy));
+            assert_global_eval_cache_invariants(&board, &caches);
+        }
+
+        if let Some(snapshot) = snapshot {
+            board = snapshot_board;
+            caches.restore_snapshot(&snapshot);
+            assert_global_eval_cache_invariants(&board, &caches);
+        }
     }
 }
 

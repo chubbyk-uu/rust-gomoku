@@ -1,7 +1,7 @@
 use rust_gomoku::{
-    evaluate_board, evaluate_last5_branch, evaluate_next43_branch, find_last5_target,
-    global_eval_backend_name, load_default_config, recompute_all, xy_to_move, Board, EvalCaches,
-    BLACK,
+    evaluate_board, evaluate_board_main_cached, evaluate_board_main_scan, evaluate_last5_branch,
+    evaluate_next43_branch, find_last5_target, global_eval_backend_name, load_default_config,
+    recompute_all, value_wide_compute, xy_to_move, Board, EvalCaches, BLACK, WHITE,
 };
 
 #[test]
@@ -119,13 +119,72 @@ fn global_eval_matches_expected_on_handpicked_positions() {
         }
         let mut caches = EvalCaches::new();
         recompute_all(&mut board, &mut caches);
-        assert_eq!(
-            evaluate_board(&mut board, &mut caches, 1, 0, &config),
-            black_expected
-        );
-        assert_eq!(
-            evaluate_board(&mut board, &mut caches, -1, 0, &config),
-            white_expected
-        );
+        assert_main_scan_and_cached_match(&board, &caches, BLACK);
+        assert_main_scan_and_cached_match(&board, &caches, WHITE);
+        let black_score = evaluate_board(&mut board, &mut caches, 1, 0, &config);
+        let white_score = evaluate_board(&mut board, &mut caches, -1, 0, &config);
+        assert_score_close(black_score, black_expected);
+        assert_score_close(white_score, white_expected);
     }
+}
+
+#[test]
+fn cached_global_eval_matches_scan_after_incremental_updates() {
+    let mut board = Board::new();
+    let mut caches = EvalCaches::new();
+    recompute_all(&mut board, &mut caches);
+    let sequence = [
+        (7, 7),
+        (8, 7),
+        (7, 8),
+        (8, 8),
+        (6, 7),
+        (9, 8),
+        (5, 7),
+        (10, 8),
+        (6, 8),
+        (4, 7),
+        (11, 8),
+        (3, 7),
+    ];
+
+    for (ply, (x, y)) in sequence.into_iter().enumerate() {
+        let move_ = xy_to_move(x, y).unwrap();
+        board
+            .play(move_, Some(if ply % 2 == 0 { BLACK } else { WHITE }))
+            .unwrap();
+        value_wide_compute(&mut board, &mut caches, (x, y));
+        assert_main_scan_and_cached_match(&board, &caches, BLACK);
+        assert_main_scan_and_cached_match(&board, &caches, WHITE);
+    }
+}
+
+fn assert_main_scan_and_cached_match(board: &Board, caches: &EvalCaches, side: i8) {
+    let config = load_default_config();
+    let (scan_total, scan_dgn) = evaluate_board_main_scan(board, caches, side, &config);
+    let (cached_total, cached_dgn) = evaluate_board_main_cached(board, caches, side, &config);
+    assert_eq!(cached_dgn, scan_dgn);
+    let tolerance = 1e-9_f64.max(scan_total.abs() * 1e-14);
+    assert!(
+        (cached_total - scan_total).abs() <= tolerance,
+        "cached total {cached_total} differs from scan total {scan_total}"
+    );
+    assert_eq!(cached_total as i32, scan_total as i32);
+    if (-32_768.0 < scan_total && scan_total < 32_768.0)
+        && (-32_768.0 < cached_total && cached_total < 32_768.0)
+    {
+        let scan_score = scan_total - config.search.drift + f64::from(scan_dgn) * config.search.dgn;
+        let cached_score =
+            cached_total - config.search.drift + f64::from(cached_dgn) * config.search.dgn;
+        assert_eq!(cached_score as i32, scan_score as i32);
+    }
+}
+
+fn assert_score_close(actual: f64, expected: f64) {
+    let tolerance = 1e-9_f64.max(expected.abs() * 1e-14);
+    assert!(
+        (actual - expected).abs() <= tolerance,
+        "actual score {actual} differs from expected {expected}"
+    );
+    assert_eq!(actual as i32, expected as i32);
 }

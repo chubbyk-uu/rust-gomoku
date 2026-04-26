@@ -27,9 +27,10 @@ pub use config::{
 pub use constants::{BLACK, BOARD_AREA, BOARD_SIZE, EMPTY, WHITE};
 pub use eval::{
     attack_level, compute_bucket_and_attack, compute_direction_shape, eval_value_last,
-    eval_value_next, evaluate_board, evaluate_board_main, evaluate_last5_branch,
-    evaluate_next43_branch, find_last5_target, global_eval_backend_name, local_backend_name,
-    move_value, recompute_all, recompute_point_caches, value_wide_compute,
+    eval_value_next, evaluate_board, evaluate_board_main, evaluate_board_main_cached,
+    evaluate_board_main_scan, evaluate_last5_branch, evaluate_next43_branch, find_last5_target,
+    global_eval_backend_name, local_backend_name, move_value, recompute_all,
+    recompute_point_caches, value_wide_compute,
 };
 pub use eval::{caches_backend_name, EvalCaches, EvalSnapshot};
 pub use patterns::{

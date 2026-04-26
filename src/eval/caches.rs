@@ -1,6 +1,7 @@
 //! Incremental evaluation caches.
 
-use crate::constants::BOARD_SIZE;
+use crate::constants::{BOARD_AREA, BOARD_SIZE, DSHAPE_SIZE};
+use crate::types::Move;
 
 pub fn caches_backend_name() -> &'static str {
     "python"
@@ -9,11 +10,16 @@ pub fn caches_backend_name() -> &'static str {
 pub type BoardShadow = [[i8; BOARD_SIZE]; BOARD_SIZE];
 pub type ValueCache = [[[i32; BOARD_SIZE]; BOARD_SIZE]; 2];
 pub type ShapeCache = [[[[i32; 4]; BOARD_SIZE]; BOARD_SIZE]; 2];
+pub type EmptyBucketCounts = [[u16; DSHAPE_SIZE]; 2];
+pub type OccupiedMoves = [Move; BOARD_AREA];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvalSnapshot {
     pub initialized: bool,
     pub board_shadow: BoardShadow,
+    pub empty_bucket_counts: EmptyBucketCounts,
+    pub occupied_moves: OccupiedMoves,
+    pub occupied_len: usize,
     pub shape_log_len: usize,
     pub value_log_len: usize,
 }
@@ -25,6 +31,9 @@ pub struct EvalCaches {
     pub shape_cache: ShapeCache,
     pub value_cache: ValueCache,
     pub attack_cache: ValueCache,
+    pub empty_bucket_counts: EmptyBucketCounts,
+    pub occupied_moves: OccupiedMoves,
+    pub occupied_len: usize,
     pub(crate) shape_log: Vec<(usize, usize, usize, usize, i32)>,
     pub(crate) value_log: Vec<(usize, usize, usize, i32, i32)>,
     pub(crate) active_snapshot_count: usize,
@@ -44,6 +53,9 @@ impl EvalCaches {
             shape_cache: new_shape_cache(),
             value_cache: new_value_cache(),
             attack_cache: new_value_cache(),
+            empty_bucket_counts: new_empty_bucket_counts(),
+            occupied_moves: new_occupied_moves(),
+            occupied_len: 0,
             shape_log: Vec::with_capacity(512),
             value_log: Vec::with_capacity(256),
             active_snapshot_count: 0,
@@ -73,6 +85,9 @@ impl EvalCaches {
         EvalSnapshot {
             initialized: self.initialized,
             board_shadow: self.board_shadow,
+            empty_bucket_counts: self.empty_bucket_counts,
+            occupied_moves: self.occupied_moves,
+            occupied_len: self.occupied_len,
             shape_log_len: self.shape_log.len(),
             value_log_len: self.value_log.len(),
         }
@@ -81,6 +96,9 @@ impl EvalCaches {
     pub fn restore_snapshot(&mut self, snapshot: &EvalSnapshot) {
         self.initialized = snapshot.initialized;
         self.board_shadow = snapshot.board_shadow;
+        self.empty_bucket_counts = snapshot.empty_bucket_counts;
+        self.occupied_moves = snapshot.occupied_moves;
+        self.occupied_len = snapshot.occupied_len;
 
         while self.shape_log.len() > snapshot.shape_log_len {
             let (player, x, y, direction, old_value) =
@@ -116,6 +134,9 @@ impl EvalCaches {
         self.shape_cache = other.shape_cache;
         self.value_cache = other.value_cache;
         self.attack_cache = other.attack_cache;
+        self.empty_bucket_counts = other.empty_bucket_counts;
+        self.occupied_moves = other.occupied_moves;
+        self.occupied_len = other.occupied_len;
         self.shape_log.clear();
         self.value_log.clear();
         self.active_snapshot_count = 0;
@@ -136,4 +157,12 @@ fn new_shape_cache() -> ShapeCache {
 
 fn new_value_cache() -> ValueCache {
     [[[0; BOARD_SIZE]; BOARD_SIZE]; 2]
+}
+
+fn new_empty_bucket_counts() -> EmptyBucketCounts {
+    [[0; DSHAPE_SIZE]; 2]
+}
+
+fn new_occupied_moves() -> OccupiedMoves {
+    [0; BOARD_AREA]
 }

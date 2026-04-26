@@ -2,7 +2,7 @@
 
 use crate::board::Board;
 use crate::config::EngineConfig;
-use crate::constants::{BLACK, BOARD_SIZE, EMPTY, WHITE};
+use crate::constants::{BLACK, BOARD_AREA, BOARD_SIZE, DSHAPE_SIZE, EMPTY, WHITE};
 use crate::eval::caches::EvalCaches;
 use crate::patterns::buckets::bucket_for_lines;
 use crate::patterns::line::shape_raw_from_board_point_python;
@@ -155,27 +155,15 @@ pub fn recompute_all(board: &mut Board, caches: &mut EvalCaches) {
             recompute_point_caches(board, caches, x, y);
         }
     }
-    copy_board_into_shadow(board, caches);
+    rebuild_global_eval_state(board, caches);
     caches.initialized = true;
 }
 
 pub fn value_wide_compute(board: &mut Board, caches: &mut EvalCaches, changed: (usize, usize)) {
     let size = board.size();
     if !caches.initialized {
-        let mut has_stone = false;
-        'init: for x in 0..size {
-            for y in 0..size {
-                if board.grid_rows()[y][x] != EMPTY {
-                    has_stone = true;
-                    break 'init;
-                }
-            }
-        }
-        if has_stone {
-            recompute_all(board, caches);
-            return;
-        }
-        caches.initialized = true;
+        recompute_all(board, caches);
+        return;
     }
 
     let (cx, cy) = changed;
@@ -193,7 +181,9 @@ pub fn value_wide_compute(board: &mut Board, caches: &mut EvalCaches, changed: (
         mark_cell_neighbors(&mut comp, &mut dirty, &mut dirty_len, grid, cx, cy, size);
     }
 
-    caches.board_shadow[cx][cy] = board.grid_rows()[cy][cx];
+    let old_cell = caches.board_shadow[cx][cy];
+    let new_cell = board.grid_rows()[cy][cx];
+    update_occupied_transition(caches, cx, cy, old_cell, new_cell);
 
     for &move_ in &dirty[..dirty_len] {
         let index = move_ as usize;
@@ -201,6 +191,7 @@ pub fn value_wide_compute(board: &mut Board, caches: &mut EvalCaches, changed: (
         let y = index / BOARD_SIZE;
         let flags = comp[x][y];
         let cell = board.grid_rows()[y][x];
+        remove_empty_bucket_contribution(caches, x, y);
         if cell == EMPTY {
             if flags & horizontal_flag != 0 {
                 update_direction_cache(board, caches, x, y, HORIZONTAL);
@@ -219,6 +210,8 @@ pub fn value_wide_compute(board: &mut Board, caches: &mut EvalCaches, changed: (
         } else {
             clear_occupied_point(caches, x, y);
         }
+        add_empty_bucket_contribution(board, caches, x, y);
+        caches.board_shadow[x][y] = cell;
     }
 }
 
@@ -407,12 +400,93 @@ fn pivot_and_point_index(x: usize, y: usize, direction: i32) -> (usize, usize) {
     }
 }
 
-fn copy_board_into_shadow(board: &Board, caches: &mut EvalCaches) {
+fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
+    caches.empty_bucket_counts = [[0; DSHAPE_SIZE]; 2];
+    caches.occupied_moves = [0; BOARD_AREA];
+    caches.occupied_len = 0;
+
     for x in 0..board.size() {
         for y in 0..board.size() {
-            caches.board_shadow[x][y] = board.grid_rows()[y][x];
+            let cell = board.grid_rows()[y][x];
+            caches.board_shadow[x][y] = cell;
+            if cell == EMPTY {
+                for player in 0..2 {
+                    let bucket = caches.value_cache[player][x][y] as usize;
+                    debug_assert!(bucket < DSHAPE_SIZE);
+                    caches.empty_bucket_counts[player][bucket] += 1;
+                }
+            } else {
+                let move_ = (y * BOARD_SIZE + x) as Move;
+                caches.occupied_moves[caches.occupied_len] = move_;
+                caches.occupied_len += 1;
+            }
         }
     }
+}
+
+fn remove_empty_bucket_contribution(caches: &mut EvalCaches, x: usize, y: usize) {
+    if caches.board_shadow[x][y] != EMPTY {
+        return;
+    }
+    for player in 0..2 {
+        let bucket = caches.value_cache[player][x][y] as usize;
+        debug_assert!(bucket < DSHAPE_SIZE);
+        debug_assert!(caches.empty_bucket_counts[player][bucket] > 0);
+        caches.empty_bucket_counts[player][bucket] -= 1;
+    }
+}
+
+fn add_empty_bucket_contribution(board: &Board, caches: &mut EvalCaches, x: usize, y: usize) {
+    if board.grid_rows()[y][x] != EMPTY {
+        return;
+    }
+    for player in 0..2 {
+        let bucket = caches.value_cache[player][x][y] as usize;
+        debug_assert!(bucket < DSHAPE_SIZE);
+        caches.empty_bucket_counts[player][bucket] += 1;
+    }
+}
+
+fn update_occupied_transition(
+    caches: &mut EvalCaches,
+    x: usize,
+    y: usize,
+    old_cell: i8,
+    new_cell: i8,
+) {
+    if old_cell == EMPTY && new_cell != EMPTY {
+        add_occupied_move(caches, (y * BOARD_SIZE + x) as Move);
+    } else if old_cell != EMPTY && new_cell == EMPTY {
+        remove_occupied_move(caches, (y * BOARD_SIZE + x) as Move);
+    }
+}
+
+fn add_occupied_move(caches: &mut EvalCaches, move_: Move) {
+    debug_assert!(caches.occupied_len < BOARD_AREA);
+    debug_assert!(!caches.occupied_moves[..caches.occupied_len].contains(&move_));
+    caches.occupied_moves[caches.occupied_len] = move_;
+    caches.occupied_len += 1;
+}
+
+fn remove_occupied_move(caches: &mut EvalCaches, move_: Move) {
+    if caches.occupied_len == 0 {
+        debug_assert!(false, "occupied move list underflow");
+        return;
+    }
+    let last_index = caches.occupied_len - 1;
+    if caches.occupied_moves[last_index] == move_ {
+        caches.occupied_len -= 1;
+        return;
+    }
+    let Some(index) = caches.occupied_moves[..last_index]
+        .iter()
+        .position(|&candidate| candidate == move_)
+    else {
+        debug_assert!(false, "occupied move missing from list");
+        return;
+    };
+    caches.occupied_moves[index] = caches.occupied_moves[last_index];
+    caches.occupied_len -= 1;
 }
 
 fn update_direction_cache(

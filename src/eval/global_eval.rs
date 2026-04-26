@@ -2,7 +2,9 @@
 
 use crate::board::Board;
 use crate::config::EngineConfig;
-use crate::constants::{BLACK, BOARD_SIZE, EMPTY, LAST5, NEXT4, NEXT43, NEXT5, WHITE, WIN};
+use crate::constants::{
+    BLACK, BOARD_SIZE, DSHAPE_SIZE, EMPTY, LAST5, NEXT4, NEXT43, NEXT5, WHITE, WIN,
+};
 use crate::eval::caches::EvalCaches;
 use crate::eval::local::value_wide_compute;
 use crate::patterns::line::Line;
@@ -31,6 +33,18 @@ pub fn evaluate_board(
     config: &EngineConfig,
 ) -> f64 {
     let (total, dgn) = evaluate_board_main(board, caches, side, config);
+    evaluate_board_from_main(board, caches, side, opo, config, total, dgn)
+}
+
+fn evaluate_board_from_main(
+    board: &mut Board,
+    caches: &mut EvalCaches,
+    side: i8,
+    opo: usize,
+    config: &EngineConfig,
+    total: f64,
+    dgn: i32,
+) -> f64 {
     if -32_768.0 < total && total < 32_768.0 {
         return total - config.search.drift + f64::from(dgn) * config.search.dgn;
     }
@@ -52,6 +66,15 @@ pub fn evaluate_board(
 }
 
 pub fn evaluate_board_main(
+    board: &Board,
+    caches: &EvalCaches,
+    side: i8,
+    config: &EngineConfig,
+) -> (f64, i32) {
+    evaluate_board_main_cached(board, caches, side, config)
+}
+
+pub fn evaluate_board_main_scan(
     board: &Board,
     caches: &EvalCaches,
     side: i8,
@@ -102,6 +125,75 @@ pub fn evaluate_board_main(
     }
 
     (offensive - defensive, dgn)
+}
+
+pub fn evaluate_board_main_cached(
+    board: &Board,
+    caches: &EvalCaches,
+    side: i8,
+    config: &EngineConfig,
+) -> (f64, i32) {
+    if !caches.initialized {
+        return evaluate_board_main_scan(board, caches, side, config);
+    }
+
+    let player = if side == BLACK { 0 } else { 1 };
+    let opponent = 1 - player;
+    let offensive = bucket_dot(
+        &caches.empty_bucket_counts[player],
+        &config.eval_tables.last_eval,
+    );
+    let defensive = bucket_dot(
+        &caches.empty_bucket_counts[opponent],
+        &config.eval_tables.next_eval,
+    );
+    let dgn = evaluate_dgn_from_occupied(board, caches, side);
+    (offensive - defensive, dgn)
+}
+
+#[inline(always)]
+fn bucket_dot(counts: &[u16; DSHAPE_SIZE], values: &[f64]) -> f64 {
+    let mut total = 0.0;
+    for bucket in 0..DSHAPE_SIZE {
+        total += f64::from(counts[bucket]) * values[bucket];
+    }
+    total
+}
+
+fn evaluate_dgn_from_occupied(board: &Board, caches: &EvalCaches, side: i8) -> i32 {
+    let player = if side == BLACK { 0 } else { 1 };
+    let opponent = 1 - player;
+    let opponent_side = -side;
+    let grid = board.grid_rows();
+    let shape_cache_player = &caches.shape_cache[player];
+    let shape_cache_opponent = &caches.shape_cache[opponent];
+    let size = board.size();
+    let mut dgn = 0_i32;
+
+    for &move_ in &caches.occupied_moves[..caches.occupied_len] {
+        let index = move_ as usize;
+        let x = index % BOARD_SIZE;
+        let y = index / BOARD_SIZE;
+        let stone = grid[y][x];
+        debug_assert_ne!(stone, EMPTY);
+        if stone == side {
+            let cc = blocked_neighbor_count(grid, shape_cache_player, x, y, size);
+            if cc <= 1 {
+                dgn -= 5;
+            } else if cc - 1 >= 5 {
+                dgn -= cc - 1 - 3;
+            }
+        } else if stone == opponent_side {
+            let cc = blocked_neighbor_count(grid, shape_cache_opponent, x, y, size);
+            if cc <= 1 {
+                dgn += 5;
+            } else if cc - 1 >= 5 {
+                dgn += cc - 1 - 3;
+            }
+        }
+    }
+
+    dgn
 }
 
 #[inline(always)]
@@ -271,4 +363,81 @@ fn decode_b4_reply(
 
 fn ga(value: i32) -> i32 {
     value & 0xFF
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::xy_to_move;
+    use crate::config::load_default_config;
+    use crate::eval::local::recompute_all;
+
+    #[test]
+    fn cached_matches_scan_after_direct_grid_mutation_and_snapshot_restore() {
+        let config = load_default_config();
+        let mut board = Board::new();
+        for (idx, (x, y)) in [(7, 7), (8, 7), (7, 8), (8, 8), (6, 7), (9, 8)]
+            .into_iter()
+            .enumerate()
+        {
+            board
+                .play(
+                    xy_to_move(x, y).unwrap(),
+                    Some(if idx % 2 == 0 { BLACK } else { WHITE }),
+                )
+                .unwrap();
+        }
+        let mut caches = EvalCaches::new();
+        recompute_all(&mut board, &mut caches);
+        assert_scan_cached_equivalent(&board, &caches, BLACK, &config);
+        assert_scan_cached_equivalent(&board, &caches, WHITE, &config);
+
+        let snapshot = caches.snapshot();
+        board.grid_rows_mut()[6][6] = WHITE;
+        value_wide_compute(&mut board, &mut caches, (6, 6));
+        assert_scan_cached_equivalent(&board, &caches, BLACK, &config);
+        assert_scan_cached_equivalent(&board, &caches, WHITE, &config);
+
+        board.grid_rows_mut()[6][6] = EMPTY;
+        caches.restore_snapshot(&snapshot);
+        assert_scan_cached_equivalent(&board, &caches, BLACK, &config);
+        assert_scan_cached_equivalent(&board, &caches, WHITE, &config);
+    }
+
+    fn assert_scan_cached_equivalent(
+        board: &Board,
+        caches: &EvalCaches,
+        side: i8,
+        config: &EngineConfig,
+    ) {
+        let (scan_total, scan_dgn) = evaluate_board_main_scan(board, caches, side, config);
+        let (cached_total, cached_dgn) = evaluate_board_main_cached(board, caches, side, config);
+        assert_eq!(cached_dgn, scan_dgn);
+        let tolerance = 1e-9_f64.max(scan_total.abs() * 1e-14);
+        assert!((cached_total - scan_total).abs() <= tolerance);
+
+        let mut scan_board = board.clone();
+        let mut scan_caches = caches.clone();
+        let scan_score = evaluate_board_from_main(
+            &mut scan_board,
+            &mut scan_caches,
+            side,
+            0,
+            config,
+            scan_total,
+            scan_dgn,
+        );
+        let mut cached_board = board.clone();
+        let mut cached_caches = caches.clone();
+        let cached_score = evaluate_board_from_main(
+            &mut cached_board,
+            &mut cached_caches,
+            side,
+            0,
+            config,
+            cached_total,
+            cached_dgn,
+        );
+        assert_eq!(cached_score as i32, scan_score as i32);
+    }
 }
