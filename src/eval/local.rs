@@ -5,7 +5,7 @@ use crate::config::EngineConfig;
 use crate::constants::{BLACK, BOARD_AREA, BOARD_SIZE, DSHAPE_SIZE, EMPTY, WHITE};
 use crate::eval::caches::EvalCaches;
 use crate::patterns::buckets::bucket_for_lines;
-use crate::patterns::line::shape_raw_from_board_point_python;
+use crate::patterns::line::shape_raw_from_board_point_hypothetical;
 use crate::patterns::shapes::{ShapeLabel, DIAGONAL_DOWN, DIAGONAL_UP, HORIZONTAL, VERTICAL};
 use crate::types::Move;
 
@@ -15,25 +15,13 @@ pub fn local_backend_name() -> &'static str {
     "python"
 }
 
-pub fn compute_direction_shape(
-    board: &mut Board,
-    x: usize,
-    y: usize,
-    direction: i32,
-    side: i8,
-) -> i32 {
+pub fn compute_direction_shape(board: &Board, x: usize, y: usize, direction: i32, side: i8) -> i32 {
     if board.grid_rows()[y][x] != EMPTY {
         return 0;
     }
 
-    board.grid_rows_mut()[y][x] = side;
-    let result = {
-        let (pivot, point_index) = pivot_and_point_index(x, y, direction);
-        shape_raw_from_board_point_python(board, pivot, direction, point_index, true)
-            .expect("direction checked in pivot_and_point_index")
-    };
-    board.grid_rows_mut()[y][x] = EMPTY;
-    result
+    shape_raw_from_board_point_hypothetical(board.grid_rows(), x, y, direction, side, true)
+        .expect("direction checked by caller")
 }
 
 pub fn compute_bucket_and_attack(direction_shapes: (i32, i32, i32, i32)) -> (i32, i32) {
@@ -193,20 +181,36 @@ pub fn value_wide_compute(board: &mut Board, caches: &mut EvalCaches, changed: (
         let cell = board.grid_rows()[y][x];
         remove_empty_bucket_contribution(caches, x, y);
         if cell == EMPTY {
+            let mut changed_player = [false; 2];
             if flags & horizontal_flag != 0 {
-                update_direction_cache(board, caches, x, y, HORIZONTAL);
+                merge_changed_player(
+                    &mut changed_player,
+                    update_direction_cache(board, caches, x, y, HORIZONTAL),
+                );
             }
             if flags & vertical_flag != 0 {
-                update_direction_cache(board, caches, x, y, VERTICAL);
+                merge_changed_player(
+                    &mut changed_player,
+                    update_direction_cache(board, caches, x, y, VERTICAL),
+                );
             }
             if flags & diag_down_flag != 0 {
-                update_direction_cache(board, caches, x, y, DIAGONAL_DOWN);
+                merge_changed_player(
+                    &mut changed_player,
+                    update_direction_cache(board, caches, x, y, DIAGONAL_DOWN),
+                );
             }
             if flags & diag_up_flag != 0 {
-                update_direction_cache(board, caches, x, y, DIAGONAL_UP);
+                merge_changed_player(
+                    &mut changed_player,
+                    update_direction_cache(board, caches, x, y, DIAGONAL_UP),
+                );
             }
-            update_bucket_attack(board, caches, x, y, 0);
-            update_bucket_attack(board, caches, x, y, 1);
+            for (player, changed) in changed_player.into_iter().enumerate() {
+                if changed {
+                    update_bucket_attack(board, caches, x, y, player);
+                }
+            }
         } else {
             clear_occupied_point(caches, x, y);
         }
@@ -390,16 +394,6 @@ fn side_index(side: i8) -> usize {
     }
 }
 
-fn pivot_and_point_index(x: usize, y: usize, direction: i32) -> (usize, usize) {
-    match direction {
-        HORIZONTAL => (x, y),
-        VERTICAL => (y, x),
-        DIAGONAL_DOWN => (x + y, y),
-        DIAGONAL_UP => (BOARD_SIZE - 1 - y + x, BOARD_SIZE - 1 - y),
-        _ => panic!("invalid direction: {direction}"),
-    }
-}
-
 fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
     caches.empty_bucket_counts = [[0; DSHAPE_SIZE]; 2];
     caches.occupied_moves = [0; BOARD_AREA];
@@ -489,13 +483,19 @@ fn remove_occupied_move(caches: &mut EvalCaches, move_: Move) {
     caches.occupied_len -= 1;
 }
 
+fn merge_changed_player(accumulator: &mut [bool; 2], changed: [bool; 2]) {
+    accumulator[0] |= changed[0];
+    accumulator[1] |= changed[1];
+}
+
 fn update_direction_cache(
-    board: &mut Board,
+    board: &Board,
     caches: &mut EvalCaches,
     x: usize,
     y: usize,
     direction: i32,
-) {
+) -> [bool; 2] {
+    let mut changed = [false; 2];
     for (side, player) in [(BLACK, 0_usize), (WHITE, 1_usize)] {
         let new_shape = compute_direction_shape(board, x, y, direction, side);
         let direction_index = direction as usize;
@@ -505,8 +505,10 @@ fn update_direction_cache(
                 caches.shape_log.push((player, x, y, direction_index, old));
             }
             caches.shape_cache[player][x][y][direction_index] = new_shape;
+            changed[player] = true;
         }
     }
+    changed
 }
 
 fn update_bucket_attack(board: &Board, caches: &mut EvalCaches, x: usize, y: usize, player: usize) {

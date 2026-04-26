@@ -107,6 +107,7 @@ pub fn shape_raw_from_board_python(
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn shape_raw_from_board_point_python(
     board: &Board,
     pivot: usize,
@@ -159,6 +160,127 @@ pub(crate) fn shape_raw_from_board_point_python(
     }
 }
 
+pub(crate) fn shape_raw_from_board_point_hypothetical(
+    grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
+    x: usize,
+    y: usize,
+    direction: i32,
+    side: i8,
+    freestyle: bool,
+) -> Result<i32, PatternError> {
+    match direction {
+        HORIZONTAL => Ok(shape_raw_from_hypothetical_offsets(
+            grid, x, y, 0, 1, side, freestyle,
+        )),
+        VERTICAL => Ok(shape_raw_from_hypothetical_offsets(
+            grid, x, y, 1, 0, side, freestyle,
+        )),
+        DIAGONAL_DOWN => Ok(shape_raw_from_hypothetical_offsets(
+            grid, x, y, -1, 1, side, freestyle,
+        )),
+        DIAGONAL_UP => Ok(shape_raw_from_hypothetical_offsets(
+            grid, x, y, -1, -1, side, freestyle,
+        )),
+        _ => Err(PatternError::InvalidDirection(direction)),
+    }
+}
+
+#[inline(always)]
+fn shape_raw_from_hypothetical_offsets(
+    grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
+    x: usize,
+    y: usize,
+    dx: isize,
+    dy: isize,
+    side: i8,
+    freestyle: bool,
+) -> i32 {
+    let stone = i32::from(side);
+    if stone != i32::from(BLACK) && stone != i32::from(WHITE) {
+        return 0;
+    }
+
+    let mut ssp = 0_i32;
+    let mut si = 0_i32;
+    let mut sj = 0_i32;
+    let mut forward_blocked = false;
+    let mut backward_blocked = false;
+
+    let forward_masks = [16, 8, 4, 2, 1];
+    let backward_masks = [32, 64, 128, 256, 512];
+
+    let mut offset = 1_usize;
+    while offset <= 5 {
+        let mask = forward_masks[offset - 1];
+        let value = hypothetical_cell_at(grid, x, y, dx, dy, offset as isize);
+        if value == i32::from(EMPTY) {
+            offset += 1;
+            continue;
+        }
+        if value == stone {
+            ssp |= mask;
+        } else {
+            sj = (offset - 1) as i32;
+            forward_blocked = true;
+            break;
+        }
+        offset += 1;
+    }
+    if !forward_blocked {
+        sj = 5;
+    }
+
+    offset = 1;
+    while offset <= 5 {
+        let mask = backward_masks[offset - 1];
+        let value = hypothetical_cell_at(grid, x, y, dx, dy, -(offset as isize));
+        if value == i32::from(EMPTY) {
+            offset += 1;
+            continue;
+        }
+        if value == stone {
+            ssp |= mask;
+        } else {
+            si = (offset - 1) as i32;
+            backward_blocked = true;
+            break;
+        }
+        offset += 1;
+    }
+    if !backward_blocked {
+        si = 5;
+    }
+
+    ssp >>= 5 - sj;
+    let table_index = (1 << si) * ((1 << sj) + 62) - 63 + ssp;
+    let row = if stone == i32::from(BLACK) && !freestyle {
+        1
+    } else {
+        0
+    };
+    let trt = shape_table_lookup(row as usize, table_index as usize);
+    ((trt & 0xF0) << 12) | (trt & 0xF)
+}
+
+#[inline(always)]
+fn hypothetical_cell_at(
+    grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
+    x: usize,
+    y: usize,
+    dx: isize,
+    dy: isize,
+    offset: isize,
+) -> i32 {
+    let xx = x as isize + dx * offset;
+    let yy = y as isize + dy * offset;
+    if xx < 0 || yy < 0 || xx >= BOARD_SIZE as isize || yy >= BOARD_SIZE as isize {
+        SENTINEL
+    } else {
+        i32::from(grid[yy as usize][xx as usize])
+    }
+}
+
+#[cfg(test)]
 #[inline(always)]
 fn shape_raw_horizontal_point(
     grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
@@ -170,6 +292,7 @@ fn shape_raw_horizontal_point(
     shape_raw_from_logical_indices(size, point_index, freestyle, |i| i32::from(grid[i][pivot]))
 }
 
+#[cfg(test)]
 #[inline(always)]
 fn shape_raw_vertical_point(
     grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
@@ -181,6 +304,7 @@ fn shape_raw_vertical_point(
     shape_raw_from_logical_indices(size, point_index, freestyle, |i| i32::from(grid[pivot][i]))
 }
 
+#[cfg(test)]
 #[inline(always)]
 fn shape_raw_diagonal_down_point(
     grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
@@ -200,6 +324,7 @@ fn shape_raw_diagonal_down_point(
     })
 }
 
+#[cfg(test)]
 #[inline(always)]
 fn shape_raw_diagonal_up_point(
     grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
@@ -219,6 +344,7 @@ fn shape_raw_diagonal_up_point(
     })
 }
 
+#[cfg(test)]
 #[inline(always)]
 fn shape_raw_from_logical_indices<F>(
     size: usize,
@@ -304,6 +430,7 @@ where
     ((trt & 0xF0) << 12) | (trt & 0xF)
 }
 
+#[cfg(test)]
 fn diagonal_index_range(size: usize, pivot: usize) -> std::ops::Range<usize> {
     if pivot < size {
         0..pivot + 1
@@ -364,9 +491,17 @@ mod tests {
                         continue;
                     }
                     for side in [BLACK, WHITE] {
-                        board.grid_rows_mut()[y][x] = side;
                         for freestyle in [true, false] {
                             for direction in [HORIZONTAL, VERTICAL, DIAGONAL_DOWN, DIAGONAL_UP] {
+                                let hypothetical = shape_raw_from_board_point_hypothetical(
+                                    board.grid_rows(),
+                                    x,
+                                    y,
+                                    direction,
+                                    side,
+                                    freestyle,
+                                )
+                                .unwrap();
                                 let (pivot, point_index) = match direction {
                                     HORIZONTAL => (x, y),
                                     VERTICAL => (y, x),
@@ -374,6 +509,7 @@ mod tests {
                                     DIAGONAL_UP => (BOARD_SIZE - 1 - y + x, BOARD_SIZE - 1 - y),
                                     _ => unreachable!(),
                                 };
+                                board.grid_rows_mut()[y][x] = side;
                                 let full = shape_raw_from_board_python(
                                     &board,
                                     pivot,
@@ -390,13 +526,17 @@ mod tests {
                                     freestyle,
                                 )
                                 .unwrap();
+                                board.grid_rows_mut()[y][x] = EMPTY;
                                 assert_eq!(
                                     point, full,
                                     "x={x} y={y} side={side} direction={direction} freestyle={freestyle}"
                                 );
+                                assert_eq!(
+                                    hypothetical, full,
+                                    "x={x} y={y} side={side} direction={direction} freestyle={freestyle}"
+                                );
                             }
                         }
-                        board.grid_rows_mut()[y][x] = EMPTY;
                     }
                 }
             }
