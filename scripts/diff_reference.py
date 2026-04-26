@@ -11,6 +11,14 @@ from dataclasses import replace
 from pathlib import Path
 
 REFERENCE_ROOT_ENV = "PYGOMOKU_REF_ROOT"
+SUPPORTED_RUNTIME_KEYS = {
+    "compute_vcf",
+    "nonroot_vcf",
+    "compute_vct",
+    "root_vct_depth",
+    "static_board",
+    "dynamic_board_margin",
+}
 
 
 def repo_root() -> Path:
@@ -47,6 +55,13 @@ def import_reference(ref_root: str | Path | None = None) -> None:
 def apply_runtime(config, runtime: dict):
     if not runtime:
         return config
+    unsupported = sorted(set(runtime) - SUPPORTED_RUNTIME_KEYS)
+    if unsupported:
+        joined = ", ".join(unsupported)
+        raise ValueError(
+            "runtime field(s) not supported by Python reference diff: "
+            f"{joined}. Add explicit reference support before using them in cases."
+        )
     values = {}
     if "compute_vcf" in runtime:
         values["compute_vcf"] = bool(runtime["compute_vcf"])
@@ -60,10 +75,10 @@ def apply_runtime(config, runtime: dict):
         values["static_board"] = bool(runtime["static_board"])
     if "dynamic_board_margin" in runtime:
         values["dynamic_board_margin"] = max(0, int(runtime["dynamic_board_margin"]))
-    # Newer Rust-only runtime knobs may not exist in the current reference
-    # dataclass. Ignore unsupported keys here; cases that need strict reference
-    # parity should only use knobs available on both sides.
-    values = {key: value for key, value in values.items() if hasattr(config.runtime, key)}
+    missing = sorted(key for key in values if not hasattr(config.runtime, key))
+    if missing:
+        joined = ", ".join(missing)
+        raise ValueError(f"runtime field(s) missing on Python reference config: {joined}")
     if not values:
         return config
     return replace(config, runtime=replace(config.runtime, **values))

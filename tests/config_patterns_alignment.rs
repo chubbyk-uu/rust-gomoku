@@ -1,7 +1,8 @@
 use rust_gomoku::{
     adjust_loaded_parameters, bucket_for_lines, default_eval_para, line_backend_name,
     load_default_config, xy_to_move, Board, Line, PackedShape, SearchLimits, ShapeLabel, BLACK,
-    BOARD_SIZE, DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_ROOT_VCF_DEPTH,
+    BOARD_SIZE, DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_LAZY_SMP, DEFAULT_LAZY_SMP_WORKERS,
+    DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_ROOT_PROFILE, DEFAULT_ROOT_VCF_DEPTH,
     DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
     DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
     DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH, DIAGONAL_DOWN, DIAGONAL_UP, DIRECTION_IDS, DOUBLE_SHAPE,
@@ -49,7 +50,7 @@ fn parameter_boundaries_match_expected_offsets() {
 }
 
 #[test]
-fn runtime_defaults_match_reference() {
+fn runtime_defaults_match_rust_policy() {
     let config = load_default_config();
     assert!(!config.runtime.read_config_each_move);
     assert!(config.runtime.compute_vcf);
@@ -70,8 +71,9 @@ fn runtime_defaults_match_reference() {
     );
     assert!(config.runtime.compute_vct);
     assert_eq!(config.runtime.root_vct_depth, DEFAULT_ROOT_VCT_DEPTH);
-    assert!(!config.runtime.lazy_smp);
-    assert_eq!(config.runtime.lazy_smp_workers, 0);
+    assert_eq!(config.runtime.lazy_smp, DEFAULT_LAZY_SMP);
+    assert_eq!(config.runtime.lazy_smp_workers, DEFAULT_LAZY_SMP_WORKERS);
+    assert_eq!(config.runtime.root_profile, DEFAULT_ROOT_PROFILE);
 }
 
 #[test]

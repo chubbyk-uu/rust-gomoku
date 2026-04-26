@@ -7,7 +7,8 @@ pub mod root;
 pub mod tt;
 
 pub use alphabeta::{
-    compute_corner_state, rootbonus, terminal_score, AlphaBetaSearcher, SearchOptions, SearchStats,
+    compute_corner_state, rootbonus, terminal_score, AlphaBetaSearcher, RootCandidateProfile,
+    SearchOptions, SearchStats,
 };
 pub use movegen::{
     apply_hostile_three_extension, covered_moves, generate_candidates, movegen_backend_name,
@@ -15,7 +16,7 @@ pub use movegen::{
 };
 pub use ordering::{getmi, order_candidates, order_candidates_root_classic, ordering_backend_name};
 pub use root::{
-    fallback_ai_move, new_classic_fallback_rng, ClassicFallbackRng, RootSearcher, RootTrace,
-    SearchLimits, SearchResult,
+    fallback_ai_move, new_classic_fallback_rng, ClassicFallbackRng, RootDepthProfile, RootSearcher,
+    RootTrace, SearchLimits, SearchResult,
 };
 pub use tt::{ProbeResult, TTEntry, TranspositionTable};

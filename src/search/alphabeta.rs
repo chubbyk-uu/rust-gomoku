@@ -16,7 +16,20 @@ use crate::search::{order_candidates, order_candidates_root_classic, TTEntry, Tr
 use crate::threats::VCFSearcher;
 use crate::types::{Move, Side};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RootCandidateProfile {
+    pub index: usize,
+    pub move_: Move,
+    pub score: i32,
+    pub nodes: usize,
+    pub elapsed_us: u128,
+    pub alpha_before: i32,
+    pub alpha_after: i32,
+    pub beta: i32,
+    pub reason: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchStats {
     pub nodes: usize,
     pub leaf_nodes: usize,
@@ -26,6 +39,8 @@ pub struct SearchStats {
     pub node_limit: Option<usize>,
     pub deadline: Option<Instant>,
     pub time_check_mask: usize,
+    pub root_profile: bool,
+    pub root_candidates: Vec<RootCandidateProfile>,
 }
 
 impl Default for SearchStats {
@@ -39,6 +54,8 @@ impl Default for SearchStats {
             node_limit: None,
             deadline: None,
             time_check_mask: 0xFF,
+            root_profile: false,
+            root_candidates: Vec::new(),
         }
     }
 }
@@ -320,6 +337,10 @@ impl AlphaBetaSearcher {
         for (index, candidate) in ordered.iter().copied().enumerate() {
             let snapshot = caches.snapshot();
             let (mx, my) = move_to_xy(candidate.move_).expect("candidate move is valid");
+            let profile_root_candidate = options.root && stats.root_profile;
+            let profile_start = profile_root_candidate.then(Instant::now);
+            let profile_nodes_before = stats.nodes;
+            let profile_alpha_before = alpha;
             board
                 .play(candidate.move_, Some(side))
                 .expect("ordered candidate stays legal");
@@ -435,22 +456,60 @@ impl AlphaBetaSearcher {
             coverage.remove_move(candidate.move_);
             caches.restore_snapshot(&snapshot);
             if stats.stop {
+                if let Some(start) = profile_start {
+                    stats.root_candidates.push(RootCandidateProfile {
+                        index,
+                        move_: candidate.move_,
+                        score,
+                        nodes: stats.nodes.saturating_sub(profile_nodes_before),
+                        elapsed_us: start.elapsed().as_micros(),
+                        alpha_before: profile_alpha_before,
+                        alpha_after: alpha,
+                        beta,
+                        reason: "stop",
+                    });
+                }
                 break;
             }
 
             if score > current {
                 current = score;
             }
+            let improved = score > alpha;
             if score > alpha {
                 alpha = score;
                 best_move = Some(candidate.move_);
                 hash_flag = HASHF_EXACT;
                 found_pv = true;
             }
-            if options.root && score >= WIN {
+            let root_win = options.root && score >= WIN;
+            let beta_cutoff = alpha >= beta;
+            if let Some(start) = profile_start {
+                let reason = if root_win {
+                    "root_win"
+                } else if beta_cutoff {
+                    "beta_cutoff"
+                } else if improved {
+                    "improved"
+                } else {
+                    "fail_low"
+                };
+                stats.root_candidates.push(RootCandidateProfile {
+                    index,
+                    move_: candidate.move_,
+                    score,
+                    nodes: stats.nodes.saturating_sub(profile_nodes_before),
+                    elapsed_us: start.elapsed().as_micros(),
+                    alpha_before: profile_alpha_before,
+                    alpha_after: alpha,
+                    beta,
+                    reason,
+                });
+            }
+            if root_win {
                 break;
             }
-            if alpha >= beta {
+            if beta_cutoff {
                 hash_flag = HASHF_BETA;
                 stats.cutoffs += 1;
                 break;

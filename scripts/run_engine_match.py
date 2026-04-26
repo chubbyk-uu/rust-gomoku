@@ -62,6 +62,14 @@ def side_name(side: int) -> str:
     return "black" if side == BLACK else "white"
 
 
+def parse_side_name(value: str) -> int | None:
+    if value == "black":
+        return BLACK
+    if value == "white":
+        return WHITE
+    return None
+
+
 def in_bounds(x: int, y: int) -> bool:
     return 0 <= x < BOARD_SIZE and 0 <= y < BOARD_SIZE
 
@@ -419,6 +427,17 @@ def print_progress(done: int, total: int, game: dict[str, Any]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--opening-set", choices=sorted(OPENING_SETS), default="9")
+    parser.add_argument(
+        "--opening-index",
+        type=int,
+        help="run only one opening index from the selected opening set",
+    )
+    parser.add_argument(
+        "--rust-side",
+        choices=["black", "white", "both"],
+        default="both",
+        help="filter which side the Rust engine plays",
+    )
     parser.add_argument("--limit-openings", type=int)
     parser.add_argument("--jobs", type=int, default=18)
     parser.add_argument("--max-moves", type=int, default=DEFAULT_MAX_MOVES)
@@ -467,12 +486,28 @@ def main() -> int:
     rust_info = parse_info(args.rust_info)
     reference_info = parse_info(args.reference_info)
     openings = OPENING_SETS[args.opening_set]
+    indexed_openings = list(enumerate(openings))
+    if args.opening_index is not None:
+        indexed_openings = [
+            (index, opening)
+            for index, opening in indexed_openings
+            if index == args.opening_index
+        ]
+        if not indexed_openings:
+            raise SystemExit(
+                f"opening index {args.opening_index} not found in set {args.opening_set}"
+            )
     if args.limit_openings is not None:
-        openings = openings[: max(0, args.limit_openings)]
+        indexed_openings = indexed_openings[: max(0, args.limit_openings)]
+    rust_sides = [BLACK, WHITE]
+    if args.rust_side != "both":
+        parsed_side = parse_side_name(args.rust_side)
+        assert parsed_side is not None
+        rust_sides = [parsed_side]
     tasks = [
         MatchTask(index, opening, rust_side)
-        for index, opening in enumerate(openings)
-        for rust_side in [BLACK, WHITE]
+        for index, opening in indexed_openings
+        for rust_side in rust_sides
     ]
 
     started = time.perf_counter()

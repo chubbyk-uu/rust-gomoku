@@ -19,9 +19,10 @@ pub use config::{
     adjust_loaded_parameters, default_eval_para, load_default_config, EngineConfig,
     EvalBucketTables, RootSearchDefaults, RuntimeOptions, SearchParameters,
     DEFAULT_CHILD_WIDTH_RATIO_DEN, DEFAULT_CHILD_WIDTH_RATIO_NUM, DEFAULT_DYNAMIC_BOARD_MARGIN,
-    DEFAULT_EVAL_PARA, DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH,
-    DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH, DEFAULT_TIMED_SEARCH_MAX_DEPTH,
-    DEFAULT_TIMED_SEARCH_MAX_WIDTH, DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
+    DEFAULT_EVAL_PARA, DEFAULT_LAZY_SMP, DEFAULT_LAZY_SMP_WORKERS, DEFAULT_OPPONENT_VCF_DEPTH,
+    DEFAULT_ROOT_PROFILE, DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH,
+    DEFAULT_SEARCH_WIDTH, DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
+    DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
 };
 pub use constants::{BLACK, BOARD_AREA, BOARD_SIZE, EMPTY, WHITE};
 pub use eval::{
@@ -42,8 +43,8 @@ pub use search::{
     generate_candidates, getmi, movegen_backend_name, new_classic_fallback_rng, order_candidates,
     order_candidates_root_classic, ordering_backend_name, rootbonus, terminal_score,
     AlphaBetaSearcher, Candidate, CandidateGenerationResult, ClassicFallbackRng, ProbeResult,
-    RootSearcher, RootTrace, SearchLimits, SearchOptions, SearchResult, SearchStats, TTEntry,
-    TranspositionTable,
+    RootCandidateProfile, RootDepthProfile, RootSearcher, RootTrace, SearchLimits, SearchOptions,
+    SearchResult, SearchStats, TTEntry, TranspositionTable,
 };
 pub use threats::{
     broken_four_reply, forcing_threat_moves, has_open_four, has_vct_trigger, threat_moves,

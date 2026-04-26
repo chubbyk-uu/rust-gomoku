@@ -84,7 +84,7 @@ impl GomocupProtocol {
                 self.reset_engine();
                 vec!["OK".to_string()]
             }
-            "BEGIN" => vec![self.search_move()],
+            "BEGIN" => self.search_move(),
             "TURN" => self.handle_turn(&parts),
             "BOARD" => {
                 self.board_mode = true;
@@ -164,7 +164,7 @@ impl GomocupProtocol {
         if self.play_xy(x as usize, y as usize, side).is_err() {
             return vec!["ERROR Illegal move.".to_string()];
         }
-        vec![self.search_move()]
+        self.search_move()
     }
 
     fn reset_engine(&mut self) {
@@ -228,7 +228,7 @@ impl GomocupProtocol {
         }
 
         self.board_lines.clear();
-        vec![self.search_move()]
+        self.search_move()
     }
 
     fn handle_info(&mut self, args: &[&str]) {
@@ -239,17 +239,17 @@ impl GomocupProtocol {
         let value = args[1];
         match key.as_str() {
             "timeout_turn" => {
-                if let Some(parsed) = parse_one::<f64>(value) {
+                if let Some(parsed) = parse_time_ms(value) {
                     self.timeout_turn_ms = Some(if parsed == 0.0 { 200.0 } else { parsed });
                 }
             }
             "timeout_match" => {
-                if let Some(parsed) = parse_one::<f64>(value) {
+                if let Some(parsed) = parse_time_ms(value) {
                     self.time_left_ms = Some(if parsed == 0.0 { 99_999_999.0 } else { parsed });
                 }
             }
             "time_left" => {
-                if let Some(parsed) = parse_one::<f64>(value) {
+                if let Some(parsed) = parse_time_ms(value) {
                     self.time_left_ms = Some(parsed);
                 }
             }
@@ -312,6 +312,11 @@ impl GomocupProtocol {
                     self.searcher = None;
                 }
             }
+            "root_profile" => {
+                if let Some(parsed) = parse_one::<i32>(value) {
+                    self.config.runtime.root_profile = parsed != 0;
+                }
+            }
             "static" => {
                 if let Some(parsed) = parse_one::<i32>(value) {
                     self.config.runtime.static_board = parsed % 2 != 0;
@@ -355,7 +360,7 @@ impl GomocupProtocol {
         }
     }
 
-    fn search_move(&mut self) -> String {
+    fn search_move(&mut self) -> Vec<String> {
         let limits = self.current_search_limits();
         let mut searcher = self
             .searcher
@@ -363,6 +368,7 @@ impl GomocupProtocol {
             .unwrap_or_else(|| RootSearcher::new(self.config.clone()));
         searcher.config = self.config.clone();
         let result = searcher.search(&mut self.board, Some(limits));
+        let trace = searcher.last_trace.clone();
         self.searcher = Some(searcher);
 
         let mut move_ = result.move_;
@@ -375,12 +381,58 @@ impl GomocupProtocol {
         let side = self.board.side_to_move();
         self.play_xy(x, y, side)
             .expect("selected protocol move is legal");
-        format!("{x},{y}")
+        let mut responses = root_profile_messages(trace.as_ref());
+        responses.push(format!("{x},{y}"));
+        responses
     }
+}
+
+fn root_profile_messages(trace: Option<&crate::search::RootTrace>) -> Vec<String> {
+    let Some(trace) = trace else {
+        return Vec::new();
+    };
+    if trace.root_profiles.is_empty() {
+        return Vec::new();
+    }
+    let mut messages = Vec::new();
+    for depth in &trace.root_profiles {
+        messages.push(format!(
+            "MESSAGE root_profile depth={} elapsed_ms={:.3} nodes={} candidates={} stopped={} score={}",
+            depth.depth,
+            depth.elapsed_us as f64 / 1000.0,
+            depth.nodes,
+            depth.candidates.len(),
+            depth.stopped,
+            depth.score,
+        ));
+        for candidate in &depth.candidates {
+            let (x, y) = move_to_xy(candidate.move_).expect("profile move stays valid");
+            messages.push(format!(
+                "MESSAGE root_candidate depth={} index={} move={},{} score={} nodes={} elapsed_ms={:.3} alpha_before={} alpha_after={} beta={} reason={}",
+                depth.depth,
+                candidate.index,
+                x,
+                y,
+                candidate.score,
+                candidate.nodes,
+                candidate.elapsed_us as f64 / 1000.0,
+                candidate.alpha_before,
+                candidate.alpha_after,
+                candidate.beta,
+                candidate.reason,
+            ));
+        }
+    }
+    messages
 }
 
 fn parse_one<T: std::str::FromStr>(raw: &str) -> Option<T> {
     raw.trim().parse::<T>().ok()
+}
+
+fn parse_time_ms(raw: &str) -> Option<f64> {
+    let parsed = parse_one::<f64>(raw)?;
+    (parsed.is_finite() && parsed >= 0.0).then_some(parsed)
 }
 
 fn in_bounds_i32(x: i32, y: i32) -> bool {

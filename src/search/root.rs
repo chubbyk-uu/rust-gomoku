@@ -12,7 +12,9 @@ use crate::board::{move_to_xy, xy_to_move, Board};
 use crate::config::EngineConfig;
 use crate::constants::{INF, WIN};
 use crate::eval::{recompute_all, EvalCaches};
-use crate::search::{AlphaBetaSearcher, SearchOptions, SearchStats, TranspositionTable};
+use crate::search::{
+    AlphaBetaSearcher, RootCandidateProfile, SearchOptions, SearchStats, TranspositionTable,
+};
 use crate::threats::{forcing_threat_moves, has_vct_trigger, VCFSearcher, VCTSearcher};
 use crate::types::{Move, Side};
 
@@ -62,6 +64,17 @@ pub struct SearchResult {
     pub nodes: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RootDepthProfile {
+    pub depth: i32,
+    pub score: i32,
+    pub best_move: Option<Move>,
+    pub nodes: usize,
+    pub elapsed_us: u128,
+    pub stopped: bool,
+    pub candidates: Vec<RootCandidateProfile>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RootTrace {
     pub used_vcf: bool,
@@ -74,6 +87,7 @@ pub struct RootTrace {
     pub vct_reject_reason: Option<&'static str>,
     pub vct_ms: Option<f64>,
     pub tactical_path: &'static str,
+    pub root_profiles: Vec<RootDepthProfile>,
 }
 
 impl Default for RootTrace {
@@ -89,6 +103,7 @@ impl Default for RootTrace {
             vct_reject_reason: None,
             vct_ms: None,
             tactical_path: "alphabeta",
+            root_profiles: Vec::new(),
         }
     }
 }
@@ -566,7 +581,7 @@ impl RootSearcher {
                 }
             }
         }
-        self.last_trace = Some(trace);
+        self.last_trace = Some(trace.clone());
 
         let mut caches = EvalCaches::new();
         recompute_all(board, &mut caches);
@@ -625,9 +640,11 @@ impl RootSearcher {
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 break;
             }
+            let depth_start = Instant::now();
             let mut stats = SearchStats {
                 node_limit: limits.node_limit,
                 deadline,
+                root_profile: self.config.runtime.root_profile,
                 ..SearchStats::default()
             };
             let (score, move_) = self.alphabeta.search(
@@ -646,7 +663,20 @@ impl RootSearcher {
                     ..SearchOptions::default()
                 },
             );
+            let depth_elapsed_us = depth_start.elapsed().as_micros();
             total_nodes += stats.nodes;
+            if self.config.runtime.root_profile {
+                trace.root_profiles.push(RootDepthProfile {
+                    depth,
+                    score,
+                    best_move: move_,
+                    nodes: stats.nodes,
+                    elapsed_us: depth_elapsed_us,
+                    stopped: stats.stop,
+                    candidates: std::mem::take(&mut stats.root_candidates),
+                });
+                self.last_trace = Some(trace.clone());
+            }
             if stats.stop {
                 break;
             }
@@ -671,6 +701,7 @@ impl RootSearcher {
                 .expect("fallback move exists on non-terminal board")
         });
         Self::stop_lazy_smp_helpers(lazy_smp_stop, lazy_smp_handles);
+        self.last_trace = Some(trace);
         SearchResult {
             move_,
             score: best_score,

@@ -80,13 +80,44 @@ struct TraceSummary {
     vct_accepted: bool,
     vct_reject_reason: Option<String>,
     tactical_path: String,
+    root_profiles: Vec<RootDepthProfileSummary>,
+}
+
+#[derive(Serialize)]
+struct RootDepthProfileSummary {
+    depth: i32,
+    score: i32,
+    best_move: Option<[usize; 2]>,
+    nodes: usize,
+    elapsed_ms: f64,
+    stopped: bool,
+    candidates: Vec<RootCandidateProfileSummary>,
+}
+
+#[derive(Serialize)]
+struct RootCandidateProfileSummary {
+    index: usize,
+    #[serde(rename = "move")]
+    move_xy: [usize; 2],
+    score: i32,
+    nodes: usize,
+    elapsed_ms: f64,
+    alpha_before: i32,
+    alpha_after: i32,
+    beta: i32,
+    reason: String,
 }
 
 fn main() {
     let args = parse_args();
     let text = fs::read_to_string(&args.case_path).expect("case file is readable");
     let case: DiffCase = serde_json::from_str(&text).expect("case file is valid JSON");
-    let output = run_case(case, args.lazy_smp, args.lazy_smp_workers);
+    let output = run_case(
+        case,
+        args.lazy_smp,
+        args.lazy_smp_workers,
+        args.root_profile,
+    );
     println!(
         "{}",
         serde_json::to_string_pretty(&output).expect("probe output serialises")
@@ -98,6 +129,7 @@ struct ProbeArgs {
     case_path: PathBuf,
     lazy_smp: bool,
     lazy_smp_workers: usize,
+    root_profile: bool,
 }
 
 fn parse_args() -> ProbeArgs {
@@ -105,6 +137,7 @@ fn parse_args() -> ProbeArgs {
     let mut case_path = None;
     let mut lazy_smp = false;
     let mut lazy_smp_workers = 0_usize;
+    let mut root_profile = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--case" => {
@@ -120,21 +153,32 @@ fn parse_args() -> ProbeArgs {
                     .parse()
                     .expect("--lazy-smp-workers must be a non-negative integer");
             }
+            "--root-profile" => {
+                root_profile = true;
+            }
             _ => {}
         }
     }
     let Some(case_path) = case_path else {
-        eprintln!("usage: diff_probe --case <case.json> [--lazy-smp] [--lazy-smp-workers <n>]");
+        eprintln!(
+            "usage: diff_probe --case <case.json> [--lazy-smp] [--lazy-smp-workers <n>] [--root-profile]"
+        );
         std::process::exit(2);
     };
     ProbeArgs {
         case_path,
         lazy_smp,
         lazy_smp_workers,
+        root_profile,
     }
 }
 
-fn run_case(case: DiffCase, lazy_smp: bool, lazy_smp_workers: usize) -> ProbeOutput {
+fn run_case(
+    case: DiffCase,
+    lazy_smp: bool,
+    lazy_smp_workers: usize,
+    root_profile: bool,
+) -> ProbeOutput {
     let mut board = Board::with_side_to_move(case.first_side).expect("first_side is valid");
     for [x, y] in &case.moves {
         let move_ = xy_to_move(*x as usize, *y as usize).expect("case move is in range");
@@ -171,6 +215,7 @@ fn run_case(case: DiffCase, lazy_smp: bool, lazy_smp_workers: usize) -> ProbeOut
     }
     config.runtime.lazy_smp = lazy_smp;
     config.runtime.lazy_smp_workers = lazy_smp_workers;
+    config.runtime.root_profile = root_profile;
 
     let default_limits = SearchLimits::fixed_from_config(&config);
     let limits = SearchLimits {
@@ -211,6 +256,40 @@ fn run_case(case: DiffCase, lazy_smp: bool, lazy_smp_workers: usize) -> ProbeOut
                 vct_accepted: trace.vct_accepted,
                 vct_reject_reason: trace.vct_reject_reason.map(|s| s.to_string()),
                 tactical_path: trace.tactical_path.to_string(),
+                root_profiles: trace
+                    .root_profiles
+                    .iter()
+                    .map(|profile| RootDepthProfileSummary {
+                        depth: profile.depth,
+                        score: profile.score,
+                        best_move: profile
+                            .best_move
+                            .and_then(|m| move_to_xy(m).ok())
+                            .map(|(x, y)| [x, y]),
+                        nodes: profile.nodes,
+                        elapsed_ms: profile.elapsed_us as f64 / 1000.0,
+                        stopped: profile.stopped,
+                        candidates: profile
+                            .candidates
+                            .iter()
+                            .map(|candidate| {
+                                let (x, y) =
+                                    move_to_xy(candidate.move_).expect("profile move is valid");
+                                RootCandidateProfileSummary {
+                                    index: candidate.index,
+                                    move_xy: [x, y],
+                                    score: candidate.score,
+                                    nodes: candidate.nodes,
+                                    elapsed_ms: candidate.elapsed_us as f64 / 1000.0,
+                                    alpha_before: candidate.alpha_before,
+                                    alpha_after: candidate.alpha_after,
+                                    beta: candidate.beta,
+                                    reason: candidate.reason.to_string(),
+                                }
+                            })
+                            .collect(),
+                    })
+                    .collect(),
             },
         },
     }

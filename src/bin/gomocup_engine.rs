@@ -5,10 +5,17 @@ use std::io::{self, BufRead, Write};
 use rust_gomoku::{load_default_config, GomocupProtocol, SearchLimits};
 
 fn main() {
-    let (depth_override, width_override, lazy_smp, lazy_smp_workers) = parse_args();
+    let (depth_override, width_override, lazy_smp, lazy_smp_workers, root_profile) = parse_args();
     let mut config = load_default_config();
-    config.runtime.lazy_smp = lazy_smp;
-    config.runtime.lazy_smp_workers = lazy_smp_workers;
+    if let Some(lazy_smp) = lazy_smp {
+        config.runtime.lazy_smp = lazy_smp;
+    }
+    if let Some(lazy_smp_workers) = lazy_smp_workers {
+        config.runtime.lazy_smp_workers = lazy_smp_workers;
+    }
+    if let Some(root_profile) = root_profile {
+        config.runtime.root_profile = root_profile;
+    }
     let search_limits = if depth_override.is_some() || width_override.is_some() {
         let fixed = SearchLimits::fixed_from_config(&config);
         Some(SearchLimits {
@@ -37,11 +44,18 @@ fn main() {
     }
 }
 
-fn parse_args() -> (Option<i32>, Option<usize>, bool, usize) {
+fn parse_args() -> (
+    Option<i32>,
+    Option<usize>,
+    Option<bool>,
+    Option<usize>,
+    Option<bool>,
+) {
     let mut depth = None;
     let mut width = None;
-    let mut lazy_smp = false;
-    let mut lazy_smp_workers = 0_usize;
+    let mut lazy_smp = None;
+    let mut lazy_smp_workers = None;
+    let mut root_profile = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -56,15 +70,24 @@ fn parse_args() -> (Option<i32>, Option<usize>, bool, usize) {
                 }
             }
             "--lazy-smp" => {
-                lazy_smp = true;
+                lazy_smp = Some(true);
+            }
+            "--no-lazy-smp" => {
+                lazy_smp = Some(false);
             }
             "--lazy-smp-workers" => {
                 if let Some(value) = args.next().and_then(|value| value.parse::<usize>().ok()) {
-                    lazy_smp_workers = value;
+                    lazy_smp_workers = Some(value);
                 }
+            }
+            "--root-profile" => {
+                root_profile = Some(true);
+            }
+            "--no-root-profile" => {
+                root_profile = Some(false);
             }
             _ => {}
         }
     }
-    (depth, width, lazy_smp, lazy_smp_workers)
+    (depth, width, lazy_smp, lazy_smp_workers, root_profile)
 }

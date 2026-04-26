@@ -1,5 +1,6 @@
 use rust_gomoku::{
-    GomocupProtocol, SearchLimits, DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_OPPONENT_VCF_DEPTH,
+    GomocupProtocol, SearchLimits, DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_LAZY_SMP,
+    DEFAULT_LAZY_SMP_WORKERS, DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_ROOT_PROFILE,
     DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
     DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
     DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
@@ -19,6 +20,16 @@ fn proto() -> GomocupProtocol {
 fn assert_xy(response: &[String]) {
     assert_eq!(response.len(), 1);
     let parts: Vec<_> = response[0].split(',').collect();
+    assert_eq!(parts.len(), 2);
+    let x: usize = parts[0].parse().unwrap();
+    let y: usize = parts[1].parse().unwrap();
+    assert!(x < 15);
+    assert!(y < 15);
+}
+
+fn assert_last_xy(response: &[String]) {
+    let last = response.last().expect("response has final move");
+    let parts: Vec<_> = last.split(',').collect();
     assert_eq!(parts.len(), 2);
     let x: usize = parts[0].parse().unwrap();
     let y: usize = parts[1].parse().unwrap();
@@ -266,6 +277,30 @@ fn protocol_info_lazy_smp_workers_negative_clamps_to_zero() {
 }
 
 #[test]
+fn protocol_info_root_profile_updates_runtime() {
+    let mut proto = proto();
+    proto.handle_line("INFO root_profile 1");
+    assert!(proto.config.runtime.root_profile);
+    proto.handle_line("INFO root_profile 0");
+    assert!(!proto.config.runtime.root_profile);
+}
+
+#[test]
+fn protocol_root_profile_emits_messages_before_move_when_enabled() {
+    let mut proto = proto();
+    proto.handle_line("START 15");
+    proto.handle_line("INFO root_profile 1");
+    let response = proto.handle_line("TURN 7,7");
+    assert!(response
+        .iter()
+        .any(|line| line.starts_with("MESSAGE root_profile ")));
+    assert!(response
+        .iter()
+        .any(|line| line.starts_with("MESSAGE root_candidate ")));
+    assert_last_xy(&response);
+}
+
+#[test]
 fn protocol_info_max_node_zero_means_unlimited() {
     let mut proto = proto();
     proto.handle_line("INFO max_node 0");
@@ -284,6 +319,30 @@ fn protocol_info_timeout_match_zero_matches_expected_large_default() {
     let mut proto = proto();
     proto.handle_line("INFO timeout_match 0");
     assert_eq!(proto.time_left_ms, Some(99_999_999.0));
+}
+
+#[test]
+fn protocol_info_negative_time_values_are_ignored() {
+    let mut proto = proto();
+    proto.handle_line("INFO timeout_turn 500");
+    proto.handle_line("INFO timeout_match 600");
+    proto.handle_line("INFO timeout_turn -1");
+    proto.handle_line("INFO timeout_match -2");
+    proto.handle_line("INFO time_left -3");
+    assert_eq!(proto.timeout_turn_ms, Some(500.0));
+    assert_eq!(proto.time_left_ms, Some(600.0));
+}
+
+#[test]
+fn protocol_info_non_finite_time_values_are_ignored() {
+    let mut proto = proto();
+    proto.handle_line("INFO timeout_turn 500");
+    proto.handle_line("INFO timeout_match 600");
+    proto.handle_line("INFO timeout_turn NaN");
+    proto.handle_line("INFO timeout_match inf");
+    proto.handle_line("INFO time_left -inf");
+    assert_eq!(proto.timeout_turn_ms, Some(500.0));
+    assert_eq!(proto.time_left_ms, Some(600.0));
 }
 
 #[test]
@@ -331,6 +390,7 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
     proto.handle_line("INFO root_vct_depth nope");
     proto.handle_line("INFO lazy_smp nope");
     proto.handle_line("INFO lazy_smp_workers nope");
+    proto.handle_line("INFO root_profile nope");
     proto.handle_line("INFO static zed");
     proto.handle_line("INFO dynamic_board_margin hmm");
     assert_eq!(proto.timeout_turn_ms, Some(500.0));
@@ -349,8 +409,12 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
     assert!(!proto.config.runtime.nonroot_vcf);
     assert!(proto.config.runtime.compute_vct);
     assert_eq!(proto.config.runtime.root_vct_depth, DEFAULT_ROOT_VCT_DEPTH);
-    assert!(!proto.config.runtime.lazy_smp);
-    assert_eq!(proto.config.runtime.lazy_smp_workers, 0);
+    assert_eq!(proto.config.runtime.lazy_smp, DEFAULT_LAZY_SMP);
+    assert_eq!(
+        proto.config.runtime.lazy_smp_workers,
+        DEFAULT_LAZY_SMP_WORKERS
+    );
+    assert_eq!(proto.config.runtime.root_profile, DEFAULT_ROOT_PROFILE);
     assert!(proto.config.runtime.static_board);
     assert_eq!(
         proto.config.runtime.dynamic_board_margin,
