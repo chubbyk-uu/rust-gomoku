@@ -5,7 +5,7 @@ use std::io::{self, BufRead, Write};
 use rust_gomoku::{load_default_config, GomocupProtocol, SearchLimits};
 
 fn main() {
-    let (depth_override, width_override, root_profile) = parse_args();
+    let (depth_override, width_override, root_profile, tt_bits) = parse_args();
     let mut config = load_default_config();
     if let Some(root_profile) = root_profile {
         config.runtime.root_profile = root_profile;
@@ -21,6 +21,7 @@ fn main() {
         None
     };
     let mut protocol = GomocupProtocol::new(Some(config), search_limits);
+    protocol.tt_bits = tt_bits;
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -38,10 +39,11 @@ fn main() {
     }
 }
 
-fn parse_args() -> (Option<i32>, Option<usize>, Option<bool>) {
+fn parse_args() -> (Option<i32>, Option<usize>, Option<bool>, Option<u32>) {
     let mut depth = None;
     let mut width = None;
     let mut root_profile = None;
+    let mut tt_bits = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -61,8 +63,13 @@ fn parse_args() -> (Option<i32>, Option<usize>, Option<bool>) {
             "--no-root-profile" => {
                 root_profile = Some(false);
             }
+            "--tt-bits" => {
+                if let Some(value) = args.next().and_then(|value| value.parse::<u32>().ok()) {
+                    tt_bits = Some(value);
+                }
+            }
             _ => {}
         }
     }
-    (depth, width, root_profile)
+    (depth, width, root_profile, tt_bits)
 }

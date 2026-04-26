@@ -3,7 +3,7 @@
 use crate::board::{move_to_xy, xy_to_move, Board};
 use crate::config::{load_default_config, EngineConfig};
 use crate::constants::{BOARD_AREA, BOARD_SIZE};
-use crate::search::{RootSearcher, SearchLimits};
+use crate::search::{RootSearcher, SearchLimits, TranspositionTable};
 
 pub const ABOUT_TEXT: &str = "name=\"rust_gomoku\", version=\"0.1\", author=\"OpenAI\", country=\"China\", www=\"https://example.invalid/\"";
 
@@ -17,6 +17,7 @@ pub struct GomocupProtocol {
     pub timeout_turn_ms: Option<f64>,
     pub time_left_ms: Option<f64>,
     pub node_limit: Option<usize>,
+    pub tt_bits: Option<u32>,
     pub ended: bool,
     searcher: Option<RootSearcher>,
 }
@@ -38,6 +39,7 @@ impl GomocupProtocol {
             timeout_turn_ms: None,
             time_left_ms: None,
             node_limit: None,
+            tt_bits: None,
             ended: false,
             searcher: None,
         }
@@ -306,6 +308,12 @@ impl GomocupProtocol {
                     self.searcher = None;
                 }
             }
+            "tt_bits" => {
+                if let Some(parsed) = parse_one::<u32>(value) {
+                    self.tt_bits = Some(parsed);
+                    self.searcher = None;
+                }
+            }
             "root_profile" => {
                 if let Some(parsed) = parse_one::<i32>(value) {
                     self.config.runtime.root_profile = parsed != 0;
@@ -356,10 +364,10 @@ impl GomocupProtocol {
 
     fn search_move(&mut self) -> Vec<String> {
         let limits = self.current_search_limits();
-        let mut searcher = self
-            .searcher
-            .take()
-            .unwrap_or_else(|| RootSearcher::new(self.config.clone()));
+        let mut searcher = self.searcher.take().unwrap_or_else(|| match self.tt_bits {
+            Some(bits) => RootSearcher::with_tt(self.config.clone(), TranspositionTable::new(bits)),
+            None => RootSearcher::new(self.config.clone()),
+        });
         searcher.config = self.config.clone();
         let result = searcher.search(&mut self.board, Some(limits));
         let trace = searcher.last_trace.clone();

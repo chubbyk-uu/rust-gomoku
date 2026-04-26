@@ -263,6 +263,13 @@ fn protocol_info_overlap_vct_alphabeta_updates_runtime() {
 }
 
 #[test]
+fn protocol_info_tt_bits_updates_engine_option() {
+    let mut proto = proto();
+    proto.handle_line("INFO tt_bits 24");
+    assert_eq!(proto.tt_bits, Some(24));
+}
+
+#[test]
 fn protocol_info_root_profile_updates_runtime() {
     let mut proto = proto();
     proto.handle_line("INFO root_profile 1");
