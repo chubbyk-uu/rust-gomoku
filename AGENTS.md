@@ -121,9 +121,11 @@ base 当前只允许默认关闭的 `overlap_vct_alphabeta` 实验：
 - `src/bin/gomoku_gui.rs`：本地 Web GUI。
 - `src/bin/diff_probe.rs`：Rust 差分探针。
 - `cases/diff/`：固定差分局面。
+- `cases/match/`：fast/base 对战局面 JSONL。
 - `scripts/run_diff.py`：批量差分。
 - `scripts/run_engine_match.py`：Rust/reference 对战。
 - `scripts/run_gomocup_match.py`：通用 Gomocup 对战，主要用于 fast vs base。
+- `scripts/extract_match_cases.py`：从对战 JSON 抽取中盘对战 case。
 - `README.bak.md`：本地备份文件，不要提交，除非用户明确要求。
 
 ## 工作流程

@@ -193,18 +193,30 @@ python3 scripts/run_engine_match.py --opening-set 9 --jobs 10 --rust-command "ta
 
 ```bash
 python3 scripts/run_gomocup_match.py \
-  --opening-set 9 \
+  --case-file cases/match/smoke.jsonl \
   --jobs 18 \
-  --output /tmp/fast_vs_base_9_openings.json
+  --output /tmp/fast_vs_base_smoke.json
 ```
 
 默认 engine A 是 `base`，命令为 `gomocup_engine --profile base`；engine B 是 `fast`，命令为 `gomocup_engine --profile fast`。核心指标是胜率、avg、median、p95、max、错误率和超时率。
+
+从已有对战 JSON 抽取中盘 case：
+
+```bash
+python3 scripts/extract_match_cases.py /tmp/fast_vs_base_smoke.json \
+  --plies 20,30,40 \
+  --tag standard \
+  --output /tmp/extracted_cases.jsonl
+```
+
+`cases/match/smoke.jsonl` 是日常 fast smoke 集：包含 9 个首手开局和少量中盘前缀。后续 standard/strong 集合应继续用同一 JSONL 格式扩充。
 
 ## 目录
 
 ```text
 src/                 Rust engine、Gomocup、GUI、diff probe
 cases/diff/          root 差分 case
+cases/match/         fast/base 对战 case
 data/static/         从 reference 提取的静态矩阵
 opponent/zhou/       zhou 基线对手
 scripts/             差分、reference 对战、通用 engine 对战、静态数据提取脚本

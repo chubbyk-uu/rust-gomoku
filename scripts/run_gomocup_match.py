@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run fixed-opening matches between two Gomocup engines."""
+"""Run fixed-case matches between two Gomocup engines."""
 
 from __future__ import annotations
 
@@ -252,10 +252,117 @@ class EngineSpec:
 
 
 @dataclass(frozen=True)
+class MatchCase:
+    name: str
+    moves: tuple[tuple[int, int], ...]
+    side_to_move: int
+    tags: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class MatchTask:
-    opening_index: int
-    opening: tuple[int, int]
+    case_index: int
+    case: MatchCase
     engine_a_side: int
+
+
+def side_for_ply_index(index: int) -> int:
+    return BLACK if index % 2 == 0 else WHITE
+
+
+def side_to_move_after(moves: list[tuple[int, int]] | tuple[tuple[int, int], ...]) -> int:
+    return BLACK if len(moves) % 2 == 0 else WHITE
+
+
+def parse_side_value(raw: Any) -> int:
+    if isinstance(raw, str):
+        parsed = parse_side_name(raw.lower())
+        if parsed is None:
+            raise ValueError(f"invalid side: {raw}")
+        return parsed
+    if raw in (BLACK, WHITE):
+        return int(raw)
+    raise ValueError(f"invalid side: {raw}")
+
+
+def normalize_case_move(raw: Any, index: int) -> tuple[int, int]:
+    expected_side = side_for_ply_index(index)
+    if isinstance(raw, dict):
+        x = int(raw["x"])
+        y = int(raw["y"])
+        if "side" in raw and parse_side_value(raw["side"]) != expected_side:
+            raise ValueError(f"move {index + 1} side does not match alternating order")
+        return (x, y)
+    if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+        return (int(raw[0]), int(raw[1]))
+    raise ValueError(f"invalid move at index {index}: {raw}")
+
+
+def validate_prefix(moves: tuple[tuple[int, int], ...]) -> None:
+    seen: set[tuple[int, int]] = set()
+    prefix: list[dict[str, Any]] = []
+    for index, (x, y) in enumerate(moves):
+        if not in_bounds(x, y):
+            raise ValueError(f"move {index + 1} out of bounds: {(x, y)}")
+        if (x, y) in seen:
+            raise ValueError(f"move {index + 1} repeats occupied point: {(x, y)}")
+        side = side_for_ply_index(index)
+        move = {"x": x, "y": y, "side": side}
+        prefix.append(move)
+        seen.add((x, y))
+        if winner_after(prefix, x, y, side):
+            raise ValueError(f"case is already terminal at move {index + 1}")
+
+
+def parse_match_case(raw: dict[str, Any], fallback_name: str) -> MatchCase:
+    if "moves" not in raw:
+        raise ValueError("case requires moves")
+    moves = tuple(normalize_case_move(move, index) for index, move in enumerate(raw["moves"]))
+    validate_prefix(moves)
+    expected_side = side_to_move_after(moves)
+    if "side_to_move" in raw:
+        side_to_move = parse_side_value(raw["side_to_move"])
+        if side_to_move != expected_side:
+            raise ValueError(
+                f"side_to_move {raw['side_to_move']} does not match {len(moves)} moves"
+            )
+    else:
+        side_to_move = expected_side
+    tags = tuple(str(tag) for tag in raw.get("tags", []))
+    name = str(raw.get("name") or fallback_name)
+    return MatchCase(name=name, moves=moves, side_to_move=side_to_move, tags=tags)
+
+
+def load_case_file(path: Path) -> list[MatchCase]:
+    text = path.read_text(encoding="utf-8")
+    stripped = text.lstrip()
+    if not stripped:
+        return []
+    if stripped.startswith("["):
+        records = json.loads(text)
+    else:
+        records = [json.loads(line) for line in text.splitlines() if line.strip()]
+    cases = []
+    for index, raw in enumerate(records):
+        try:
+            cases.append(parse_match_case(raw, f"{path.stem}_{index}"))
+        except Exception as exc:
+            raise ValueError(f"{path}:{index + 1}: {exc}") from exc
+    return cases
+
+
+def opening_cases(opening_set: str) -> list[MatchCase]:
+    cases = []
+    for index, (x, y) in enumerate(OPENING_SETS[opening_set]):
+        cases.append(
+            MatchCase(
+                name=f"opening_{opening_set}_{index}_{x}_{y}",
+                moves=((x, y),),
+                side_to_move=WHITE,
+                tags=("opening", f"opening_set_{opening_set}"),
+            )
+        )
+    return cases
 
 
 def run_match_task(
@@ -294,21 +401,22 @@ def run_match_task(
     error: str | None = None
 
     try:
-        x, y = task.opening
-        opening_engine = side_to_engine[BLACK]
-        moves.append(
-            {
-                "ply": 1,
-                "x": x,
-                "y": y,
-                "side": BLACK,
-                "engine": opening_engine,
-                "opening": True,
-                "elapsed_ms": 0.0,
-            }
-        )
-        occupied.add((x, y))
-        side = WHITE
+        for index, (x, y) in enumerate(task.case.moves):
+            side = side_for_ply_index(index)
+            moves.append(
+                {
+                    "ply": index + 1,
+                    "x": x,
+                    "y": y,
+                    "side": side,
+                    "engine": side_to_engine[side],
+                    "opening": True,
+                    "preset": True,
+                    "elapsed_ms": 0.0,
+                }
+            )
+            occupied.add((x, y))
+        side = task.case.side_to_move
 
         while len(moves) < max_moves:
             engine_name = side_to_engine[side]
@@ -365,8 +473,10 @@ def run_match_task(
             engine.close()
 
     return {
-        "opening_index": task.opening_index,
-        "opening": list(task.opening),
+        "case_index": task.case_index,
+        "case_name": task.case.name,
+        "case_tags": list(task.case.tags),
+        "prefix_plies": len(task.case.moves),
         "engine_a_side": side_name(task.engine_a_side),
         "engine_b_side": side_name(opposite(task.engine_a_side)),
         "winner_engine": winner_engine,
@@ -414,12 +524,12 @@ def summarize(games: list[dict[str, Any]], engine_names: tuple[str, str]) -> dic
 
 def print_progress(done: int, total: int, game: dict[str, Any]) -> None:
     print(
-        "[{done}/{total}] opening={idx} {opening} a_side={a_side} "
+        "[{done}/{total}] case={idx} {name} a_side={a_side} "
         "winner={winner} plies={plies} elapsed={elapsed:.1f}s error={error}".format(
             done=done,
             total=total,
-            idx=game["opening_index"],
-            opening=game["opening"],
+            idx=game["case_index"],
+            name=game["case_name"],
             a_side=game["engine_a_side"],
             winner=game["winner_engine"],
             plies=game["plies"],
@@ -434,7 +544,14 @@ def parse_args() -> argparse.Namespace:
     root = repo_root()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--opening-set", choices=sorted(OPENING_SETS), default="9")
-    parser.add_argument("--opening-index", type=int)
+    parser.add_argument("--case-file", type=Path, help="JSONL/JSON match case file")
+    parser.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        help="require case tag; may be repeated",
+    )
+    parser.add_argument("--opening-index", type=int, help="filter one opening/case index")
     parser.add_argument(
         "--engine-a-side",
         choices=["black", "white", "both"],
@@ -442,6 +559,7 @@ def parse_args() -> argparse.Namespace:
         help="filter which side engine A plays",
     )
     parser.add_argument("--limit-openings", type=int)
+    parser.add_argument("--limit-cases", type=int)
     parser.add_argument("--jobs", type=int, default=18)
     parser.add_argument("--max-moves", type=int, default=DEFAULT_MAX_MOVES)
     parser.add_argument("--move-timeout-sec", type=float, default=DEFAULT_MOVE_TIMEOUT_SEC)
@@ -486,20 +604,35 @@ def main() -> int:
     check_command(engine_a.command, engine_a.cwd, engine_a.name)
     check_command(engine_b.command, engine_b.cwd, engine_b.name)
 
-    openings = OPENING_SETS[args.opening_set]
-    indexed_openings = list(enumerate(openings))
+    if args.case_file is not None:
+        cases = load_case_file(args.case_file.expanduser().resolve())
+        case_source = str(args.case_file)
+    else:
+        cases = opening_cases(args.opening_set)
+        case_source = f"opening_set:{args.opening_set}"
+    indexed_cases = list(enumerate(cases))
+    if args.tag:
+        required_tags = set(args.tag)
+        indexed_cases = [
+            (index, case)
+            for index, case in indexed_cases
+            if required_tags.issubset(set(case.tags))
+        ]
     if args.opening_index is not None:
-        indexed_openings = [
-            (index, opening)
-            for index, opening in indexed_openings
+        indexed_cases = [
+            (index, case)
+            for index, case in indexed_cases
             if index == args.opening_index
         ]
-        if not indexed_openings:
+        if not indexed_cases:
             raise SystemExit(
-                f"opening index {args.opening_index} not found in set {args.opening_set}"
+                f"opening/case index {args.opening_index} not found in {case_source}"
             )
-    if args.limit_openings is not None:
-        indexed_openings = indexed_openings[: max(0, args.limit_openings)]
+    limit_cases = args.limit_cases if args.limit_cases is not None else args.limit_openings
+    if limit_cases is not None:
+        indexed_cases = indexed_cases[: max(0, limit_cases)]
+    if not indexed_cases:
+        raise SystemExit(f"no match cases selected from {case_source}")
 
     engine_a_sides = [BLACK, WHITE]
     if args.engine_a_side != "both":
@@ -507,8 +640,8 @@ def main() -> int:
         assert parsed_side is not None
         engine_a_sides = [parsed_side]
     tasks = [
-        MatchTask(index, opening, engine_a_side)
-        for index, opening in indexed_openings
+        MatchTask(index, case, engine_a_side)
+        for index, case in indexed_cases
         for engine_a_side in engine_a_sides
     ]
 
@@ -554,7 +687,10 @@ def main() -> int:
     result = {
         "matchup": f"{engine_a.name}_vs_{engine_b.name}",
         "settings": {
-            "opening_set": args.opening_set,
+            "case_source": case_source,
+            "opening_set": None if args.case_file else args.opening_set,
+            "case_file": None if args.case_file is None else str(args.case_file),
+            "tags": args.tag,
             "jobs": jobs,
             "max_moves": args.max_moves,
             "move_timeout_sec": args.move_timeout_sec,
