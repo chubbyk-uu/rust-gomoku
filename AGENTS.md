@@ -123,6 +123,7 @@ base 当前只允许默认关闭的 `overlap_vct_alphabeta` 实验：
 - `cases/diff/`：固定差分局面。
 - `scripts/run_diff.py`：批量差分。
 - `scripts/run_engine_match.py`：Rust/reference 对战。
+- `scripts/run_gomocup_match.py`：通用 Gomocup 对战，主要用于 fast vs base。
 - `README.bak.md`：本地备份文件，不要提交，除非用户明确要求。
 
 ## 工作流程

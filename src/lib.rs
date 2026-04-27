@@ -16,12 +16,13 @@ pub mod zobrist;
 
 pub use board::{move_to_xy, xy_to_move, Board, BoardError};
 pub use config::{
-    adjust_loaded_parameters, default_eval_para, load_default_config, EngineConfig,
-    EvalBucketTables, RootSearchDefaults, RuntimeOptions, SearchParameters,
-    DEFAULT_CHILD_WIDTH_RATIO_DEN, DEFAULT_CHILD_WIDTH_RATIO_NUM, DEFAULT_DYNAMIC_BOARD_MARGIN,
-    DEFAULT_EVAL_PARA, DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_OVERLAP_VCT_ALPHABETA,
-    DEFAULT_ROOT_PROFILE, DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH,
-    DEFAULT_SEARCH_WIDTH, DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
+    adjust_loaded_parameters, apply_engine_profile, default_eval_para, load_config_for_profile,
+    load_default_config, EngineConfig, EngineProfile, EvalBucketTables, RootSearchDefaults,
+    RuntimeOptions, SearchParameters, DEFAULT_CHILD_WIDTH_RATIO_DEN, DEFAULT_CHILD_WIDTH_RATIO_NUM,
+    DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_ENGINE_PROFILE, DEFAULT_EVAL_PARA,
+    DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_OVERLAP_VCT_ALPHABETA, DEFAULT_ROOT_PROFILE,
+    DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
+    DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
     DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
 };
 pub use constants::{BLACK, BOARD_AREA, BOARD_SIZE, EMPTY, WHITE};

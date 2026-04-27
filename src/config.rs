@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 
 use crate::constants::DSHAPE_SIZE;
 
+pub const DEFAULT_ENGINE_PROFILE: EngineProfile = EngineProfile::Base;
 pub const DEFAULT_SEARCH_DEPTH: i32 = 8;
 pub const DEFAULT_SEARCH_WIDTH: i32 = 40;
 pub const DEFAULT_TIMED_SEARCH_MAX_DEPTH: i32 = 25;
@@ -36,6 +37,33 @@ pub struct SearchParameters {
     pub extend_ratio: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineProfile {
+    Base,
+    Fast,
+}
+
+impl EngineProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Fast => "fast",
+        }
+    }
+}
+
+impl std::str::FromStr for EngineProfile {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.to_ascii_lowercase().as_str() {
+            "base" | "classic" | "classic/base" => Ok(Self::Base),
+            "fast" => Ok(Self::Fast),
+            _ => Err(format!("unknown engine profile: {raw}")),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeOptions {
     pub read_config_each_move: bool,
@@ -66,6 +94,7 @@ pub struct RootSearchDefaults {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EngineConfig {
+    pub profile: EngineProfile,
     pub eval_tables: EvalBucketTables,
     pub search: SearchParameters,
     pub runtime: RuntimeOptions,
@@ -89,12 +118,29 @@ pub fn adjust_loaded_parameters(para: &[f64]) -> Vec<f64> {
 }
 
 pub fn load_default_config() -> EngineConfig {
+    load_config_for_profile(DEFAULT_ENGINE_PROFILE)
+}
+
+pub fn load_config_for_profile(profile: EngineProfile) -> EngineConfig {
     let para = default_eval_para();
-    EngineConfig {
+    let mut config = EngineConfig {
+        profile: DEFAULT_ENGINE_PROFILE,
         eval_tables: slice_eval_tables(para),
         search: slice_search_parameters(para),
         runtime: default_runtime_options(para),
         root_search: default_root_search(),
+    };
+    apply_engine_profile(&mut config, profile);
+    config
+}
+
+pub fn apply_engine_profile(config: &mut EngineConfig, profile: EngineProfile) {
+    config.profile = profile;
+    match profile {
+        EngineProfile::Base => {}
+        // Fast is intentionally identical to base for now. Future fast
+        // experiments should change behavior behind this explicit profile.
+        EngineProfile::Fast => {}
     }
 }
 

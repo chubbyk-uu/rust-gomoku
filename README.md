@@ -113,6 +113,7 @@ cargo run --release --bin gomocup_engine
 ```bash
 target/release/gomocup_engine --depth 8 --width 40
 target/release/gomocup_engine --depth 6 --width 20 --root-profile
+target/release/gomocup_engine --profile fast
 target/release/gomocup_engine --tt-bits 22
 ```
 
@@ -121,6 +122,7 @@ target/release/gomocup_engine --tt-bits 22
 - `INFO timeout_turn N`
 - `INFO time_left N`
 - `INFO max_node N`
+- `INFO profile base|fast`
 - `INFO compute_vcf 0|1`
 - `INFO root_vcf_depth N`
 - `INFO opponent_vcf_depth N`
@@ -187,7 +189,16 @@ python3 scripts/run_engine_match.py --opening-set 9 --jobs 5 --move-timeout-sec 
 python3 scripts/run_engine_match.py --opening-set 9 --jobs 10 --rust-command "target/release/gomocup_engine --tt-bits 22"
 ```
 
-当前脚本主要服务 Rust/reference 对战。下一步应补通用 Gomocup 对战脚本，用于 `fast` vs `base`，核心指标是胜率、avg、median、p95、max、错误率和超时率。
+通用 `fast` vs `base` 对战：
+
+```bash
+python3 scripts/run_gomocup_match.py \
+  --opening-set 9 \
+  --jobs 18 \
+  --output /tmp/fast_vs_base_9_openings.json
+```
+
+默认 engine A 是 `base`，命令为 `gomocup_engine --profile base`；engine B 是 `fast`，命令为 `gomocup_engine --profile fast`。核心指标是胜率、avg、median、p95、max、错误率和超时率。
 
 ## 目录
 
@@ -196,14 +207,13 @@ src/                 Rust engine、Gomocup、GUI、diff probe
 cases/diff/          root 差分 case
 data/static/         从 reference 提取的静态矩阵
 opponent/zhou/       zhou 基线对手
-scripts/             差分、对战、静态数据提取脚本
+scripts/             差分、reference 对战、通用 engine 对战、静态数据提取脚本
 tests/               Rust 自动测试
 ```
 
 ## 下一步
 
-1. 增加通用 `fast` vs `base` Gomocup 对战脚本。
-2. 建立 fast 线验收报表，至少包含胜率和耗时分布。
-3. 在 fast 线继续研究 TT 容量、replacement policy、ordering、剪枝和并行方案。
-4. 继续扩大 classic/base 的 eval、movegen、VCF/VCT 差分覆盖。
-5. 从真实慢手中抽取更多固定回归局面。
+1. 用通用对战脚本建立 fast 线基准报表。
+2. 在 fast 线继续研究 TT 容量、replacement policy、ordering、剪枝和并行方案。
+3. 继续扩大 classic/base 的 eval、movegen、VCF/VCT 差分覆盖。
+4. 从真实慢手中抽取更多固定回归局面。

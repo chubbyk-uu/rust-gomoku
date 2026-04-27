@@ -1,7 +1,7 @@
 use rust_gomoku::{
-    GomocupProtocol, SearchLimits, DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_OPPONENT_VCF_DEPTH,
-    DEFAULT_OVERLAP_VCT_ALPHABETA, DEFAULT_ROOT_PROFILE, DEFAULT_ROOT_VCF_DEPTH,
-    DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
+    EngineProfile, GomocupProtocol, SearchLimits, DEFAULT_DYNAMIC_BOARD_MARGIN,
+    DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_OVERLAP_VCT_ALPHABETA, DEFAULT_ROOT_PROFILE,
+    DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
     DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
     DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
 };
@@ -270,6 +270,16 @@ fn protocol_info_tt_bits_updates_engine_option() {
 }
 
 #[test]
+fn protocol_info_profile_updates_config_profile() {
+    let mut proto = proto();
+    assert_eq!(proto.config.profile, EngineProfile::Base);
+    proto.handle_line("INFO profile fast");
+    assert_eq!(proto.config.profile, EngineProfile::Fast);
+    proto.handle_line("INFO profile classic");
+    assert_eq!(proto.config.profile, EngineProfile::Base);
+}
+
+#[test]
 fn protocol_info_root_profile_updates_runtime() {
     let mut proto = proto();
     proto.handle_line("INFO root_profile 1");
@@ -382,6 +392,7 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
     proto.handle_line("INFO compute_vct nope");
     proto.handle_line("INFO root_vct_depth nope");
     proto.handle_line("INFO overlap_vct_alphabeta nope");
+    proto.handle_line("INFO profile nope");
     proto.handle_line("INFO root_profile nope");
     proto.handle_line("INFO static zed");
     proto.handle_line("INFO dynamic_board_margin hmm");
@@ -406,6 +417,7 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
         DEFAULT_OVERLAP_VCT_ALPHABETA
     );
     assert_eq!(proto.config.runtime.root_profile, DEFAULT_ROOT_PROFILE);
+    assert_eq!(proto.config.profile, EngineProfile::Base);
     assert!(proto.config.runtime.static_board);
     assert_eq!(
         proto.config.runtime.dynamic_board_margin,
