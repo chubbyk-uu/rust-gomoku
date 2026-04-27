@@ -15,6 +15,7 @@ pub const DEFAULT_DYNAMIC_BOARD_MARGIN: i32 = 4;
 pub const DEFAULT_ROOT_VCF_DEPTH: i32 = 8;
 pub const DEFAULT_OPPONENT_VCF_DEPTH: i32 = 7;
 pub const DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH: i32 = 4;
+pub const DEFAULT_VCF_MULTI_REPLY: bool = false;
 pub const DEFAULT_ROOT_VCT_DEPTH: i32 = 8;
 pub const DEFAULT_ROOT_PROFILE: bool = false;
 pub const DEFAULT_OVERLAP_VCT_ALPHABETA: bool = false;
@@ -71,6 +72,7 @@ pub struct RuntimeOptions {
     pub root_vcf_depth: i32,
     pub opponent_vcf_depth: i32,
     pub vct_verify_opponent_vcf_depth: i32,
+    pub vcf_multi_reply: bool,
     pub nonroot_vcf: bool,
     pub static_board: bool,
     pub dynamic_board_margin: i32,
@@ -137,10 +139,12 @@ pub fn load_config_for_profile(profile: EngineProfile) -> EngineConfig {
 pub fn apply_engine_profile(config: &mut EngineConfig, profile: EngineProfile) {
     config.profile = profile;
     match profile {
-        EngineProfile::Base => {}
-        // Fast is intentionally identical to base for now. Future fast
-        // experiments should change behavior behind this explicit profile.
-        EngineProfile::Fast => {}
+        EngineProfile::Base => {
+            config.runtime.vcf_multi_reply = DEFAULT_VCF_MULTI_REPLY;
+        }
+        EngineProfile::Fast => {
+            config.runtime.vcf_multi_reply = true;
+        }
     }
 }
 
@@ -173,6 +177,7 @@ fn default_runtime_options(para: &[f64]) -> RuntimeOptions {
         root_vcf_depth: DEFAULT_ROOT_VCF_DEPTH,
         opponent_vcf_depth: DEFAULT_OPPONENT_VCF_DEPTH,
         vct_verify_opponent_vcf_depth: DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
+        vcf_multi_reply: DEFAULT_VCF_MULTI_REPLY,
         nonroot_vcf: false,
         static_board: true,
         dynamic_board_margin: DEFAULT_DYNAMIC_BOARD_MARGIN,

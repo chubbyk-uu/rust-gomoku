@@ -289,14 +289,33 @@ impl AlphaBetaSearcher {
 
         if self.config.runtime.compute_vcf && self.config.runtime.nonroot_vcf && !options.root {
             let nonroot_vcf_depth = Self::nonroot_vcf_depth(depth, root_depth);
-            if nonroot_vcf_depth > 0 && self.vcf.search(board, -side, nonroot_vcf_depth).found {
+            if nonroot_vcf_depth > 0
+                && self
+                    .vcf
+                    .search_with_multi_reply(
+                        board,
+                        -side,
+                        nonroot_vcf_depth,
+                        self.config.runtime.vcf_multi_reply,
+                    )
+                    .found
+            {
                 let mut filtered = Vec::new();
                 for candidate in ordered {
                     let mut trial = board.clone();
                     trial
                         .play(candidate.move_, Some(side))
                         .expect("ordered move stays legal on trial board");
-                    if !self.vcf.search(&trial, -side, nonroot_vcf_depth).found {
+                    if !self
+                        .vcf
+                        .search_with_multi_reply(
+                            &trial,
+                            -side,
+                            nonroot_vcf_depth,
+                            self.config.runtime.vcf_multi_reply,
+                        )
+                        .found
+                    {
                         filtered.push(candidate);
                     }
                 }

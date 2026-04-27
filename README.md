@@ -127,6 +127,7 @@ target/release/gomocup_engine --tt-bits 22
 - `INFO root_vcf_depth N`
 - `INFO opponent_vcf_depth N`
 - `INFO vct_verify_opponent_vcf_depth N`
+- `INFO vcf_multi_reply 0|1`
 - `INFO compute_vct 0|1`
 - `INFO root_vct_depth N`
 - `INFO nonroot_vcf 0|1`
@@ -198,7 +199,21 @@ python3 scripts/run_gomocup_match.py \
   --output /tmp/fast_vs_base_smoke.json
 ```
 
-默认 engine A 是 `base`，命令为 `gomocup_engine --profile base`；engine B 是 `fast`，命令为 `gomocup_engine --profile fast`。核心指标是胜率、avg、median、p95、max、错误率和超时率。
+默认 engine A 是 `base`，命令为 `gomocup_engine --profile base`；engine B 是 `fast`，命令为 `gomocup_engine --profile fast`。当前 `fast` 额外启用 VCF 多合法应手验证。核心指标是胜率、avg、median、p95、max、错误率和超时率。
+
+快速 smoke：
+
+```bash
+python3 scripts/run_gomocup_match.py \
+  --case-file cases/match/smoke_quick.jsonl \
+  --jobs 12 \
+  --max-moves 80 \
+  --move-timeout-sec 90 \
+  --game-timeout-sec 600 \
+  --output /tmp/fast_vs_base_smoke_quick.json
+```
+
+`smoke_quick` 用于日常崩溃、协议和长尾冒烟，不作为最终棋力结论；完整棋力评估仍使用 9 开局双边或更大的 case 集。
 
 同局面性能 benchmark：
 
@@ -221,7 +236,7 @@ python3 scripts/extract_match_cases.py /tmp/fast_vs_base_smoke.json \
   --output /tmp/extracted_cases.jsonl
 ```
 
-`cases/match/smoke.jsonl` 是日常 fast smoke 集：包含 9 个首手开局和少量中盘前缀。`cases/match/standard.jsonl` 是当前标准集初版，包含 50 个来自 base/base、base/zhou 和 tt22/base 对局的前缀局面。后续 strong 集合继续用同一 JSONL 格式扩充。
+`cases/match/smoke_quick.jsonl` 是快速冒烟集；`cases/match/smoke.jsonl` 是较完整 smoke 集，包含 9 个首手开局和少量中盘前缀。`cases/match/standard.jsonl` 是当前标准集初版，包含 50 个来自 base/base、base/zhou 和 tt22/base 对局的前缀局面。后续 strong 集合继续用同一 JSONL 格式扩充。
 
 ## 目录
 

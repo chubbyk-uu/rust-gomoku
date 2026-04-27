@@ -41,6 +41,7 @@ fast 目标是提速，但不能以棋力下降为代价。
 - fast 可以不等价 base 的固定局面结果，但必须保留可回退到 base 的路径。
 - fast 对 base 胜率不能低于 `50%`。
 - fast 必须有可见性能收益，至少体现在 avg、p95、max 单手耗时之一。
+- 当前 fast 额外启用 VCF 多合法应手验证；base 保持单一合法应手语义。
 - reference 和 zhou 只适合作 smoke；fast 棋力主验证应是 fast vs base。
 
 fast 实验合入或设为推荐配置前，至少要报告胜率、avg、median、p95、max、错误率和超时率。
@@ -100,6 +101,7 @@ base 当前只允许默认关闭的 `overlap_vct_alphabeta` 实验：
 
 - `scripts/bench_match_cases.py`：同一批 `cases/match/*.jsonl` 前缀局面的一手搜索对照，用于判断 fast 是否真的减少 time/nodes。
 - `scripts/run_gomocup_match.py`：真实对战，用于判断 fast 对 base 胜率是否不低于 `50%`。
+- `cases/match/smoke_quick.jsonl`：快速冒烟集，用于崩溃、协议和长尾检查，不作为最终棋力结论。
 - fast 优化至少应先过同局面 benchmark，再跑 fast vs base 对战。
 
 ## 性能工作格式

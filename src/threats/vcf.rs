@@ -25,6 +25,7 @@ pub struct VcfMemoEntry {
 #[derive(Clone, Debug, Default)]
 pub struct VCFSearcher {
     pub memo: HashMap<(Side, Vec<Move>, Vec<Move>), VcfMemoEntry>,
+    pub multi_reply: bool,
 }
 
 impl VCFSearcher {
@@ -46,6 +47,20 @@ impl VCFSearcher {
             side,
             effective_depth,
         )
+    }
+
+    pub fn search_with_multi_reply(
+        &mut self,
+        board: &Board,
+        side: Side,
+        depth: i32,
+        multi_reply: bool,
+    ) -> VCFResult {
+        let previous = self.multi_reply;
+        self.multi_reply = multi_reply;
+        let result = self.search(board, side, depth);
+        self.multi_reply = previous;
+        result
     }
 
     pub fn normalize_begin_depth(depth: i32) -> i32 {
@@ -260,21 +275,62 @@ impl VCFSearcher {
             };
         }
         let (x, y) = crate::board::move_to_xy(attacker_move).expect("move stays valid");
-        let reply = view.broken_four_legal_reply(x, y);
-        if reply.is_none() {
+        let replies = view.broken_four_legal_replies(x, y);
+        if replies.is_empty() {
             return VCFResult {
                 move_: None,
                 found: false,
                 solved: true,
             };
         }
-        let reply = reply.expect("checked above");
-        view.play(reply, -attacker);
+        if !self.multi_reply {
+            let reply = replies.first().expect("checked above");
+            view.play(reply, -attacker);
+            let mut next_defender_moves = defender_moves.to_vec();
+            next_defender_moves.push(reply);
+            let result =
+                self.search_attacker(view, attacker, depth, attacker_moves, &next_defender_moves);
+            view.undo();
+            return result;
+        }
+
+        let mut found_move = None;
+        let mut any_unsolved = false;
         let mut next_defender_moves = defender_moves.to_vec();
-        next_defender_moves.push(reply);
-        let result =
-            self.search_attacker(view, attacker, depth, attacker_moves, &next_defender_moves);
-        view.undo();
-        result
+        for &reply in replies.as_slice() {
+            view.play(reply, -attacker);
+            next_defender_moves.push(reply);
+            let result =
+                self.search_attacker(view, attacker, depth, attacker_moves, &next_defender_moves);
+            next_defender_moves.pop();
+            view.undo();
+
+            if result.found {
+                found_move = found_move.or(result.move_);
+                continue;
+            }
+            if result.solved {
+                return VCFResult {
+                    move_: None,
+                    found: false,
+                    solved: true,
+                };
+            }
+            any_unsolved = true;
+        }
+
+        if any_unsolved {
+            VCFResult {
+                move_: None,
+                found: false,
+                solved: false,
+            }
+        } else {
+            VCFResult {
+                move_: found_move,
+                found: true,
+                solved: true,
+            }
+        }
     }
 }

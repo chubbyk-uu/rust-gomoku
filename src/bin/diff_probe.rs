@@ -33,6 +33,7 @@ struct CaseRuntime {
     root_vcf_depth: Option<i32>,
     opponent_vcf_depth: Option<i32>,
     vct_verify_opponent_vcf_depth: Option<i32>,
+    vcf_multi_reply: Option<bool>,
     nonroot_vcf: Option<bool>,
     compute_vct: Option<bool>,
     root_vct_depth: Option<i32>,
@@ -177,6 +178,9 @@ fn run_case(case: DiffCase, root_profile: bool) -> ProbeOutput {
     }
     if let Some(v) = case.runtime.vct_verify_opponent_vcf_depth {
         config.runtime.vct_verify_opponent_vcf_depth = v.max(0);
+    }
+    if let Some(v) = case.runtime.vcf_multi_reply {
+        config.runtime.vcf_multi_reply = v;
     }
     if let Some(v) = case.runtime.nonroot_vcf {
         config.runtime.nonroot_vcf = v;

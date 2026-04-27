@@ -284,6 +284,12 @@ impl GomocupProtocol {
                     self.searcher = None;
                 }
             }
+            "vcf_multi_reply" => {
+                if let Some(parsed) = parse_one::<i32>(value) {
+                    self.config.runtime.vcf_multi_reply = parsed != 0;
+                    self.searcher = None;
+                }
+            }
             "nonroot_vcf" => {
                 if let Some(parsed) = parse_one::<i32>(value) {
                     self.config.runtime.nonroot_vcf = parsed != 0;
