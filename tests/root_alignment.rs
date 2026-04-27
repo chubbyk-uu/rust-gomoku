@@ -62,6 +62,64 @@ fn root_search_returns_legal_move_under_node_limit() {
 }
 
 #[test]
+fn root_search_handles_vcf_reply_that_decodes_to_occupied_point() {
+    let mut board = Board::new();
+    let moves = [
+        (4, 4),
+        (5, 4),
+        (6, 5),
+        (4, 5),
+        (6, 3),
+        (6, 4),
+        (7, 3),
+        (5, 3),
+        (7, 5),
+        (8, 5),
+        (6, 6),
+        (5, 6),
+        (5, 7),
+        (8, 4),
+        (7, 4),
+        (7, 6),
+        (6, 7),
+        (8, 3),
+        (8, 2),
+        (5, 2),
+        (5, 5),
+        (7, 7),
+        (6, 8),
+        (6, 9),
+        (4, 8),
+        (3, 9),
+        (7, 9),
+        (4, 6),
+        (6, 10),
+        (5, 10),
+        (7, 8),
+        (8, 8),
+        (9, 10),
+        (7, 11),
+        (10, 9),
+        (8, 10),
+        (9, 9),
+        (8, 9),
+    ];
+    for (x, y) in moves {
+        board.play(xy_to_move(x, y).unwrap(), None).unwrap();
+    }
+    let mut searcher = RootSearcher::new(load_default_config());
+    let result = searcher.search(
+        &mut board,
+        Some(SearchLimits {
+            max_depth: 2,
+            root_width: 10,
+            ..SearchLimits::default()
+        }),
+    );
+    assert!(board.is_legal_move(result.move_));
+}
+
+#[test]
 fn root_search_prefers_vcf_first_when_available() {
     let mut board = Board::new();
     board.play(xy_to_move(3, 7).unwrap(), None).unwrap();
