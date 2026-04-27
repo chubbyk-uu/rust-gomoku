@@ -15,8 +15,8 @@ pub const DEFAULT_DYNAMIC_BOARD_MARGIN: i32 = 4;
 pub const DEFAULT_ROOT_VCF_DEPTH: i32 = 8;
 pub const DEFAULT_OPPONENT_VCF_DEPTH: i32 = 7;
 pub const DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH: i32 = 4;
-pub const DEFAULT_VCF_MULTI_REPLY: bool = false;
-pub const DEFAULT_ROOT_VCT_DEPTH: i32 = 8;
+pub const DEFAULT_VCF_MULTI_REPLY: bool = true;
+pub const DEFAULT_ROOT_VCT_DEPTH: i32 = 6;
 pub const DEFAULT_ROOT_PROFILE: bool = false;
 pub const DEFAULT_OVERLAP_VCT_ALPHABETA: bool = false;
 

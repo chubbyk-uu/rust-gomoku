@@ -81,13 +81,11 @@ fn runtime_defaults_match_rust_policy() {
 }
 
 #[test]
-fn fast_profile_enables_vcf_multi_reply_only() {
+fn fast_profile_currently_matches_base_except_profile() {
     let base = load_default_config();
     let mut fast = load_config_for_profile(EngineProfile::Fast);
     assert_eq!(fast.profile, EngineProfile::Fast);
     fast.profile = EngineProfile::Base;
-    assert!(fast.runtime.vcf_multi_reply);
-    fast.runtime.vcf_multi_reply = base.runtime.vcf_multi_reply;
     assert_eq!(fast, base);
 }
 

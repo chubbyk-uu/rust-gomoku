@@ -467,7 +467,7 @@ def main() -> int:
         "--rust-info",
         action="append",
         default=[],
-        help="extra Rust INFO override, e.g. root_vct_depth=8",
+        help="extra Rust INFO override, e.g. root_vct_depth=6",
     )
     parser.add_argument(
         "--reference-info",
