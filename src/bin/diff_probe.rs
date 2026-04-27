@@ -5,7 +5,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use rust_gomoku::{load_default_config, move_to_xy, xy_to_move, Board, RootSearcher, SearchLimits};
+use rust_gomoku::{
+    load_default_config, move_to_xy, xy_to_move, Board, RootSearcher, SearchLimits, VCTDepthStats,
+    VCTStats,
+};
 
 #[derive(Debug, Deserialize)]
 struct DiffCase {
@@ -82,6 +85,7 @@ struct TraceSummary {
     vct_accepted: bool,
     vct_reject_reason: Option<String>,
     vct_ms: Option<f64>,
+    vct_stats: Option<VctStatsSummary>,
     alphabeta_ms: Option<f64>,
     overlap_used: bool,
     overlap_ab_ms: Option<f64>,
@@ -90,6 +94,40 @@ struct TraceSummary {
     tt_snapshot_ms: Option<f64>,
     tactical_path: String,
     root_profiles: Vec<RootDepthProfileSummary>,
+}
+
+#[derive(Serialize)]
+struct VctStatsSummary {
+    depth_limit: i32,
+    depth_completed: i32,
+    elapsed_ms: f64,
+    or_nodes: usize,
+    and_nodes: usize,
+    memo_exact_hits: usize,
+    memo_shallow_found_hits: usize,
+    memo_shallow_solved_hits: usize,
+    attacks_generated: usize,
+    defenses_generated: usize,
+    max_attack_count: usize,
+    max_defense_count: usize,
+    depth_stats: Vec<VctDepthStatsSummary>,
+}
+
+#[derive(Serialize)]
+struct VctDepthStatsSummary {
+    depth: i32,
+    elapsed_ms: f64,
+    found: bool,
+    solved: bool,
+    or_nodes: usize,
+    and_nodes: usize,
+    memo_exact_hits: usize,
+    memo_shallow_found_hits: usize,
+    memo_shallow_solved_hits: usize,
+    attacks_generated: usize,
+    defenses_generated: usize,
+    max_attack_count: usize,
+    max_defense_count: usize,
 }
 
 #[derive(Serialize)]
@@ -108,6 +146,12 @@ struct RootCandidateProfileSummary {
     index: usize,
     #[serde(rename = "move")]
     move_xy: [usize; 2],
+    order_score: i32,
+    self_attack: i32,
+    opp_attack: i32,
+    depthdown: f64,
+    atdown: i32,
+    attempt_depth: f64,
     score: i32,
     nodes: usize,
     elapsed_ms: f64,
@@ -115,6 +159,46 @@ struct RootCandidateProfileSummary {
     alpha_after: i32,
     beta: i32,
     reason: String,
+}
+
+fn vct_depth_stats_summary(stats: &VCTDepthStats) -> VctDepthStatsSummary {
+    VctDepthStatsSummary {
+        depth: stats.depth,
+        elapsed_ms: stats.elapsed_us as f64 / 1000.0,
+        found: stats.found,
+        solved: stats.solved,
+        or_nodes: stats.or_nodes,
+        and_nodes: stats.and_nodes,
+        memo_exact_hits: stats.memo_exact_hits,
+        memo_shallow_found_hits: stats.memo_shallow_found_hits,
+        memo_shallow_solved_hits: stats.memo_shallow_solved_hits,
+        attacks_generated: stats.attacks_generated,
+        defenses_generated: stats.defenses_generated,
+        max_attack_count: stats.max_attack_count,
+        max_defense_count: stats.max_defense_count,
+    }
+}
+
+fn vct_stats_summary(stats: &VCTStats) -> VctStatsSummary {
+    VctStatsSummary {
+        depth_limit: stats.depth_limit,
+        depth_completed: stats.depth_completed,
+        elapsed_ms: stats.elapsed_us as f64 / 1000.0,
+        or_nodes: stats.or_nodes,
+        and_nodes: stats.and_nodes,
+        memo_exact_hits: stats.memo_exact_hits,
+        memo_shallow_found_hits: stats.memo_shallow_found_hits,
+        memo_shallow_solved_hits: stats.memo_shallow_solved_hits,
+        attacks_generated: stats.attacks_generated,
+        defenses_generated: stats.defenses_generated,
+        max_attack_count: stats.max_attack_count,
+        max_defense_count: stats.max_defense_count,
+        depth_stats: stats
+            .depth_stats
+            .iter()
+            .map(vct_depth_stats_summary)
+            .collect(),
+    }
 }
 
 fn main() {
@@ -241,6 +325,7 @@ fn run_case(case: DiffCase, root_profile: bool) -> ProbeOutput {
                 vct_accepted: trace.vct_accepted,
                 vct_reject_reason: trace.vct_reject_reason.map(|s| s.to_string()),
                 vct_ms: trace.vct_ms,
+                vct_stats: trace.vct_stats.as_ref().map(vct_stats_summary),
                 alphabeta_ms: trace.alphabeta_ms,
                 overlap_used: trace.overlap_used,
                 overlap_ab_ms: trace.overlap_ab_ms,
@@ -270,6 +355,12 @@ fn run_case(case: DiffCase, root_profile: bool) -> ProbeOutput {
                                 RootCandidateProfileSummary {
                                     index: candidate.index,
                                     move_xy: [x, y],
+                                    order_score: candidate.order_score,
+                                    self_attack: candidate.self_attack,
+                                    opp_attack: candidate.opp_attack,
+                                    depthdown: candidate.depthdown_milli as f64 / 1000.0,
+                                    atdown: candidate.atdown,
+                                    attempt_depth: candidate.attempt_depth_milli as f64 / 1000.0,
                                     score: candidate.score,
                                     nodes: candidate.nodes,
                                     elapsed_ms: candidate.elapsed_us as f64 / 1000.0,

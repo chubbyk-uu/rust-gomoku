@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use rust_gomoku::{
     load_config_for_profile, move_to_xy, xy_to_move, Board, EngineProfile, RootSearcher,
-    SearchLimits, TranspositionTable, BLACK, WHITE,
+    SearchLimits, TranspositionTable, VCTDepthStats, VCTStats, BLACK, WHITE,
 };
 
 #[derive(Debug, Deserialize)]
@@ -104,8 +104,83 @@ struct TraceOutput {
     vct_found: bool,
     tactical_path: String,
     vct_ms: Option<f64>,
+    vct_stats: Option<VctStatsOutput>,
     alphabeta_ms: Option<f64>,
     root_profile_depths: usize,
+}
+
+#[derive(Serialize)]
+struct VctStatsOutput {
+    depth_limit: i32,
+    depth_completed: i32,
+    elapsed_ms: f64,
+    or_nodes: usize,
+    and_nodes: usize,
+    memo_exact_hits: usize,
+    memo_shallow_found_hits: usize,
+    memo_shallow_solved_hits: usize,
+    attacks_generated: usize,
+    defenses_generated: usize,
+    max_attack_count: usize,
+    max_defense_count: usize,
+    depth_stats: Vec<VctDepthStatsOutput>,
+}
+
+#[derive(Serialize)]
+struct VctDepthStatsOutput {
+    depth: i32,
+    elapsed_ms: f64,
+    found: bool,
+    solved: bool,
+    or_nodes: usize,
+    and_nodes: usize,
+    memo_exact_hits: usize,
+    memo_shallow_found_hits: usize,
+    memo_shallow_solved_hits: usize,
+    attacks_generated: usize,
+    defenses_generated: usize,
+    max_attack_count: usize,
+    max_defense_count: usize,
+}
+
+fn vct_depth_stats_output(stats: &VCTDepthStats) -> VctDepthStatsOutput {
+    VctDepthStatsOutput {
+        depth: stats.depth,
+        elapsed_ms: stats.elapsed_us as f64 / 1000.0,
+        found: stats.found,
+        solved: stats.solved,
+        or_nodes: stats.or_nodes,
+        and_nodes: stats.and_nodes,
+        memo_exact_hits: stats.memo_exact_hits,
+        memo_shallow_found_hits: stats.memo_shallow_found_hits,
+        memo_shallow_solved_hits: stats.memo_shallow_solved_hits,
+        attacks_generated: stats.attacks_generated,
+        defenses_generated: stats.defenses_generated,
+        max_attack_count: stats.max_attack_count,
+        max_defense_count: stats.max_defense_count,
+    }
+}
+
+fn vct_stats_output(stats: &VCTStats) -> VctStatsOutput {
+    VctStatsOutput {
+        depth_limit: stats.depth_limit,
+        depth_completed: stats.depth_completed,
+        elapsed_ms: stats.elapsed_us as f64 / 1000.0,
+        or_nodes: stats.or_nodes,
+        and_nodes: stats.and_nodes,
+        memo_exact_hits: stats.memo_exact_hits,
+        memo_shallow_found_hits: stats.memo_shallow_found_hits,
+        memo_shallow_solved_hits: stats.memo_shallow_solved_hits,
+        attacks_generated: stats.attacks_generated,
+        defenses_generated: stats.defenses_generated,
+        max_attack_count: stats.max_attack_count,
+        max_defense_count: stats.max_defense_count,
+        depth_stats: stats
+            .depth_stats
+            .iter()
+            .map(vct_depth_stats_output)
+            .collect(),
+    }
 }
 
 fn main() {
@@ -315,6 +390,7 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
             vct_found: trace.vct_found,
             tactical_path: trace.tactical_path.to_string(),
             vct_ms: trace.vct_ms,
+            vct_stats: trace.vct_stats.as_ref().map(vct_stats_output),
             alphabeta_ms: trace.alphabeta_ms,
             root_profile_depths: trace.root_profiles.len(),
         },

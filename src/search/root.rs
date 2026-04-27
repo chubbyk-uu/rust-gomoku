@@ -15,7 +15,7 @@ use crate::eval::{recompute_all, EvalCaches};
 use crate::search::{
     AlphaBetaSearcher, RootCandidateProfile, SearchOptions, SearchStats, TranspositionTable,
 };
-use crate::threats::{forcing_threat_moves, has_vct_trigger, VCFSearcher, VCTSearcher};
+use crate::threats::{forcing_threat_moves, has_vct_trigger, VCFSearcher, VCTSearcher, VCTStats};
 use crate::types::{Move, Side};
 
 const CLASSIC_RAND_SEED: i32 = 1_232_356;
@@ -86,6 +86,7 @@ pub struct RootTrace {
     pub vct_accepted: bool,
     pub vct_reject_reason: Option<&'static str>,
     pub vct_ms: Option<f64>,
+    pub vct_stats: Option<VCTStats>,
     pub alphabeta_ms: Option<f64>,
     pub overlap_used: bool,
     pub overlap_ab_ms: Option<f64>,
@@ -108,6 +109,7 @@ impl Default for RootTrace {
             vct_accepted: false,
             vct_reject_reason: None,
             vct_ms: None,
+            vct_stats: None,
             alphabeta_ms: None,
             overlap_used: false,
             overlap_ab_ms: None,
@@ -677,6 +679,7 @@ impl RootSearcher {
             .vct
             .search(board, side, self.config.runtime.root_vct_depth);
         trace.vct_ms = Some(elapsed_ms(vct_start));
+        trace.vct_stats = Some(self.vct.stats.clone());
         trace.vct_found = vct_result.found;
         trace.vct_move = vct_result.move_;
         if let Some(move_) = vct_result.move_.filter(|_| vct_result.found) {
@@ -774,6 +777,7 @@ impl RootSearcher {
                     .vct
                     .search(board, side, self.config.runtime.root_vct_depth);
                 trace.vct_ms = Some(elapsed_ms(vct_start));
+                trace.vct_stats = Some(self.vct.stats.clone());
                 trace.vct_found = vct_result.found;
                 trace.vct_move = vct_result.move_;
                 if let Some(move_) = vct_result.move_.filter(|_| vct_result.found) {
