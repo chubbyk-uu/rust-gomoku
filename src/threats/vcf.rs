@@ -260,7 +260,7 @@ impl VCFSearcher {
             };
         }
         let (x, y) = crate::board::move_to_xy(attacker_move).expect("move stays valid");
-        let reply = view.broken_four_reply(x, y);
+        let reply = view.broken_four_legal_reply(x, y);
         if reply.is_none() {
             return VCFResult {
                 move_: None,
@@ -269,16 +269,6 @@ impl VCFSearcher {
             };
         }
         let reply = reply.expect("checked above");
-        if !view.board.is_legal_move(reply) {
-            // A decoded broken-four reply can point at an already occupied square
-            // in edge tactical lines. That means the defense is unavailable; do
-            // not let VCF attempt to play an illegal move.
-            return VCFResult {
-                move_: None,
-                found: true,
-                solved: true,
-            };
-        }
         view.play(reply, -attacker);
         let mut next_defender_moves = defender_moves.to_vec();
         next_defender_moves.push(reply);

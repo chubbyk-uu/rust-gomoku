@@ -328,6 +328,16 @@ fn decode_line_move(
     encoded: i32,
 ) -> Option<Move> {
     let raw = ga(encoded);
+    decode_line_raw_move(board, x, y, direction_index, raw)
+}
+
+fn decode_line_raw_move(
+    board: &Board,
+    x: usize,
+    y: usize,
+    direction_index: usize,
+    raw: usize,
+) -> Option<Move> {
     let (tx, ty) = match direction_index {
         1 => (x as isize, raw as isize),
         2 => (raw as isize, y as isize),
@@ -343,6 +353,25 @@ fn decode_line_move(
     } else {
         None
     }
+}
+
+fn decode_legal_line_reply(
+    board: &Board,
+    x: usize,
+    y: usize,
+    direction_index: usize,
+    encoded: i32,
+) -> Option<Move> {
+    let raws = [ga(encoded), gb(encoded)];
+    let raw_count = if encoded >= (1 << 16) { 2 } else { 1 };
+    for &raw in &raws[..raw_count] {
+        if let Some(move_) = decode_line_raw_move(board, x, y, direction_index, raw) {
+            if board.is_legal_move(move_) {
+                return Some(move_);
+            }
+        }
+    }
+    None
 }
 
 #[derive(Clone, Debug)]
@@ -581,6 +610,54 @@ impl ThreatBoardView {
 
     pub fn broken_four_reply(&self, x: usize, y: usize) -> Option<Move> {
         self.broken_four_reply_with_ambiguity(x, y).0
+    }
+
+    pub fn broken_four_legal_reply(&self, x: usize, y: usize) -> Option<Move> {
+        let (l1, l2, l3, l4, p1, p2, p3, p4) = self.lines_for(x, y);
+        let counts = [l1.b4p(p1), l2.b4p(p2), l3.b4p(p3), l4.b4p(p4)];
+
+        for (index, encoded) in counts.iter().enumerate() {
+            if *encoded >= (1 << 16) {
+                if let Some(move_) = decode_legal_line_reply(&self.board, x, y, index + 1, *encoded)
+                {
+                    return Some(move_);
+                }
+            }
+        }
+
+        let mut mask = 0_u8;
+        for (index, encoded) in counts.iter().enumerate() {
+            if *encoded != 0 {
+                mask |= 1 << index;
+            }
+        }
+
+        let direction_order: &[usize] = match mask {
+            0 => &[],
+            1 => &[1],
+            2 => &[2],
+            3 => &[1, 2],
+            4 => &[3],
+            5 => &[1, 3],
+            6 => &[2, 3],
+            7 => &[1, 2, 3],
+            8 => &[4],
+            9 => &[1, 4],
+            10 => &[2, 4],
+            11 => &[1, 2, 4],
+            12 => &[3, 4],
+            13 => &[1, 3, 4],
+            14 => &[2, 3, 4],
+            15 => &[1, 2, 3, 4],
+            _ => &[],
+        };
+        for &direction in direction_order {
+            let encoded = counts[direction - 1];
+            if let Some(move_) = decode_legal_line_reply(&self.board, x, y, direction, encoded) {
+                return Some(move_);
+            }
+        }
+        None
     }
 
     pub fn broken_four_reply_with_ambiguity(&self, x: usize, y: usize) -> (Option<Move>, bool) {
