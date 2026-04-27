@@ -15,7 +15,7 @@ use crate::eval::{recompute_all, EvalCaches};
 use crate::search::{
     AlphaBetaSearcher, RootCandidateProfile, SearchOptions, SearchStats, TranspositionTable,
 };
-use crate::threats::{forcing_threat_moves, has_vct_trigger, VCFSearcher, VCTSearcher};
+use crate::threats::{forcing_threat_moves, has_vct_trigger, VCFSearcher, VCTSearcher, VCTStats};
 use crate::types::{Move, Side};
 
 const CLASSIC_RAND_SEED: i32 = 1_232_356;
@@ -86,6 +86,7 @@ pub struct RootTrace {
     pub vct_accepted: bool,
     pub vct_reject_reason: Option<&'static str>,
     pub vct_ms: Option<f64>,
+    pub vct_stats: Option<VCTStats>,
     pub alphabeta_ms: Option<f64>,
     pub overlap_used: bool,
     pub overlap_ab_ms: Option<f64>,
@@ -108,6 +109,7 @@ impl Default for RootTrace {
             vct_accepted: false,
             vct_reject_reason: None,
             vct_ms: None,
+            vct_stats: None,
             alphabeta_ms: None,
             overlap_used: false,
             overlap_ab_ms: None,
@@ -345,10 +347,11 @@ impl RootSearcher {
         if self.config.runtime.compute_vcf
             && self
                 .vcf
-                .search(
+                .search_with_multi_reply(
                     &trial,
                     -side,
                     self.config.runtime.vct_verify_opponent_vcf_depth,
+                    self.config.runtime.vcf_multi_reply,
                 )
                 .found
         {
@@ -427,9 +430,12 @@ impl RootSearcher {
         if !self.config.runtime.compute_vcf {
             return allowed_moves;
         }
-        let opponent_vcf = self
-            .vcf
-            .search(board, -side, self.config.runtime.opponent_vcf_depth);
+        let opponent_vcf = self.vcf.search_with_multi_reply(
+            board,
+            -side,
+            self.config.runtime.opponent_vcf_depth,
+            self.config.runtime.vcf_multi_reply,
+        );
         if !opponent_vcf.found {
             return allowed_moves;
         }
@@ -456,7 +462,12 @@ impl RootSearcher {
                 .expect("candidate move stays legal on trial board");
             if !self
                 .vcf
-                .search(&trial, -side, self.config.runtime.opponent_vcf_depth)
+                .search_with_multi_reply(
+                    &trial,
+                    -side,
+                    self.config.runtime.opponent_vcf_depth,
+                    self.config.runtime.vcf_multi_reply,
+                )
                 .found
             {
                 filtered.insert(move_);
@@ -668,6 +679,7 @@ impl RootSearcher {
             .vct
             .search(board, side, self.config.runtime.root_vct_depth);
         trace.vct_ms = Some(elapsed_ms(vct_start));
+        trace.vct_stats = Some(self.vct.stats.clone());
         trace.vct_found = vct_result.found;
         trace.vct_move = vct_result.move_;
         if let Some(move_) = vct_result.move_.filter(|_| vct_result.found) {
@@ -731,9 +743,12 @@ impl RootSearcher {
 
         if self.config.runtime.compute_vcf {
             trace.used_vcf = true;
-            let vcf_result = self
-                .vcf
-                .search(board, side, self.config.runtime.root_vcf_depth);
+            let vcf_result = self.vcf.search_with_multi_reply(
+                board,
+                side,
+                self.config.runtime.root_vcf_depth,
+                self.config.runtime.vcf_multi_reply,
+            );
             if vcf_result.found {
                 trace.vcf_found = true;
                 trace.tactical_path = "vcf";
@@ -762,6 +777,7 @@ impl RootSearcher {
                     .vct
                     .search(board, side, self.config.runtime.root_vct_depth);
                 trace.vct_ms = Some(elapsed_ms(vct_start));
+                trace.vct_stats = Some(self.vct.stats.clone());
                 trace.vct_found = vct_result.found;
                 trace.vct_move = vct_result.move_;
                 if let Some(move_) = vct_result.move_.filter(|_| vct_result.found) {

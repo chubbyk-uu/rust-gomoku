@@ -2,26 +2,29 @@
 
 use std::io::{self, BufRead, Write};
 
-use rust_gomoku::{load_default_config, GomocupProtocol, SearchLimits};
+use rust_gomoku::{load_config_for_profile, EngineProfile, GomocupProtocol, SearchLimits};
 
 fn main() {
-    let (depth_override, width_override, root_profile, tt_bits) = parse_args();
-    let mut config = load_default_config();
-    if let Some(root_profile) = root_profile {
+    let args = parse_args().unwrap_or_else(|message| {
+        eprintln!("{message}");
+        std::process::exit(2);
+    });
+    let mut config = load_config_for_profile(args.profile);
+    if let Some(root_profile) = args.root_profile {
         config.runtime.root_profile = root_profile;
     }
-    let search_limits = if depth_override.is_some() || width_override.is_some() {
+    let search_limits = if args.depth.is_some() || args.width.is_some() {
         let fixed = SearchLimits::fixed_from_config(&config);
         Some(SearchLimits {
-            max_depth: depth_override.unwrap_or(fixed.max_depth),
-            root_width: width_override.unwrap_or(fixed.root_width),
+            max_depth: args.depth.unwrap_or(fixed.max_depth),
+            root_width: args.width.unwrap_or(fixed.root_width),
             ..SearchLimits::default()
         })
     } else {
         None
     };
     let mut protocol = GomocupProtocol::new(Some(config), search_limits);
-    protocol.tt_bits = tt_bits;
+    protocol.tt_bits = args.tt_bits;
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -39,11 +42,21 @@ fn main() {
     }
 }
 
-fn parse_args() -> (Option<i32>, Option<usize>, Option<bool>, Option<u32>) {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CliArgs {
+    depth: Option<i32>,
+    width: Option<usize>,
+    root_profile: Option<bool>,
+    tt_bits: Option<u32>,
+    profile: EngineProfile,
+}
+
+fn parse_args() -> Result<CliArgs, String> {
     let mut depth = None;
     let mut width = None;
     let mut root_profile = None;
     let mut tt_bits = None;
+    let mut profile = EngineProfile::Base;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -68,8 +81,20 @@ fn parse_args() -> (Option<i32>, Option<usize>, Option<bool>, Option<u32>) {
                     tt_bits = Some(value);
                 }
             }
+            "--profile" => {
+                let Some(value) = args.next() else {
+                    return Err("--profile requires base or fast".to_string());
+                };
+                profile = value.parse::<EngineProfile>()?;
+            }
             _ => {}
         }
     }
-    (depth, width, root_profile, tt_bits)
+    Ok(CliArgs {
+        depth,
+        width,
+        root_profile,
+        tt_bits,
+        profile,
+    })
 }

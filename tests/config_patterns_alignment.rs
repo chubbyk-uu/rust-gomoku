@@ -1,12 +1,12 @@
 use rust_gomoku::{
     adjust_loaded_parameters, bucket_for_lines, default_eval_para, line_backend_name,
-    load_default_config, xy_to_move, Board, Line, PackedShape, SearchLimits, ShapeLabel, BLACK,
-    BOARD_SIZE, DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_OPPONENT_VCF_DEPTH,
-    DEFAULT_OVERLAP_VCT_ALPHABETA, DEFAULT_ROOT_PROFILE, DEFAULT_ROOT_VCF_DEPTH,
-    DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
-    DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
-    DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH, DIAGONAL_DOWN, DIAGONAL_UP, DIRECTION_IDS, DOUBLE_SHAPE,
-    HORIZONTAL, VERTICAL,
+    load_config_for_profile, load_default_config, xy_to_move, Board, EngineProfile, Line,
+    PackedShape, SearchLimits, ShapeLabel, BLACK, BOARD_SIZE, DEFAULT_DYNAMIC_BOARD_MARGIN,
+    DEFAULT_ENGINE_PROFILE, DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_OVERLAP_VCT_ALPHABETA,
+    DEFAULT_ROOT_PROFILE, DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH,
+    DEFAULT_SEARCH_WIDTH, DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
+    DEFAULT_VCF_MULTI_REPLY, DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH, DIAGONAL_DOWN, DIAGONAL_UP,
+    DIRECTION_IDS, DOUBLE_SHAPE, HORIZONTAL, VERTICAL,
 };
 
 #[test]
@@ -52,6 +52,7 @@ fn parameter_boundaries_match_expected_offsets() {
 #[test]
 fn runtime_defaults_match_rust_policy() {
     let config = load_default_config();
+    assert_eq!(config.profile, DEFAULT_ENGINE_PROFILE);
     assert!(!config.runtime.read_config_each_move);
     assert!(config.runtime.compute_vcf);
     assert_eq!(config.runtime.root_vcf_depth, DEFAULT_ROOT_VCF_DEPTH);
@@ -63,6 +64,7 @@ fn runtime_defaults_match_rust_policy() {
         config.runtime.vct_verify_opponent_vcf_depth,
         DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH
     );
+    assert_eq!(config.runtime.vcf_multi_reply, DEFAULT_VCF_MULTI_REPLY);
     assert!(!config.runtime.nonroot_vcf);
     assert!(config.runtime.static_board);
     assert_eq!(
@@ -76,6 +78,29 @@ fn runtime_defaults_match_rust_policy() {
         DEFAULT_OVERLAP_VCT_ALPHABETA
     );
     assert_eq!(config.runtime.root_profile, DEFAULT_ROOT_PROFILE);
+}
+
+#[test]
+fn fast_profile_enables_vcf_multi_reply_only() {
+    let base = load_default_config();
+    let mut fast = load_config_for_profile(EngineProfile::Fast);
+    assert_eq!(fast.profile, EngineProfile::Fast);
+    fast.profile = EngineProfile::Base;
+    assert!(fast.runtime.vcf_multi_reply);
+    fast.runtime.vcf_multi_reply = base.runtime.vcf_multi_reply;
+    assert_eq!(fast, base);
+}
+
+#[test]
+fn engine_profile_parser_accepts_expected_names() {
+    assert_eq!("base".parse::<EngineProfile>(), Ok(EngineProfile::Base));
+    assert_eq!("classic".parse::<EngineProfile>(), Ok(EngineProfile::Base));
+    assert_eq!(
+        "classic/base".parse::<EngineProfile>(),
+        Ok(EngineProfile::Base)
+    );
+    assert_eq!("fast".parse::<EngineProfile>(), Ok(EngineProfile::Fast));
+    assert!("unknown".parse::<EngineProfile>().is_err());
 }
 
 #[test]

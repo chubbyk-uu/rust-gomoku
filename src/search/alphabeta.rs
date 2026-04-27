@@ -20,6 +20,12 @@ use crate::types::{Move, Side};
 pub struct RootCandidateProfile {
     pub index: usize,
     pub move_: Move,
+    pub order_score: i32,
+    pub self_attack: i32,
+    pub opp_attack: i32,
+    pub depthdown_milli: i32,
+    pub atdown: i32,
+    pub attempt_depth_milli: i32,
     pub score: i32,
     pub nodes: usize,
     pub elapsed_us: u128,
@@ -289,14 +295,33 @@ impl AlphaBetaSearcher {
 
         if self.config.runtime.compute_vcf && self.config.runtime.nonroot_vcf && !options.root {
             let nonroot_vcf_depth = Self::nonroot_vcf_depth(depth, root_depth);
-            if nonroot_vcf_depth > 0 && self.vcf.search(board, -side, nonroot_vcf_depth).found {
+            if nonroot_vcf_depth > 0
+                && self
+                    .vcf
+                    .search_with_multi_reply(
+                        board,
+                        -side,
+                        nonroot_vcf_depth,
+                        self.config.runtime.vcf_multi_reply,
+                    )
+                    .found
+            {
                 let mut filtered = Vec::new();
                 for candidate in ordered {
                     let mut trial = board.clone();
                     trial
                         .play(candidate.move_, Some(side))
                         .expect("ordered move stays legal on trial board");
-                    if !self.vcf.search(&trial, -side, nonroot_vcf_depth).found {
+                    if !self
+                        .vcf
+                        .search_with_multi_reply(
+                            &trial,
+                            -side,
+                            nonroot_vcf_depth,
+                            self.config.runtime.vcf_multi_reply,
+                        )
+                        .found
+                    {
                         filtered.push(candidate);
                     }
                 }
@@ -454,6 +479,12 @@ impl AlphaBetaSearcher {
                     stats.root_candidates.push(RootCandidateProfile {
                         index,
                         move_: candidate.move_,
+                        order_score: candidate.order_score as i32,
+                        self_attack: candidate.self_attack,
+                        opp_attack: candidate.opp_attack,
+                        depthdown_milli: (depthdown * 1000.0).round() as i32,
+                        atdown,
+                        attempt_depth_milli: (attempt_depth * 1000.0).round() as i32,
                         score,
                         nodes: stats.nodes.saturating_sub(profile_nodes_before),
                         elapsed_us: start.elapsed().as_micros(),
@@ -491,6 +522,12 @@ impl AlphaBetaSearcher {
                 stats.root_candidates.push(RootCandidateProfile {
                     index,
                     move_: candidate.move_,
+                    order_score: candidate.order_score as i32,
+                    self_attack: candidate.self_attack,
+                    opp_attack: candidate.opp_attack,
+                    depthdown_milli: (depthdown * 1000.0).round() as i32,
+                    atdown,
+                    attempt_depth_milli: (attempt_depth * 1000.0).round() as i32,
                     score,
                     nodes: stats.nodes.saturating_sub(profile_nodes_before),
                     elapsed_us: start.elapsed().as_micros(),

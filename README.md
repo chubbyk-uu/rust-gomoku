@@ -113,6 +113,7 @@ cargo run --release --bin gomocup_engine
 ```bash
 target/release/gomocup_engine --depth 8 --width 40
 target/release/gomocup_engine --depth 6 --width 20 --root-profile
+target/release/gomocup_engine --profile fast
 target/release/gomocup_engine --tt-bits 22
 ```
 
@@ -121,10 +122,12 @@ target/release/gomocup_engine --tt-bits 22
 - `INFO timeout_turn N`
 - `INFO time_left N`
 - `INFO max_node N`
+- `INFO profile base|fast`
 - `INFO compute_vcf 0|1`
 - `INFO root_vcf_depth N`
 - `INFO opponent_vcf_depth N`
 - `INFO vct_verify_opponent_vcf_depth N`
+- `INFO vcf_multi_reply 0|1`
 - `INFO compute_vct 0|1`
 - `INFO root_vct_depth N`
 - `INFO nonroot_vcf 0|1`
@@ -187,23 +190,69 @@ python3 scripts/run_engine_match.py --opening-set 9 --jobs 5 --move-timeout-sec 
 python3 scripts/run_engine_match.py --opening-set 9 --jobs 10 --rust-command "target/release/gomocup_engine --tt-bits 22"
 ```
 
-当前脚本主要服务 Rust/reference 对战。下一步应补通用 Gomocup 对战脚本，用于 `fast` vs `base`，核心指标是胜率、avg、median、p95、max、错误率和超时率。
+通用 `fast` vs `base` 对战：
+
+```bash
+python3 scripts/run_gomocup_match.py \
+  --case-file cases/match/smoke.jsonl \
+  --jobs 18 \
+  --output /tmp/fast_vs_base_smoke.json
+```
+
+默认 engine A 是 `base`，命令为 `gomocup_engine --profile base`；engine B 是 `fast`，命令为 `gomocup_engine --profile fast`。当前 `fast` 额外启用 VCF 多合法应手验证。核心指标是胜率、avg、median、p95、max、错误率和超时率。
+
+快速 smoke：
+
+```bash
+python3 scripts/run_gomocup_match.py \
+  --case-file cases/match/smoke_quick.jsonl \
+  --jobs 12 \
+  --max-moves 80 \
+  --move-timeout-sec 90 \
+  --game-timeout-sec 600 \
+  --output /tmp/fast_vs_base_smoke_quick.json
+```
+
+`smoke_quick` 用于日常崩溃、协议和长尾冒烟，不作为最终棋力结论；完整棋力评估仍使用 9 开局双边或更大的 case 集。
+
+同局面性能 benchmark：
+
+```bash
+cargo build --release --bin case_probe
+python3 scripts/bench_match_cases.py \
+  --case-file cases/match/standard.jsonl \
+  --jobs 16 \
+  --output /tmp/base_fast_standard_bench.json
+```
+
+`run_gomocup_match.py` 用于真实对战和棋力评估；`bench_match_cases.py` 用于同一批前缀局面的一手搜索对照，输出 base/fast 的 move、score、nodes、elapsed_ms、是否变招、节点比例和耗时比例。判断某个 fast 优化是否真的提速，应优先看同局面 benchmark，再用对战脚本验证棋力。
+
+从已有对战 JSON 抽取中盘 case：
+
+```bash
+python3 scripts/extract_match_cases.py /tmp/fast_vs_base_smoke.json \
+  --plies 20,30,40 \
+  --tag standard \
+  --output /tmp/extracted_cases.jsonl
+```
+
+`cases/match/smoke_quick.jsonl` 是快速冒烟集；`cases/match/smoke.jsonl` 是较完整 smoke 集，包含 9 个首手开局和少量中盘前缀。`cases/match/standard.jsonl` 是当前标准集初版，包含 50 个来自 base/base、base/zhou 和 tt22/base 对局的前缀局面。后续 strong 集合继续用同一 JSONL 格式扩充。
 
 ## 目录
 
 ```text
 src/                 Rust engine、Gomocup、GUI、diff probe
 cases/diff/          root 差分 case
+cases/match/         fast/base 对战 case
 data/static/         从 reference 提取的静态矩阵
 opponent/zhou/       zhou 基线对手
-scripts/             差分、对战、静态数据提取脚本
+scripts/             差分、reference 对战、通用 engine 对战、benchmark、静态数据提取脚本
 tests/               Rust 自动测试
 ```
 
 ## 下一步
 
-1. 增加通用 `fast` vs `base` Gomocup 对战脚本。
-2. 建立 fast 线验收报表，至少包含胜率和耗时分布。
-3. 在 fast 线继续研究 TT 容量、replacement policy、ordering、剪枝和并行方案。
-4. 继续扩大 classic/base 的 eval、movegen、VCF/VCT 差分覆盖。
-5. 从真实慢手中抽取更多固定回归局面。
+1. 用通用对战脚本建立 fast 线基准报表。
+2. 在 fast 线继续研究 TT 容量、replacement policy、ordering、剪枝和并行方案。
+3. 继续扩大 classic/base 的 eval、movegen、VCF/VCT 差分覆盖。
+4. 从真实慢手中抽取更多固定回归局面。

@@ -224,4 +224,43 @@ fn broken_four_legal_reply_uses_composite_alternate_when_primary_is_occupied() {
         .broken_four_legal_reply(8, 7)
         .expect("alternate legal reply exists");
     assert_eq!(move_to_xy(legal_reply).unwrap(), (8, 6));
+    let legal_replies = view.broken_four_legal_replies(8, 7);
+    assert!(legal_replies
+        .as_slice()
+        .contains(&xy_to_move(8, 6).unwrap()));
+    assert!(!legal_replies
+        .as_slice()
+        .contains(&xy_to_move(8, 8).unwrap()));
+    assert_eq!(legal_replies.first(), Some(legal_reply));
+}
+
+#[test]
+fn broken_four_legal_replies_collects_both_open_four_ends() {
+    let mut board = Board::new();
+    let moves = [(5, 7), (0, 0), (6, 7), (0, 1), (7, 7), (0, 2), (8, 7)];
+    for (x, y) in moves {
+        board.play(xy_to_move(x, y).unwrap(), None).unwrap();
+    }
+
+    let view = ThreatBoardView::from_board(board);
+    let replies = view.broken_four_legal_replies(8, 7);
+    assert!(replies.as_slice().contains(&xy_to_move(4, 7).unwrap()));
+    assert!(replies.as_slice().contains(&xy_to_move(9, 7).unwrap()));
+    assert_eq!(replies.len(), 2);
+}
+
+#[test]
+fn vcf_search_with_multi_reply_restores_previous_mode() {
+    let mut board = Board::new();
+    board.play(xy_to_move(3, 7).unwrap(), None).unwrap();
+    board.play(xy_to_move(0, 0).unwrap(), None).unwrap();
+    board.play(xy_to_move(4, 7).unwrap(), None).unwrap();
+    board.play(xy_to_move(1, 0).unwrap(), None).unwrap();
+    board.play(xy_to_move(5, 7).unwrap(), None).unwrap();
+
+    let mut searcher = VCFSearcher::default();
+    assert!(!searcher.multi_reply);
+    let result = searcher.search_with_multi_reply(&board, 1, 2, true);
+    assert!(result.found);
+    assert!(!searcher.multi_reply);
 }

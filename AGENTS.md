@@ -41,6 +41,7 @@ fast 目标是提速，但不能以棋力下降为代价。
 - fast 可以不等价 base 的固定局面结果，但必须保留可回退到 base 的路径。
 - fast 对 base 胜率不能低于 `50%`。
 - fast 必须有可见性能收益，至少体现在 avg、p95、max 单手耗时之一。
+- 当前 fast 额外启用 VCF 多合法应手验证；base 保持单一合法应手语义。
 - reference 和 zhou 只适合作 smoke；fast 棋力主验证应是 fast vs base。
 
 fast 实验合入或设为推荐配置前，至少要报告胜率、avg、median、p95、max、错误率和超时率。
@@ -96,18 +97,27 @@ base 当前只允许默认关闭的 `overlap_vct_alphabeta` 实验：
 
 如果任务涉及搜索、评估、候选、TT、VCF/VCT，不能只跑 `cargo test`。
 
+性能和棋力要分开验证：
+
+- `scripts/bench_match_cases.py`：同一批 `cases/match/*.jsonl` 前缀局面的一手搜索对照，用于判断 fast 是否真的减少 time/nodes。
+- `scripts/run_gomocup_match.py`：真实对战，用于判断 fast 对 base 胜率是否不低于 `50%`。
+- `cases/match/smoke_quick.jsonl`：快速冒烟集，用于崩溃、协议和长尾检查，不作为最终棋力结论。
+- fast 优化至少应先过同局面 benchmark，再跑 fast vs base 对战。
+
 ## 性能工作格式
 
 每次性能工作至少说明：
 
 - 热点证据和目标。
 - 修改范围。
+- 净收益假设：预计减少了什么开销、额外增加了什么开销、两者是否可能抵消。
+- 止损条件：哪些 benchmark / 对战结果说明该方向应回退或默认关闭。
 - 正确性验证。
 - 耗时对比。
 - 是否改变 move、score、nodes、trace。
 - 如果是 fast，还要说明 fast vs base 结果。
 
-没有稳定收益的复杂实验应回退或默认关闭，不要留在主线增加维护成本。
+性能设计不能只计算“少做了多少工作”，还要计算新增验证、同步、拷贝、缓存失效、线程调度、重搜和额外分支的成本。没有稳定净收益的复杂实验应回退或默认关闭，不要留在主线增加维护成本。
 
 ## 文件约定
 
@@ -120,9 +130,14 @@ base 当前只允许默认关闭的 `overlap_vct_alphabeta` 实验：
 - `src/bin/gomocup_engine.rs`：Gomocup 入口。
 - `src/bin/gomoku_gui.rs`：本地 Web GUI。
 - `src/bin/diff_probe.rs`：Rust 差分探针。
+- `src/bin/case_probe.rs`：单局面搜索 benchmark 探针。
 - `cases/diff/`：固定差分局面。
+- `cases/match/`：fast/base 对战局面 JSONL。
 - `scripts/run_diff.py`：批量差分。
 - `scripts/run_engine_match.py`：Rust/reference 对战。
+- `scripts/run_gomocup_match.py`：通用 Gomocup 对战，主要用于 fast vs base。
+- `scripts/bench_match_cases.py`：同局面 base/fast 性能对照。
+- `scripts/extract_match_cases.py`：从对战 JSON 抽取中盘对战 case。
 - `README.bak.md`：本地备份文件，不要提交，除非用户明确要求。
 
 ## 工作流程

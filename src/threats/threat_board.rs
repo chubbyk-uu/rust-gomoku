@@ -40,6 +40,53 @@ fn comc(x: usize, y: usize, z: usize) -> i32 {
     comb(comb(x, y) as usize, z)
 }
 
+pub const MAX_BROKEN_FOUR_REPLIES: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BrokenFourReplies {
+    moves: [Move; MAX_BROKEN_FOUR_REPLIES],
+    len: usize,
+}
+
+impl Default for BrokenFourReplies {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BrokenFourReplies {
+    pub fn new() -> Self {
+        Self {
+            moves: [u16::MAX; MAX_BROKEN_FOUR_REPLIES],
+            len: 0,
+        }
+    }
+
+    pub fn push_unique(&mut self, move_: Move) {
+        if self.as_slice().contains(&move_) || self.len >= MAX_BROKEN_FOUR_REPLIES {
+            return;
+        }
+        self.moves[self.len] = move_;
+        self.len += 1;
+    }
+
+    pub fn as_slice(&self) -> &[Move] {
+        &self.moves[..self.len]
+    }
+
+    pub fn first(&self) -> Option<Move> {
+        self.as_slice().first().copied()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ThreatLine {
     cells: [i32; BOARD_SIZE + 4],
@@ -355,23 +402,26 @@ fn decode_line_raw_move(
     }
 }
 
-fn decode_legal_line_reply(
+fn push_legal_line_replies(
+    replies: &mut BrokenFourReplies,
     board: &Board,
     x: usize,
     y: usize,
     direction_index: usize,
     encoded: i32,
-) -> Option<Move> {
+) {
+    if encoded <= 0 {
+        return;
+    }
     let raws = [ga(encoded), gb(encoded)];
     let raw_count = if encoded >= (1 << 16) { 2 } else { 1 };
     for &raw in &raws[..raw_count] {
         if let Some(move_) = decode_line_raw_move(board, x, y, direction_index, raw) {
             if board.is_legal_move(move_) {
-                return Some(move_);
+                replies.push_unique(move_);
             }
         }
     }
-    None
 }
 
 #[derive(Clone, Debug)]
@@ -613,15 +663,17 @@ impl ThreatBoardView {
     }
 
     pub fn broken_four_legal_reply(&self, x: usize, y: usize) -> Option<Move> {
+        self.broken_four_legal_replies(x, y).first()
+    }
+
+    pub fn broken_four_legal_replies(&self, x: usize, y: usize) -> BrokenFourReplies {
         let (l1, l2, l3, l4, p1, p2, p3, p4) = self.lines_for(x, y);
         let counts = [l1.b4p(p1), l2.b4p(p2), l3.b4p(p3), l4.b4p(p4)];
+        let mut replies = BrokenFourReplies::new();
 
         for (index, encoded) in counts.iter().enumerate() {
             if *encoded >= (1 << 16) {
-                if let Some(move_) = decode_legal_line_reply(&self.board, x, y, index + 1, *encoded)
-                {
-                    return Some(move_);
-                }
+                push_legal_line_replies(&mut replies, &self.board, x, y, index + 1, *encoded);
             }
         }
 
@@ -653,11 +705,9 @@ impl ThreatBoardView {
         };
         for &direction in direction_order {
             let encoded = counts[direction - 1];
-            if let Some(move_) = decode_legal_line_reply(&self.board, x, y, direction, encoded) {
-                return Some(move_);
-            }
+            push_legal_line_replies(&mut replies, &self.board, x, y, direction, encoded);
         }
-        None
+        replies
     }
 
     pub fn broken_four_reply_with_ambiguity(&self, x: usize, y: usize) -> (Option<Move>, bool) {

@@ -1,8 +1,8 @@
 use rust_gomoku::{
-    GomocupProtocol, SearchLimits, DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_OPPONENT_VCF_DEPTH,
-    DEFAULT_OVERLAP_VCT_ALPHABETA, DEFAULT_ROOT_PROFILE, DEFAULT_ROOT_VCF_DEPTH,
-    DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
-    DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
+    EngineProfile, GomocupProtocol, SearchLimits, DEFAULT_DYNAMIC_BOARD_MARGIN,
+    DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_OVERLAP_VCT_ALPHABETA, DEFAULT_ROOT_PROFILE,
+    DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
+    DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH, DEFAULT_VCF_MULTI_REPLY,
     DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
 };
 
@@ -233,6 +233,15 @@ fn protocol_info_nonroot_vcf_updates_runtime() {
 }
 
 #[test]
+fn protocol_info_vcf_multi_reply_updates_runtime() {
+    let mut proto = proto();
+    proto.handle_line("INFO vcf_multi_reply 1");
+    assert!(proto.config.runtime.vcf_multi_reply);
+    proto.handle_line("INFO vcf_multi_reply 0");
+    assert!(!proto.config.runtime.vcf_multi_reply);
+}
+
+#[test]
 fn protocol_info_compute_vct_updates_runtime() {
     let mut proto = proto();
     proto.handle_line("INFO compute_vct 0");
@@ -267,6 +276,21 @@ fn protocol_info_tt_bits_updates_engine_option() {
     let mut proto = proto();
     proto.handle_line("INFO tt_bits 24");
     assert_eq!(proto.tt_bits, Some(24));
+}
+
+#[test]
+fn protocol_info_profile_updates_config_profile() {
+    let mut proto = proto();
+    assert_eq!(proto.config.profile, EngineProfile::Base);
+    proto.handle_line("INFO profile fast");
+    assert_eq!(proto.config.profile, EngineProfile::Fast);
+    assert!(proto.config.runtime.vcf_multi_reply);
+    proto.handle_line("INFO profile classic");
+    assert_eq!(proto.config.profile, EngineProfile::Base);
+    assert_eq!(
+        proto.config.runtime.vcf_multi_reply,
+        DEFAULT_VCF_MULTI_REPLY
+    );
 }
 
 #[test]
@@ -378,10 +402,12 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
     proto.handle_line("INFO root_vcf_depth nope");
     proto.handle_line("INFO opponent_vcf_depth nope");
     proto.handle_line("INFO vct_verify_opponent_vcf_depth nope");
+    proto.handle_line("INFO vcf_multi_reply nope");
     proto.handle_line("INFO nonroot_vcf nope");
     proto.handle_line("INFO compute_vct nope");
     proto.handle_line("INFO root_vct_depth nope");
     proto.handle_line("INFO overlap_vct_alphabeta nope");
+    proto.handle_line("INFO profile nope");
     proto.handle_line("INFO root_profile nope");
     proto.handle_line("INFO static zed");
     proto.handle_line("INFO dynamic_board_margin hmm");
@@ -398,6 +424,10 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
         proto.config.runtime.vct_verify_opponent_vcf_depth,
         DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH
     );
+    assert_eq!(
+        proto.config.runtime.vcf_multi_reply,
+        DEFAULT_VCF_MULTI_REPLY
+    );
     assert!(!proto.config.runtime.nonroot_vcf);
     assert!(proto.config.runtime.compute_vct);
     assert_eq!(proto.config.runtime.root_vct_depth, DEFAULT_ROOT_VCT_DEPTH);
@@ -406,6 +436,7 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
         DEFAULT_OVERLAP_VCT_ALPHABETA
     );
     assert_eq!(proto.config.runtime.root_profile, DEFAULT_ROOT_PROFILE);
+    assert_eq!(proto.config.profile, EngineProfile::Base);
     assert!(proto.config.runtime.static_board);
     assert_eq!(
         proto.config.runtime.dynamic_board_margin,

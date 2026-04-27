@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 
 use crate::constants::DSHAPE_SIZE;
 
+pub const DEFAULT_ENGINE_PROFILE: EngineProfile = EngineProfile::Base;
 pub const DEFAULT_SEARCH_DEPTH: i32 = 8;
 pub const DEFAULT_SEARCH_WIDTH: i32 = 40;
 pub const DEFAULT_TIMED_SEARCH_MAX_DEPTH: i32 = 25;
@@ -14,6 +15,7 @@ pub const DEFAULT_DYNAMIC_BOARD_MARGIN: i32 = 4;
 pub const DEFAULT_ROOT_VCF_DEPTH: i32 = 8;
 pub const DEFAULT_OPPONENT_VCF_DEPTH: i32 = 7;
 pub const DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH: i32 = 4;
+pub const DEFAULT_VCF_MULTI_REPLY: bool = false;
 pub const DEFAULT_ROOT_VCT_DEPTH: i32 = 8;
 pub const DEFAULT_ROOT_PROFILE: bool = false;
 pub const DEFAULT_OVERLAP_VCT_ALPHABETA: bool = false;
@@ -36,6 +38,33 @@ pub struct SearchParameters {
     pub extend_ratio: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineProfile {
+    Base,
+    Fast,
+}
+
+impl EngineProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Fast => "fast",
+        }
+    }
+}
+
+impl std::str::FromStr for EngineProfile {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.to_ascii_lowercase().as_str() {
+            "base" | "classic" | "classic/base" => Ok(Self::Base),
+            "fast" => Ok(Self::Fast),
+            _ => Err(format!("unknown engine profile: {raw}")),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeOptions {
     pub read_config_each_move: bool,
@@ -43,6 +72,7 @@ pub struct RuntimeOptions {
     pub root_vcf_depth: i32,
     pub opponent_vcf_depth: i32,
     pub vct_verify_opponent_vcf_depth: i32,
+    pub vcf_multi_reply: bool,
     pub nonroot_vcf: bool,
     pub static_board: bool,
     pub dynamic_board_margin: i32,
@@ -66,6 +96,7 @@ pub struct RootSearchDefaults {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EngineConfig {
+    pub profile: EngineProfile,
     pub eval_tables: EvalBucketTables,
     pub search: SearchParameters,
     pub runtime: RuntimeOptions,
@@ -89,12 +120,31 @@ pub fn adjust_loaded_parameters(para: &[f64]) -> Vec<f64> {
 }
 
 pub fn load_default_config() -> EngineConfig {
+    load_config_for_profile(DEFAULT_ENGINE_PROFILE)
+}
+
+pub fn load_config_for_profile(profile: EngineProfile) -> EngineConfig {
     let para = default_eval_para();
-    EngineConfig {
+    let mut config = EngineConfig {
+        profile: DEFAULT_ENGINE_PROFILE,
         eval_tables: slice_eval_tables(para),
         search: slice_search_parameters(para),
         runtime: default_runtime_options(para),
         root_search: default_root_search(),
+    };
+    apply_engine_profile(&mut config, profile);
+    config
+}
+
+pub fn apply_engine_profile(config: &mut EngineConfig, profile: EngineProfile) {
+    config.profile = profile;
+    match profile {
+        EngineProfile::Base => {
+            config.runtime.vcf_multi_reply = DEFAULT_VCF_MULTI_REPLY;
+        }
+        EngineProfile::Fast => {
+            config.runtime.vcf_multi_reply = true;
+        }
     }
 }
 
@@ -127,6 +177,7 @@ fn default_runtime_options(para: &[f64]) -> RuntimeOptions {
         root_vcf_depth: DEFAULT_ROOT_VCF_DEPTH,
         opponent_vcf_depth: DEFAULT_OPPONENT_VCF_DEPTH,
         vct_verify_opponent_vcf_depth: DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
+        vcf_multi_reply: DEFAULT_VCF_MULTI_REPLY,
         nonroot_vcf: false,
         static_board: true,
         dynamic_board_margin: DEFAULT_DYNAMIC_BOARD_MARGIN,
