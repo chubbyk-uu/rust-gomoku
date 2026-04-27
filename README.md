@@ -209,7 +209,7 @@ python3 scripts/extract_match_cases.py /tmp/fast_vs_base_smoke.json \
   --output /tmp/extracted_cases.jsonl
 ```
 
-`cases/match/smoke.jsonl` 是日常 fast smoke 集：包含 9 个首手开局和少量中盘前缀。后续 standard/strong 集合应继续用同一 JSONL 格式扩充。
+`cases/match/smoke.jsonl` 是日常 fast smoke 集：包含 9 个首手开局和少量中盘前缀。`cases/match/standard.jsonl` 是当前标准集初版，包含 50 个来自 base/base、base/zhou 和 tt22/base 对局的前缀局面。后续 strong 集合继续用同一 JSONL 格式扩充。
 
 ## 目录
 

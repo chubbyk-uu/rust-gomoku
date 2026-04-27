@@ -106,10 +106,12 @@ def extract_cases(
     plies: list[int],
     tags: list[str],
     max_cases: int | None,
+    max_cases_per_input: int | None,
 ) -> list[dict[str, Any]]:
     cases: list[dict[str, Any]] = []
     seen: set[tuple[tuple[int, int], ...]] = set()
     for path in inputs:
+        input_count = 0
         data = json.loads(path.read_text(encoding="utf-8"))
         for game_index, game in enumerate(data.get("games", [])):
             for ply in plies:
@@ -127,8 +129,13 @@ def extract_cases(
                     continue
                 seen.add(key)
                 cases.append(case)
+                input_count += 1
                 if max_cases is not None and len(cases) >= max_cases:
                     return cases
+                if max_cases_per_input is not None and input_count >= max_cases_per_input:
+                    break
+            if max_cases_per_input is not None and input_count >= max_cases_per_input:
+                break
     return cases
 
 
@@ -138,6 +145,7 @@ def main() -> int:
     parser.add_argument("--plies", default="10,20,30,40,50")
     parser.add_argument("--tag", action="append", default=[])
     parser.add_argument("--max-cases", type=int)
+    parser.add_argument("--max-cases-per-input", type=int)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -146,6 +154,7 @@ def main() -> int:
         parse_plies(args.plies),
         args.tag,
         args.max_cases,
+        args.max_cases_per_input,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as handle:
