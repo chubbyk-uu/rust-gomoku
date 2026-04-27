@@ -1,263 +1,146 @@
 # AGENTS.md
 
-## 项目定位
+## 项目目标
 
 `rust_gomoku` 是 Python reference 项目 `pygomoku` classic 主线的 Rust 重构。
 
-当前阶段已经不是从零迁移主链，而是：
+当前按两条线推进：
 
-1. 守住已经完成的 Rust classic 语义。
-2. 扩大 reference / Rust 差分覆盖。
-3. 做性能优化和未来并行设计。
-4. 所有提速都不能改变棋力、默认走法或可回归语义。
+- `classic/base`：默认路径，保持确定、可回归，继续对齐 reference classic 语义。
+- `fast`：性能实验路径，可以改变固定局面的 move/score/nodes，但对 base 胜率不能低于 `50%`，并且要有实际速度收益。
 
-如果“更快”与“行为一致”冲突，默认选择行为一致。
+执行任务前先判断本次改动属于 base 还是 fast，不要把两条线的验收标准混在一起。
 
-## 当前仓库状态
-
-- Rust 主线已经覆盖 board / zobrist / config / patterns / eval / movegen / ordering / TT / alphabeta / root / VCF / VCT / Gomocup / GUI。
-- 默认主线是确定性串行搜索。
-- Lazy SMP、root YBWC 等并行实验已经从主线移除，原因是实测收益不稳定且会改变搜索路径或棋力。
-- `overlap_vct_alphabeta` 是默认关闭的实验开关，只允许在 VCF miss 后重叠 VCT 与 alphabeta，且不能使用共享 TT 影响默认决策。
-- 完整 Python reference 不随本仓库提交；本机约定路径为 `~/python_ws/pygomoku`。
-- 需要运行 Python reference 差分时，优先使用 `PYGOMOKU_REF_ROOT=/path/to/pygomoku`。
-- 仓库内只保留 `opponent/zhou` 作为轻量基线对手，不把 zhou 当作主语义来源。
-
-Agent 进入本仓库后，优先阅读：
+## 进入仓库后先读
 
 1. `AGENTS.md`
 2. `README.md`
-3. 如果需要核对 reference：`$PYGOMOKU_REF_ROOT/AGENTS.md` 或 `~/python_ws/pygomoku/AGENTS.md`
-4. 本次改动相关的 Rust 模块、测试、差分 case
-5. 必要时再读 reference 对应模块和测试
+3. 本次相关 Rust 模块、测试和 diff case
+4. 如需核对 reference：`$PYGOMOKU_REF_ROOT/AGENTS.md` 或 `~/python_ws/pygomoku/AGENTS.md`
 
-## 最高优先级原则
+完整 Python reference 不随本仓库提交；本机约定路径为 `~/python_ws/pygomoku`。仓库内 `opponent/zhou` 只是轻量对手，不是语义基准。
 
-### 1. 不能改变棋力
+## Base 规则
 
-这里的“不能改变棋力”在默认串行主线中具体表示：
+base 是默认主线，优先级是行为一致和可回归。
 
-- 固定局面、固定深度、固定宽度下，默认不改变 best move。
-- 默认不改变 score、depth、tactical trace。
-- 对于当前 root 差分兼容模式，默认也不改变 nodes。
-- 不改变候选排序、TT 读写语义、VCF/VCT 触发顺序、fallback 随机流，除非用户明确批准并补验证。
-- 不接受“平均更快但某些局面走法变了”的优化。
+- 固定局面、固定深度、固定宽度下，默认不改变 best move、score、depth、tactical trace。
+- 当前 root 差分兼容模式下，默认也不改变 nodes。
+- 不擅自改变候选排序、TT 读写语义、VCF/VCT 触发顺序、fallback RNG。
+- root tactical fast path 保持 VCF 优先于 VCT，VCT 只在 trigger 命中后运行。
+- 默认固定搜索为 `depth=8,width=40,root_vct_depth=8,tt_bits=20,overlap_vct_alphabeta=false`。
+- 与 reference 严格差分时通常显式使用 `depth=6,width=20,root_vct_depth=4`。
 
-如果某个优化理论上“不影响棋力”但导致固定 case 的 move/score/nodes 变化，必须停下来说明原因，不要继续扩大改动。
+如果优化导致 base 固定 case 的 move/score/nodes 变化，必须停下来说明原因；除非用户明确批准，否则回退或归入 fast。
 
-### 2. Reference 优先
+## Fast 规则
 
-- Python reference `pygomoku` 是唯一主语义基准。
-- Rust 默认行为应对齐 reference classic 主线。
-- reference 内部 Python fallback / Cython 路径如有差异，先记录差异，再决定 Rust 对齐哪条实际主线。
-- 不要用 zhou 的实现习惯替代 reference 语义。
+fast 目标是提速，但不能以棋力下降为代价。
 
-### 3. 串行基线优先
+- fast 可以尝试更大的 TT、不同 replacement policy、现代 pruning/reduction/ordering/window、并行搜索、线程池和 `unsafe` 热点优化。
+- fast 可以不等价 base 的固定局面结果，但必须保留可回退到 base 的路径。
+- fast 对 base 胜率不能低于 `50%`。
+- fast 必须有可见性能收益，至少体现在 avg、p95、max 单手耗时之一。
+- reference 和 zhou 只适合作 smoke；fast 棋力主验证应是 fast vs base。
 
-- 默认主线保持单线程、确定、可回归。
-- 性能优化先在串行路径做。
-- 高风险并行只能在独立分支中重新设计，主线默认只保留确定串行路径。
-- 并行方案不能默认影响串行路径结果；实验开关必须默认关闭。
+fast 实验合入或设为推荐配置前，至少要报告胜率、avg、median、p95、max、错误率和超时率。
 
-### 4. 小步、可验证
+## 核心语义
 
-- 每次改动只覆盖一个明确问题或一个热点。
-- 修改 eval / movegen / TT / alphabeta / root / VCF / VCT / protocol 前，先确定要跑哪些验证。
-- 性能改动必须同时给出正确性验证和耗时对比。
-
-## 必须保留的核心语义
-
-### 坐标和棋子
-
-- 坐标统一为 `(x, y)`，即 `(列, 行)`，不是 `(row, col)`。
-- `Move` 是扁平化索引。
-- 坐标转换应使用统一辅助函数，不要散落手写 `%` / `/`。
-- 常量语义必须保持：
-  - `BOARD_SIZE = 15`
-  - `BLACK = 1`
-  - `WHITE = -1`
-  - `EMPTY = 0`
-
-### Board 状态机
-
+- 坐标统一为 `(x, y)`，即 `(列, 行)`。
+- `Move` 是扁平化索引，坐标转换优先使用统一辅助函数。
+- 常量语义保持：`BOARD_SIZE = 15`，`BLACK = 1`，`WHITE = -1`，`EMPTY = 0`。
 - 搜索主流程通过 `play / undo` 修改局面。
 - `winner / side_to_move / move_history / move_count / zobrist_key` 必须同步。
-- `replay`、复制、快照恢复必须支撑搜索和测试。
-- 嵌套 `play / undo` 路径必须严格配对，尤其是 threat board / VCF / VCT。
+- 嵌套 `play / undo` 必须严格配对，尤其是 threat board、VCF、VCT。
+- `BOARD` 重建、复制、快照恢复必须支撑搜索和测试。
 
-### Search 主链
+## 高风险区域
 
-- 不擅自替换 classic alpha-beta / PVS / TT / candidate ordering 策略。
-- root tactical fast path 保持 VCF 优先于 VCT。
-- VCT 只在 trigger 命中后运行。
-- 默认参数集中在 `src/config.rs`，不要新增散落 magic numbers。
-- 默认固定搜索为 `depth=8,width=40,root_vct_depth=8,overlap_vct_alphabeta=false`。
-- 与 reference 严格差分时通常显式设为 `depth=6,width=20,root_vct_depth=4`。
+以下改动不要只凭直觉做，必须先设计验证：
 
-### Gomocup 协议
+- movegen 或候选排序。
+- TT probe/store/replacement/capacity。
+- alpha-beta 窗口、PVS、depthdown、root bonus。
+- VCF/VCT 搜索顺序、memo key、验证深度。
+- `evaluate_board_main` 或 eval cache 增量语义。
+- Gomocup `INFO` 对 runtime config 和 limits 的影响。
+- 并行搜索或共享状态。
+- `unsafe`。
 
-协议层不是简单字符串解析，必须保持状态语义：
+已验证不适合 base 的方向包括 root full-window split、Lazy SMP helper 填表、root YBWC 和 aspiration window。不要把这些旧方案直接塞回默认主线。
 
-- `START`
-- `RECTSTART`
-- `RESTART`
-- `BEGIN`
-- `TURN`
-- `BOARD` / `DONE`
-- `TAKEBACK`
-- `INFO`
-- `ABOUT`
-- `END`
+## 并行边界
 
-特别注意：
+base 当前只允许默认关闭的 `overlap_vct_alphabeta` 实验：
 
-- 越界和非法输入处理。
-- `BOARD` 模式重建局面。
-- `INFO` 对 runtime config 和 search limits 的影响。
-- 任何协议改动都应补 transcript 或单元测试。
-
-## 性能优化规则
-
-性能优化是当前主要方向，但必须按以下规则执行。
-
-### 可以优先做的优化
-
-- 热点 profiling 后的低风险数据结构优化。
-- 消除热路径分配。
-- 固定数组替代临时 Vec。
-- 缓存局部重复计算。
-- 保持相同扫描顺序和 tie-break 的计算加速。
-- 增量维护，但必须有 full recompute 对照或 shadow 校验。
-
-### 高风险优化
-
-以下改动默认高风险，必须先设计验证方案：
-
-- 候选点生成或排序改变。
-- TT replacement / probe / store 语义改变。
-- alphabeta 窗口、PVS、depthdown、rootbonus 改变。
-- VCF/VCT 搜索顺序、memo key、验证深度改变。
-- `evaluate_board_main` 全局评估增量化替换主线。
-- 使用 `unsafe` 优化热点。
-- 并行搜索。
-
-### 性能工作必须输出
-
-每次性能工作至少说明：
-
-- 优化目标和热点证据。
-- 修改范围。
-- 正确性验证结果。
-- 耗时对比结果。
-- 是否改变 nodes、move、score、trace。
-
-如果没有稳定收益，应回退或标记为失败实验，不要保留复杂代码。
-
-## 并行策略边界
-
-当前主线不保留 Lazy SMP / YBWC 开关。
-
-当前允许存在的并行实验只有 `overlap_vct_alphabeta`，并且必须满足：
-
-- 默认关闭。
-- 只在固定搜索、无 node/time limit 时启用。
 - VCF 仍同步优先。
+- 只在固定搜索、无 node/time limit、VCF miss 且 VCT trigger 命中后启用。
 - VCT accepted 时取消并丢弃 alphabeta。
 - VCT miss/rejected 时等待并采用 alphabeta。
 - alphabeta worker 使用独立 TT snapshot，不共享写入主 TT。
 
-当前 overlap 实测结论：
+新的并行方案优先进入 fast 或独立分支。base 并行必须证明结果等价；fast 并行必须用 fast vs base 证明胜率和速度。
 
-- 9 开局 18 局对 reference 未发现棋力退化，仍为 Rust `17 胜 / 1 负`。
-- 慢局面 `[12,12]` Rust 执黑中，15 次 overlap、0 次 VCT accepted。
-- 该慢局面 VCT 总耗时约 `2.7s`，alphabeta 总耗时约 `62.6s`。
-- 因此 overlap 可保留为诊断/实验开关，但不足以解决最大单手耗时。
+## 验证要求
 
-已验证失败的方向：
-
-- root-split full-window：丢失串行 PV 的 alpha/null-window 剪枝，易增加搜索量并降棋力。
-- Lazy SMP helper 填表：收益不稳定，共享 TT 可能改变主线程路径。
-- 当前 root YBWC 实验：会改变 best move，对 reference 对战棋力下降。
-
-如果未来重新做并行：
-
-- 新建分支，不直接在主线硬塞。
-- 先设计验证标准，再写代码。
-- 先用 root candidate profile 判断 PV 首候选和后续候选耗时占比。
-- 默认串行路径必须完全保留。
-- 固定局面重复运行必须稳定。
-- 与串行相比，固定深度下默认不允许改变 best move / score。
-- 必须跑 root diff、慢手复现、9 开局 18 线对战对比。
-- 不要让共享 TT、任务完成顺序或取消时机影响默认决策。
-
-可接受的并行方向应优先考虑：
-
-- 不影响决策的 profiling / shadow 计算。
-- 可完全 join 且顺序确定的独立任务。
-- 战术搜索的并行预分析，但最终决策必须可证明等价串行语义。
-- alphabeta 方向只考虑确定性 lazy split / PV-safe 方案；禁止回到 root full-window split 或共享 TT Lazy SMP。
-
-## 验证策略
-
-具体运行命令以 `README.md` 为准，避免两份文档重复维护命令细节。
-
-Agent 选择验证范围时遵守：
+具体命令以 `README.md` 为准，避免两份文档重复维护命令。
 
 - 文档或注释改动：至少跑 `git diff --check`。
 - 普通 Rust 改动：跑格式、单元测试和相关二进制构建。
-- eval / movegen / ordering / TT / alphabeta / root 改动：增加 root diff。
-- VCF / VCT 改动：增加对应差分 case 和慢手复现 case。
-- protocol / GUI 改动：增加 smoke 或 transcript 验证。
-- 默认参数、候选顺序、搜索窗口、TT 语义改动：增加 Rust/reference 9 开局对战或等价固定局面回归。
+- eval/movegen/ordering/TT/alphabeta/root 改动：增加 root diff。
+- VCF/VCT 改动：增加对应 diff case 和慢手复现。
+- protocol/GUI 改动：增加 smoke、transcript 或手动说明。
+- base 默认参数、候选顺序、搜索窗口、TT 语义改动：增加 reference 对战或等价固定局面回归。
+- fast 实验：至少跑 9 开局双边 18 局 fast vs base smoke；推荐配置前扩大局数。
 
 如果任务涉及搜索、评估、候选、TT、VCF/VCT，不能只跑 `cargo test`。
 
-## 文件和目录约定
+## 性能工作格式
 
-- `src/config.rs`：默认参数唯一来源。
+每次性能工作至少说明：
+
+- 热点证据和目标。
+- 修改范围。
+- 正确性验证。
+- 耗时对比。
+- 是否改变 move、score、nodes、trace。
+- 如果是 fast，还要说明 fast vs base 结果。
+
+没有稳定收益的复杂实验应回退或默认关闭，不要留在主线增加维护成本。
+
+## 文件约定
+
+- `src/config.rs`：主要搜索默认参数。
 - `src/board.rs`：核心状态机。
 - `src/eval/`：评估和缓存。
 - `src/search/`：movegen、ordering、TT、alphabeta、root。
 - `src/threats/`：threat board、VCF、VCT。
 - `src/protocol/`：Gomocup 协议。
-- `src/bin/gomocup_engine.rs`：Gomocup stdin/stdout 入口。
+- `src/bin/gomocup_engine.rs`：Gomocup 入口。
 - `src/bin/gomoku_gui.rs`：本地 Web GUI。
 - `src/bin/diff_probe.rs`：Rust 差分探针。
 - `cases/diff/`：固定差分局面。
 - `scripts/run_diff.py`：批量差分。
 - `scripts/run_engine_match.py`：Rust/reference 对战。
-- `opponent/zhou/`：zhou 基线对手。
-- `README.bak.md` 是本地备份文件，不要提交，除非用户明确要求。
+- `README.bak.md`：本地备份文件，不要提交，除非用户明确要求。
 
-## 代码规范
+## 工作流程
 
-- 模块、函数、变量使用 `snake_case`。
-- 类型、trait、enum 使用 `PascalCase`。
-- 常量使用 `UPPER_SNAKE_CASE`。
-- 热路径避免无意义分配和复制。
-- 优先安全 Rust；`unsafe` 需要明确收益、边界和测试。
-- 注释应解释“为什么这样能保持 reference 语义”，不要写无信息量注释。
-- 新增配置必须集中到 config，不要散落在 protocol、GUI 或搜索内部。
-
-## Agent 工作流程
-
-1. 先读 `AGENTS.md` 和 `README.md`。
-2. 判断任务属于 bugfix、差分扩展、性能优化、协议/GUI、还是并行实验。
-3. 若涉及 reference 语义，读取对应 reference 模块和测试。
-4. 先明确验证命令，再改代码。
-5. 修改后跑最小必要验证。
-6. 若验证失败且原因不明确，不要继续扩大改动。
-7. 提交前确认没有误加入 reference、大型对战 JSON、临时 profiling 输出或本地备份。
+1. 判断任务类型和目标线：base 还是 fast。
+2. 若涉及 reference 语义，读取 reference 对应模块。
+3. 先明确验证范围，再改代码。
+4. 修改后跑最小必要验证。
+5. 验证失败且原因不清楚时，不要继续扩大改动。
+6. 提交前确认没有误加入完整 reference、大型对战 JSON、profiling 输出或本地备份。
 
 ## 明确禁止
 
-- 为了速度改变默认 best move、score 或候选排序。
+- 在 base 中为了速度改变默认 best move、score 或候选排序。
 - 未验证就重写搜索主链。
-- 在主线重新接入 Lazy SMP / YBWC 旧方案。
-- 把 zhou 行为当作主语义标准。
-- 修改 TT、movegen、ordering、VCF/VCT 后只跑编译不跑差分。
+- 把 zhou 行为当作 reference 语义。
+- 修改 TT、movegen、ordering、VCF/VCT 后只跑编译。
 - 把完整 Python reference 提交进本仓库。
+- 宣称 fast 棋力不降但没有 fast vs base 对战数据。
 
-## 一句话准则
-
-**当前项目的核心不是“写一个更像 Rust 的新引擎”，而是在 Rust 中保留 `pygomoku` classic 棋力语义，并在不改变棋力的前提下把它变快。**
+一句话准则：base 守住 `pygomoku` classic 语义，fast 负责用现代办法提速；fast 可以不等价，但对 base 胜率不能低于 `50%`。
