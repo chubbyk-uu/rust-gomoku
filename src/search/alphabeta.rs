@@ -12,7 +12,8 @@ use crate::config::EngineConfig;
 use crate::constants::{HASHF_ALPHA, HASHF_BETA, HASHF_EXACT, INF, WIN};
 use crate::eval::{evaluate_board, value_wide_compute, EvalCaches};
 use crate::search::movegen::{generate_candidates_with_coverage, CoverageTracker};
-use crate::search::{order_candidates, order_candidates_root_classic, TTEntry, TranspositionTable};
+use crate::search::ordering::order_candidates_owned;
+use crate::search::{order_candidates_root_classic, TTEntry, TranspositionTable};
 use crate::threats::VCFSearcher;
 use crate::types::{Move, Side};
 
@@ -284,12 +285,14 @@ impl AlphaBetaSearcher {
             options.root,
             coverage,
         );
+        let win_priority = generated.win_priority;
+        let single_forcing = generated.single_forcing;
         let mut ordered = if options.root {
             order_candidates_root_classic(board, &generated.candidates, side)
         } else {
-            order_candidates(board, &generated.candidates, side, probe.best_move)
+            order_candidates_owned(board, generated.candidates, side, probe.best_move)
         };
-        if generated.win_priority && !ordered.is_empty() {
+        if win_priority && !ordered.is_empty() {
             return (INF, Some(ordered[0].move_));
         }
 
@@ -329,7 +332,7 @@ impl AlphaBetaSearcher {
             }
         }
 
-        if !generated.win_priority && !generated.single_forcing {
+        if !win_priority && !single_forcing {
             ordered.truncate(wide);
         }
         if ordered.is_empty() {

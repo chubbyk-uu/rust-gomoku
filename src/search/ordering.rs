@@ -104,25 +104,70 @@ pub fn order_candidates(
     side: Side,
     tt_best_move: Option<Move>,
 ) -> Vec<Candidate> {
-    let mut mi_cache = [0_i32; BOARD_AREA];
-    for candidate in candidates {
-        let (x, y) = move_to_xy(candidate.move_).expect("candidate move is in range");
-        mi_cache[candidate.move_ as usize] = getmi(board, x, y, side);
-    }
     let mut result = candidates.to_vec();
+    order_candidates_in_place(board, &mut result, side, tt_best_move);
+    result
+}
+
+pub(crate) fn order_candidates_owned(
+    board: &Board,
+    mut candidates: Vec<Candidate>,
+    side: Side,
+    tt_best_move: Option<Move>,
+) -> Vec<Candidate> {
+    order_candidates_in_place(board, &mut candidates, side, tt_best_move);
+    candidates
+}
+
+fn cached_getmi(board: &Board, move_: Move, side: Side, mi_cache: &mut [i32; BOARD_AREA]) -> i32 {
+    let index = move_ as usize;
+    let cached = mi_cache[index];
+    if cached != 0 {
+        return cached;
+    }
+    let (x, y) = move_to_xy(move_).expect("candidate move is in range");
+    let mi = getmi(board, x, y, side);
+    mi_cache[index] = mi;
+    mi
+}
+
+fn same_primary_key(a: Candidate, b: Candidate, tt_best_move: Option<Move>) -> bool {
+    (tt_best_move == Some(a.move_)) == (tt_best_move == Some(b.move_))
+        && a.order_score == b.order_score
+}
+
+fn order_candidates_in_place(
+    board: &Board,
+    result: &mut [Candidate],
+    side: Side,
+    tt_best_move: Option<Move>,
+) {
     result.sort_unstable_by(|a, b| {
         let a_tt = tt_best_move == Some(a.move_);
         let b_tt = tt_best_move == Some(b.move_);
-        b_tt.cmp(&a_tt)
-            .then_with(|| {
-                b.order_score
-                    .partial_cmp(&a.order_score)
-                    .expect("candidate scores are finite")
-            })
-            .then_with(|| mi_cache[b.move_ as usize].cmp(&mi_cache[a.move_ as usize]))
-            .then_with(|| a.move_.cmp(&b.move_))
+        b_tt.cmp(&a_tt).then_with(|| {
+            b.order_score
+                .partial_cmp(&a.order_score)
+                .expect("candidate scores are finite")
+        })
     });
-    result
+
+    let mut mi_cache = [0_i32; BOARD_AREA];
+    let mut start = 0_usize;
+    while start < result.len() {
+        let mut end = start + 1;
+        while end < result.len() && same_primary_key(result[start], result[end], tt_best_move) {
+            end += 1;
+        }
+        if end - start > 1 {
+            result[start..end].sort_unstable_by(|a, b| {
+                let a_mi = cached_getmi(board, a.move_, side, &mut mi_cache);
+                let b_mi = cached_getmi(board, b.move_, side, &mut mi_cache);
+                b_mi.cmp(&a_mi).then_with(|| a.move_.cmp(&b.move_))
+            });
+        }
+        start = end;
+    }
 }
 
 pub fn order_candidates_root_classic(
