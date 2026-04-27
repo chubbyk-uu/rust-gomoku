@@ -17,6 +17,7 @@ pub const DEFAULT_OPPONENT_VCF_DEPTH: i32 = 7;
 pub const DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH: i32 = 4;
 pub const DEFAULT_VCF_MULTI_REPLY: bool = true;
 pub const DEFAULT_ROOT_VCT_DEPTH: i32 = 6;
+pub const DEFAULT_VCT_STRICT_AND_MEMO_KEY: bool = true;
 pub const DEFAULT_ROOT_PROFILE: bool = false;
 pub const DEFAULT_OVERLAP_VCT_ALPHABETA: bool = false;
 
@@ -78,6 +79,7 @@ pub struct RuntimeOptions {
     pub dynamic_board_margin: i32,
     pub compute_vct: bool,
     pub root_vct_depth: i32,
+    pub vct_strict_and_memo_key: bool,
     pub overlap_vct_alphabeta: bool,
     /// Optional root candidate timing probe. Defaults to off and must not
     /// affect search decisions.
@@ -183,6 +185,7 @@ fn default_runtime_options(para: &[f64]) -> RuntimeOptions {
         dynamic_board_margin: DEFAULT_DYNAMIC_BOARD_MARGIN,
         compute_vct: true,
         root_vct_depth: DEFAULT_ROOT_VCT_DEPTH,
+        vct_strict_and_memo_key: DEFAULT_VCT_STRICT_AND_MEMO_KEY,
         overlap_vct_alphabeta: DEFAULT_OVERLAP_VCT_ALPHABETA,
         root_profile: DEFAULT_ROOT_PROFILE,
     }

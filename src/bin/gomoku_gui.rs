@@ -21,6 +21,7 @@ fn main() {
     }
     let args = parse_args();
     let mut config = load_default_config();
+    config.runtime.overlap_vct_alphabeta = true;
     if let Some(depth) = args.depth {
         config.root_search.depth = depth;
     }
@@ -210,6 +211,7 @@ struct ParamsResponse {
     opponent_vcf_depth: i32,
     compute_vct: bool,
     root_vct_depth: i32,
+    overlap_vct_alphabeta: bool,
     static_board: bool,
     dynamic_board_margin: i32,
 }
@@ -279,6 +281,7 @@ fn snapshot_state(state: &GameState) -> StateResponse {
             opponent_vcf_depth: state.config.runtime.opponent_vcf_depth,
             compute_vct: state.config.runtime.compute_vct,
             root_vct_depth: state.config.runtime.root_vct_depth,
+            overlap_vct_alphabeta: state.config.runtime.overlap_vct_alphabeta,
             static_board: state.config.runtime.static_board,
             dynamic_board_margin: state.config.runtime.dynamic_board_margin,
         },
@@ -791,6 +794,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         ['手数', state.move_count],
         ['搜索参数', `d${p.depth} / w${p.width}`],
         ['VCF/VCT', `${p.compute_vcf ? 'VCF' + p.root_vcf_depth : 'VCF off'} / ${p.compute_vct ? 'VCT' + p.root_vct_depth : 'VCT off'}`],
+        ['Overlap VCT/AB', yesNo(p.overlap_vct_alphabeta)],
         ['窗口', p.static_board ? 'static board' : `dynamic margin ${p.dynamic_board_margin}`],
         ['上次搜索', r ? `${r.ms?.toFixed(3)} ms, depth ${r.depth}, nodes ${r.nodes}, score ${r.score}` : '-'],
         ['VCF 使用/命中', t ? `${yesNo(t.used_vcf)} / ${yesNo(t.vcf_found)}` : '-'],

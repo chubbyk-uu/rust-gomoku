@@ -675,6 +675,8 @@ impl RootSearcher {
         });
 
         let vct_start = Instant::now();
+        self.vct.memo_diagnostics_enabled = self.config.runtime.root_profile;
+        self.vct.strict_and_memo_key = self.config.runtime.vct_strict_and_memo_key;
         let vct_result = self
             .vct
             .search(board, side, self.config.runtime.root_vct_depth);
@@ -773,6 +775,8 @@ impl RootSearcher {
                 }
 
                 let vct_start = Instant::now();
+                self.vct.memo_diagnostics_enabled = self.config.runtime.root_profile;
+                self.vct.strict_and_memo_key = self.config.runtime.vct_strict_and_memo_key;
                 let vct_result = self
                     .vct
                     .search(board, side, self.config.runtime.root_vct_depth);

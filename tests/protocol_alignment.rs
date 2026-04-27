@@ -3,7 +3,7 @@ use rust_gomoku::{
     DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_OVERLAP_VCT_ALPHABETA, DEFAULT_ROOT_PROFILE,
     DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
     DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH, DEFAULT_VCF_MULTI_REPLY,
-    DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
+    DEFAULT_VCT_STRICT_AND_MEMO_KEY, DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
 };
 
 fn proto() -> GomocupProtocol {
@@ -263,6 +263,15 @@ fn protocol_info_root_vct_depth_negative_clamps_to_zero() {
 }
 
 #[test]
+fn protocol_info_vct_strict_and_memo_key_updates_runtime() {
+    let mut proto = proto();
+    proto.handle_line("INFO vct_strict_and_memo_key 1");
+    assert!(proto.config.runtime.vct_strict_and_memo_key);
+    proto.handle_line("INFO vct_strict_and_memo_key 0");
+    assert!(!proto.config.runtime.vct_strict_and_memo_key);
+}
+
+#[test]
 fn protocol_info_overlap_vct_alphabeta_updates_runtime() {
     let mut proto = proto();
     proto.handle_line("INFO overlap_vct_alphabeta 1");
@@ -406,6 +415,7 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
     proto.handle_line("INFO nonroot_vcf nope");
     proto.handle_line("INFO compute_vct nope");
     proto.handle_line("INFO root_vct_depth nope");
+    proto.handle_line("INFO vct_strict_and_memo_key nope");
     proto.handle_line("INFO overlap_vct_alphabeta nope");
     proto.handle_line("INFO profile nope");
     proto.handle_line("INFO root_profile nope");
@@ -431,6 +441,10 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
     assert!(!proto.config.runtime.nonroot_vcf);
     assert!(proto.config.runtime.compute_vct);
     assert_eq!(proto.config.runtime.root_vct_depth, DEFAULT_ROOT_VCT_DEPTH);
+    assert_eq!(
+        proto.config.runtime.vct_strict_and_memo_key,
+        DEFAULT_VCT_STRICT_AND_MEMO_KEY
+    );
     assert_eq!(
         proto.config.runtime.overlap_vct_alphabeta,
         DEFAULT_OVERLAP_VCT_ALPHABETA

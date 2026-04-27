@@ -22,6 +22,8 @@
 - `overlap_vct_alphabeta`：VCF miss 后重叠 VCT 与 alphabeta 的实验开关。
 - `root_profile`：root candidate 计时诊断。
 
+GUI 入口为了降低手动对局体感等待，默认单独开启 `overlap_vct_alphabeta`；Gomocup、diff、case probe 和库默认仍保持关闭。
+
 ## 默认参数
 
 主要默认值集中在 `src/config.rs`。
@@ -37,9 +39,10 @@
 | `vct_verify_opponent_vcf_depth` | `4` |
 | `vcf_multi_reply` | `true` |
 | `root_vct_depth` | `6` |
+| `vct_strict_and_memo_key` | `true` |
 | TT bucket bits | `20` |
 | `compute_vcf` / `compute_vct` | 开启 |
-| `overlap_vct_alphabeta` | 关闭 |
+| `overlap_vct_alphabeta` | 关闭，GUI 入口单独开启 |
 | `nonroot_vcf` | 关闭 |
 | `static_board` | 开启 |
 | `dynamic_board_margin` | `4` |
@@ -110,6 +113,7 @@ target/release/gomocup_engine --tt-bits 22
 - `INFO vcf_multi_reply 0|1`
 - `INFO compute_vct 0|1`
 - `INFO root_vct_depth N`
+- `INFO vct_strict_and_memo_key 0|1`
 - `INFO nonroot_vcf 0|1`
 - `INFO overlap_vct_alphabeta 0|1`
 - `INFO tt_bits N`
@@ -176,5 +180,5 @@ tests/               Rust 自动测试
 
 1. 继续扩大 reference/Rust 差分覆盖。
 2. 针对真实慢手优化 VCT miss 和 alphabeta 长尾。
-3. 单独研究 VCT AND memo key 诊断，不把潜在语义改动混入默认路径。
+3. 继续验证 `vct_strict_and_memo_key=true` 在更大局面集上的稳定性。
 4. 所有性能实验都要同时报告正确性、耗时、nodes、move/score/trace 是否变化。

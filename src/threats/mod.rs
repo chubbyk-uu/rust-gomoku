@@ -11,4 +11,6 @@ pub use threat_board::{
 };
 pub use types::{AttackMove, ThreatLevel};
 pub use vcf::{VCFResult, VCFSearcher, VcfMemoEntry, NO_MOVE, VCFM};
-pub use vct::{VCTDepthStats, VCTResult, VCTSearcher, VCTStats, VctMemoEntry};
+pub use vct::{
+    VCTAndMemoCollisionSample, VCTDepthStats, VCTResult, VCTSearcher, VCTStats, VctMemoEntry,
+};

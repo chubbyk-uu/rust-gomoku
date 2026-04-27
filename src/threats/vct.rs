@@ -1,6 +1,6 @@
 //! Victory by Continuous Threats (VCT) search.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::board::Board;
@@ -10,6 +10,7 @@ use crate::types::{Move, Side};
 
 const OR_NODE: i32 = 0;
 const AND_NODE: i32 = 1;
+const MAX_AND_MEMO_COLLISION_SAMPLES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VCTResult {
@@ -22,6 +23,18 @@ pub struct VCTResult {
 pub struct VctMemoEntry {
     pub depth: i32,
     pub result: VCTResult,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VCTAndMemoCollisionSample {
+    pub observed_depth: i32,
+    pub current_depth: i32,
+    pub board_key: u64,
+    pub observed_signature: u64,
+    pub current_signature: u64,
+    pub attack_move: Move,
+    pub attack_level: u8,
+    pub defenses: Vec<Move>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -39,6 +52,9 @@ pub struct VCTDepthStats {
     pub defenses_generated: usize,
     pub max_attack_count: usize,
     pub max_defense_count: usize,
+    pub and_memo_context_observations: usize,
+    pub and_memo_context_collisions: usize,
+    pub and_memo_context_collision_keys: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -50,6 +66,9 @@ struct VCTStatsSnapshot {
     memo_shallow_solved_hits: usize,
     attacks_generated: usize,
     defenses_generated: usize,
+    and_memo_context_observations: usize,
+    and_memo_context_collisions: usize,
+    and_memo_context_collision_keys: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -66,6 +85,10 @@ pub struct VCTStats {
     pub defenses_generated: usize,
     pub max_attack_count: usize,
     pub max_defense_count: usize,
+    pub and_memo_context_observations: usize,
+    pub and_memo_context_collisions: usize,
+    pub and_memo_context_collision_keys: usize,
+    pub and_memo_context_collision_samples: Vec<VCTAndMemoCollisionSample>,
     pub depth_stats: Vec<VCTDepthStats>,
     current_depth_max_attack_count: usize,
     current_depth_max_defense_count: usize,
@@ -88,6 +111,9 @@ impl VCTStats {
             memo_shallow_solved_hits: self.memo_shallow_solved_hits,
             attacks_generated: self.attacks_generated,
             defenses_generated: self.defenses_generated,
+            and_memo_context_observations: self.and_memo_context_observations,
+            and_memo_context_collisions: self.and_memo_context_collisions,
+            and_memo_context_collision_keys: self.and_memo_context_collision_keys,
         }
     }
 
@@ -120,14 +146,27 @@ impl VCTStats {
                 .saturating_sub(before.defenses_generated),
             max_attack_count: self.current_depth_max_attack_count,
             max_defense_count: self.current_depth_max_defense_count,
+            and_memo_context_observations: self
+                .and_memo_context_observations
+                .saturating_sub(before.and_memo_context_observations),
+            and_memo_context_collisions: self
+                .and_memo_context_collisions
+                .saturating_sub(before.and_memo_context_collisions),
+            and_memo_context_collision_keys: self
+                .and_memo_context_collision_keys
+                .saturating_sub(before.and_memo_context_collision_keys),
         }
     }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct VCTSearcher {
-    pub memo: HashMap<(i32, Side, i32, u64), VctMemoEntry>,
+    pub memo: HashMap<(i32, Side, i32, u64, u64), VctMemoEntry>,
     pub stats: VCTStats,
+    pub memo_diagnostics_enabled: bool,
+    pub strict_and_memo_key: bool,
+    and_memo_context_signatures: HashMap<(Side, i32, u64), u64>,
+    and_memo_context_collision_keys: HashSet<(Side, i32, u64)>,
 }
 
 impl VCTSearcher {
@@ -152,6 +191,8 @@ impl VCTSearcher {
         }
         let mut view = ThreatBoardView::from_board(board.clone());
         self.memo.clear();
+        self.and_memo_context_signatures.clear();
+        self.and_memo_context_collision_keys.clear();
         let total_start = Instant::now();
         let mut result = VCTResult {
             move_: None,
@@ -186,10 +227,11 @@ impl VCTSearcher {
         attacker: Side,
         depth: i32,
         key: u64,
+        context: u64,
     ) -> Option<VCTResult> {
         if let Some(result) = self
             .memo
-            .get(&(node, attacker, depth, key))
+            .get(&(node, attacker, depth, key, context))
             .map(|entry| entry.result)
         {
             self.stats.memo_exact_hits += 1;
@@ -198,7 +240,7 @@ impl VCTSearcher {
         for d in 1..depth {
             if let Some(result) = self
                 .memo
-                .get(&(node, attacker, d, key))
+                .get(&(node, attacker, d, key, context))
                 .map(|entry| entry.result)
             {
                 if result.found {
@@ -220,10 +262,13 @@ impl VCTSearcher {
         attacker: Side,
         depth: i32,
         key: u64,
+        context: u64,
         result: VCTResult,
     ) -> VCTResult {
-        self.memo
-            .insert((node, attacker, depth, key), VctMemoEntry { depth, result });
+        self.memo.insert(
+            (node, attacker, depth, key, context),
+            VctMemoEntry { depth, result },
+        );
         result
     }
 
@@ -252,7 +297,7 @@ impl VCTSearcher {
         }
 
         let key = view.board.zobrist_key();
-        if let Some(cached) = self.memo_lookup(OR_NODE, attacker, depth, key) {
+        if let Some(cached) = self.memo_lookup(OR_NODE, attacker, depth, key, 0) {
             return cached;
         }
 
@@ -267,6 +312,7 @@ impl VCTSearcher {
                 attacker,
                 depth,
                 key,
+                0,
                 VCTResult {
                     move_: None,
                     found: false,
@@ -283,6 +329,7 @@ impl VCTSearcher {
                     attacker,
                     depth,
                     key,
+                    0,
                     VCTResult {
                         move_: Some(attack.move_),
                         found: true,
@@ -293,12 +340,15 @@ impl VCTSearcher {
 
             view.play(attack.move_, attacker);
             let and_key = view.board.zobrist_key();
-            let and_result =
-                if let Some(cached) = self.memo_lookup(AND_NODE, attacker, depth, and_key) {
-                    cached
-                } else {
-                    self.and_node_for_attack(view, attacker, depth, &attack)
-                };
+            let and_context = self.and_memo_context(&attack);
+            self.observe_and_memo_context(attacker, depth, and_key, &attack);
+            let and_result = if let Some(cached) =
+                self.memo_lookup(AND_NODE, attacker, depth, and_key, and_context)
+            {
+                cached
+            } else {
+                self.and_node_for_attack(view, attacker, depth, &attack)
+            };
             view.undo();
 
             if and_result.found {
@@ -307,6 +357,7 @@ impl VCTSearcher {
                     attacker,
                     depth,
                     key,
+                    0,
                     VCTResult {
                         move_: Some(attack.move_),
                         found: true,
@@ -324,12 +375,66 @@ impl VCTSearcher {
             attacker,
             depth,
             key,
+            0,
             VCTResult {
                 move_: None,
                 found: false,
                 solved,
             },
         )
+    }
+
+    fn observe_and_memo_context(
+        &mut self,
+        attacker: Side,
+        current_depth: i32,
+        board_key: u64,
+        attack: &AttackMove,
+    ) {
+        if !self.memo_diagnostics_enabled {
+            return;
+        }
+        self.stats.and_memo_context_observations += 1;
+        let current_signature = attack_signature(attack);
+        for observed_depth in 1..=current_depth {
+            let old_key = (attacker, observed_depth, board_key);
+            let Some(&observed_signature) = self.and_memo_context_signatures.get(&old_key) else {
+                continue;
+            };
+            if observed_signature == current_signature {
+                continue;
+            }
+            self.stats.and_memo_context_collisions += 1;
+            if self.and_memo_context_collision_keys.insert(old_key) {
+                self.stats.and_memo_context_collision_keys += 1;
+            }
+            if self.stats.and_memo_context_collision_samples.len() < MAX_AND_MEMO_COLLISION_SAMPLES
+            {
+                self.stats
+                    .and_memo_context_collision_samples
+                    .push(VCTAndMemoCollisionSample {
+                        observed_depth,
+                        current_depth,
+                        board_key,
+                        observed_signature,
+                        current_signature,
+                        attack_move: attack.move_,
+                        attack_level: attack.level as u8,
+                        defenses: attack.defenses.clone(),
+                    });
+            }
+        }
+        self.and_memo_context_signatures
+            .entry((attacker, current_depth, board_key))
+            .or_insert(current_signature);
+    }
+
+    fn and_memo_context(&self, attack: &AttackMove) -> u64 {
+        if self.strict_and_memo_key {
+            attack_signature(attack)
+        } else {
+            0
+        }
     }
 
     fn and_node_for_attack(
@@ -342,7 +447,8 @@ impl VCTSearcher {
         self.stats.and_nodes += 1;
 
         let key = view.board.zobrist_key();
-        if let Some(cached) = self.memo_lookup(AND_NODE, attacker, depth, key) {
+        let context = self.and_memo_context(attack);
+        if let Some(cached) = self.memo_lookup(AND_NODE, attacker, depth, key, context) {
             return cached;
         }
 
@@ -353,7 +459,7 @@ impl VCTSearcher {
         let counter_wins = self.collect_counter_wins(view, attacker);
         let win_stage = self.search_defense_stage(view, attacker, depth, counter_wins, &mut seen);
         if let Some(result) = win_stage.refutation {
-            return self.store(AND_NODE, attacker, depth, key, result);
+            return self.store(AND_NODE, attacker, depth, key, context, result);
         }
         searched_any |= win_stage.searched;
         solved &= win_stage.solved;
@@ -366,7 +472,7 @@ impl VCTSearcher {
             &mut seen,
         );
         if let Some(result) = forced_stage.refutation {
-            return self.store(AND_NODE, attacker, depth, key, result);
+            return self.store(AND_NODE, attacker, depth, key, context, result);
         }
         searched_any |= forced_stage.searched;
         solved &= forced_stage.solved;
@@ -375,7 +481,7 @@ impl VCTSearcher {
         let counter_stage =
             self.search_defense_stage(view, attacker, depth, counter_forcing, &mut seen);
         if let Some(result) = counter_stage.refutation {
-            return self.store(AND_NODE, attacker, depth, key, result);
+            return self.store(AND_NODE, attacker, depth, key, context, result);
         }
         searched_any |= counter_stage.searched;
         solved &= counter_stage.solved;
@@ -385,6 +491,7 @@ impl VCTSearcher {
             attacker,
             depth,
             key,
+            context,
             VCTResult {
                 move_: None,
                 found: true,
@@ -503,5 +610,85 @@ impl VCTSearcher {
         }
 
         counter_b4.into_iter().chain(counter_a3).collect()
+    }
+}
+
+fn attack_signature(attack: &AttackMove) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    mix_signature(&mut hash, u64::from(attack.move_));
+    mix_signature(&mut hash, u64::from(attack.level as u8));
+    mix_signature(&mut hash, attack.defenses.len() as u64);
+    for &defense in &attack.defenses {
+        mix_signature(&mut hash, u64::from(defense));
+    }
+    hash
+}
+
+fn mix_signature(hash: &mut u64, value: u64) {
+    *hash ^= value;
+    *hash = hash.wrapping_mul(0x1000_0000_01b3);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn and_memo_context_diagnostic_detects_same_key_different_attack() {
+        let mut searcher = VCTSearcher {
+            memo_diagnostics_enabled: true,
+            ..VCTSearcher::default()
+        };
+        let first = AttackMove {
+            move_: 10,
+            level: ThreatLevel::B4,
+            defenses: vec![11],
+        };
+        let second = AttackMove {
+            move_: 12,
+            level: ThreatLevel::A3,
+            defenses: vec![13, 14],
+        };
+
+        searcher.observe_and_memo_context(1, 3, 1234, &first);
+        searcher.observe_and_memo_context(1, 3, 1234, &second);
+
+        assert_eq!(searcher.stats.and_memo_context_observations, 2);
+        assert_eq!(searcher.stats.and_memo_context_collisions, 1);
+        assert_eq!(searcher.stats.and_memo_context_collision_keys, 1);
+        assert_eq!(searcher.stats.and_memo_context_collision_samples.len(), 1);
+    }
+
+    #[test]
+    fn and_memo_context_diagnostic_detects_shallow_key_reuse_risk() {
+        let mut searcher = VCTSearcher {
+            memo_diagnostics_enabled: true,
+            ..VCTSearcher::default()
+        };
+        let shallow = AttackMove {
+            move_: 10,
+            level: ThreatLevel::B4,
+            defenses: vec![11],
+        };
+        let deeper = AttackMove {
+            move_: 10,
+            level: ThreatLevel::B4,
+            defenses: vec![11, 12],
+        };
+
+        searcher.observe_and_memo_context(1, 2, 5678, &shallow);
+        searcher.observe_and_memo_context(1, 4, 5678, &deeper);
+
+        assert_eq!(searcher.stats.and_memo_context_observations, 2);
+        assert_eq!(searcher.stats.and_memo_context_collisions, 1);
+        assert_eq!(searcher.stats.and_memo_context_collision_keys, 1);
+        assert_eq!(
+            searcher.stats.and_memo_context_collision_samples[0].observed_depth,
+            2
+        );
+        assert_eq!(
+            searcher.stats.and_memo_context_collision_samples[0].current_depth,
+            4
+        );
     }
 }

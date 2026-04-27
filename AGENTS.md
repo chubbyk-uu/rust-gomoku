@@ -76,6 +76,8 @@ base 当前只允许默认关闭的 `overlap_vct_alphabeta` 实验：
 - VCT miss/rejected 时等待并采用 alphabeta。
 - alphabeta worker 使用独立 TT snapshot，不共享写入主 TT。
 
+GUI 入口可以为手动对局体感单独默认开启该开关；这不代表 Gomocup、diff、case probe 或库默认开启。
+
 新的并行方案优先进入 fast 或独立分支。base 并行必须证明结果等价；fast 并行必须用 fast vs base 证明胜率和速度。
 
 ## 验证要求

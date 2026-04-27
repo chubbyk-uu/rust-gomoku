@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use rust_gomoku::{
-    load_default_config, move_to_xy, xy_to_move, Board, RootSearcher, SearchLimits, VCTDepthStats,
-    VCTStats,
+    load_default_config, move_to_xy, xy_to_move, Board, RootSearcher, SearchLimits,
+    VCTAndMemoCollisionSample, VCTDepthStats, VCTStats,
 };
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +40,7 @@ struct CaseRuntime {
     nonroot_vcf: Option<bool>,
     compute_vct: Option<bool>,
     root_vct_depth: Option<i32>,
+    vct_strict_and_memo_key: Option<bool>,
     overlap_vct_alphabeta: Option<bool>,
     static_board: Option<bool>,
     dynamic_board_margin: Option<i32>,
@@ -110,7 +111,23 @@ struct VctStatsSummary {
     defenses_generated: usize,
     max_attack_count: usize,
     max_defense_count: usize,
+    and_memo_context_observations: usize,
+    and_memo_context_collisions: usize,
+    and_memo_context_collision_keys: usize,
+    and_memo_context_collision_samples: Vec<VctAndMemoCollisionSampleSummary>,
     depth_stats: Vec<VctDepthStatsSummary>,
+}
+
+#[derive(Serialize)]
+struct VctAndMemoCollisionSampleSummary {
+    observed_depth: i32,
+    current_depth: i32,
+    board_key: String,
+    observed_signature: String,
+    current_signature: String,
+    attack_move: [usize; 2],
+    attack_level: u8,
+    defenses: Vec<[usize; 2]>,
 }
 
 #[derive(Serialize)]
@@ -128,6 +145,9 @@ struct VctDepthStatsSummary {
     defenses_generated: usize,
     max_attack_count: usize,
     max_defense_count: usize,
+    and_memo_context_observations: usize,
+    and_memo_context_collisions: usize,
+    and_memo_context_collision_keys: usize,
 }
 
 #[derive(Serialize)]
@@ -176,6 +196,33 @@ fn vct_depth_stats_summary(stats: &VCTDepthStats) -> VctDepthStatsSummary {
         defenses_generated: stats.defenses_generated,
         max_attack_count: stats.max_attack_count,
         max_defense_count: stats.max_defense_count,
+        and_memo_context_observations: stats.and_memo_context_observations,
+        and_memo_context_collisions: stats.and_memo_context_collisions,
+        and_memo_context_collision_keys: stats.and_memo_context_collision_keys,
+    }
+}
+
+fn vct_and_memo_collision_sample_summary(
+    sample: &VCTAndMemoCollisionSample,
+) -> VctAndMemoCollisionSampleSummary {
+    let attack_move = move_to_xy(sample.attack_move)
+        .map(|(x, y)| [x, y])
+        .unwrap_or([usize::MAX, usize::MAX]);
+    let defenses = sample
+        .defenses
+        .iter()
+        .filter_map(|&move_| move_to_xy(move_).ok())
+        .map(|(x, y)| [x, y])
+        .collect();
+    VctAndMemoCollisionSampleSummary {
+        observed_depth: sample.observed_depth,
+        current_depth: sample.current_depth,
+        board_key: sample.board_key.to_string(),
+        observed_signature: sample.observed_signature.to_string(),
+        current_signature: sample.current_signature.to_string(),
+        attack_move,
+        attack_level: sample.attack_level,
+        defenses,
     }
 }
 
@@ -193,6 +240,14 @@ fn vct_stats_summary(stats: &VCTStats) -> VctStatsSummary {
         defenses_generated: stats.defenses_generated,
         max_attack_count: stats.max_attack_count,
         max_defense_count: stats.max_defense_count,
+        and_memo_context_observations: stats.and_memo_context_observations,
+        and_memo_context_collisions: stats.and_memo_context_collisions,
+        and_memo_context_collision_keys: stats.and_memo_context_collision_keys,
+        and_memo_context_collision_samples: stats
+            .and_memo_context_collision_samples
+            .iter()
+            .map(vct_and_memo_collision_sample_summary)
+            .collect(),
         depth_stats: stats
             .depth_stats
             .iter()
@@ -274,6 +329,9 @@ fn run_case(case: DiffCase, root_profile: bool) -> ProbeOutput {
     }
     if let Some(v) = case.runtime.root_vct_depth {
         config.runtime.root_vct_depth = v.max(0);
+    }
+    if let Some(v) = case.runtime.vct_strict_and_memo_key {
+        config.runtime.vct_strict_and_memo_key = v;
     }
     if let Some(v) = case.runtime.overlap_vct_alphabeta {
         config.runtime.overlap_vct_alphabeta = v;

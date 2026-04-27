@@ -23,7 +23,7 @@ pub use config::{
     DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_OVERLAP_VCT_ALPHABETA, DEFAULT_ROOT_PROFILE,
     DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
     DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH, DEFAULT_VCF_MULTI_REPLY,
-    DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
+    DEFAULT_VCT_STRICT_AND_MEMO_KEY, DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
 };
 pub use constants::{BLACK, BOARD_AREA, BOARD_SIZE, EMPTY, WHITE};
 pub use eval::{
@@ -51,7 +51,8 @@ pub use search::{
 pub use threats::{
     broken_four_reply, forcing_threat_moves, has_open_four, has_vct_trigger, threat_moves,
     winning_threat_moves, AttackMove, ThreatBoardView, ThreatLevel, VCFResult, VCFSearcher,
-    VCTDepthStats, VCTResult, VCTSearcher, VCTStats, VcfMemoEntry, VctMemoEntry, NO_MOVE, VCFM,
+    VCTAndMemoCollisionSample, VCTDepthStats, VCTResult, VCTSearcher, VCTStats, VcfMemoEntry,
+    VctMemoEntry, NO_MOVE, VCFM,
 };
 pub use types::{Move, PlayedMove, Side};
 pub use zobrist::{ZobristError, ZobristTable, DEFAULT_ZOBRIST};

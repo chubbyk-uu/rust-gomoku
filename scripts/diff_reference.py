@@ -16,6 +16,7 @@ SUPPORTED_RUNTIME_KEYS = {
     "nonroot_vcf",
     "compute_vct",
     "root_vct_depth",
+    "vct_strict_and_memo_key",
     "static_board",
     "dynamic_board_margin",
 }

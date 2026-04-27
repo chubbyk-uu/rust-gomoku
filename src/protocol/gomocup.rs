@@ -308,6 +308,12 @@ impl GomocupProtocol {
                     self.searcher = None;
                 }
             }
+            "vct_strict_and_memo_key" => {
+                if let Some(parsed) = parse_one::<i32>(value) {
+                    self.config.runtime.vct_strict_and_memo_key = parsed != 0;
+                    self.searcher = None;
+                }
+            }
             "overlap_vct_alphabeta" => {
                 if let Some(parsed) = parse_one::<i32>(value) {
                     self.config.runtime.overlap_vct_alphabeta = parsed != 0;

@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use rust_gomoku::{
     load_config_for_profile, move_to_xy, xy_to_move, Board, EngineProfile, RootSearcher,
-    SearchLimits, TranspositionTable, VCTDepthStats, VCTStats, BLACK, WHITE,
+    SearchLimits, TranspositionTable, VCTAndMemoCollisionSample, VCTDepthStats, VCTStats, BLACK,
+    WHITE,
 };
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +65,7 @@ struct ProbeArgs {
     width: Option<usize>,
     tt_bits: Option<u32>,
     root_profile: bool,
+    vct_strict_and_memo_key: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -123,7 +125,23 @@ struct VctStatsOutput {
     defenses_generated: usize,
     max_attack_count: usize,
     max_defense_count: usize,
+    and_memo_context_observations: usize,
+    and_memo_context_collisions: usize,
+    and_memo_context_collision_keys: usize,
+    and_memo_context_collision_samples: Vec<VctAndMemoCollisionSampleOutput>,
     depth_stats: Vec<VctDepthStatsOutput>,
+}
+
+#[derive(Serialize)]
+struct VctAndMemoCollisionSampleOutput {
+    observed_depth: i32,
+    current_depth: i32,
+    board_key: String,
+    observed_signature: String,
+    current_signature: String,
+    attack_move: [usize; 2],
+    attack_level: u8,
+    defenses: Vec<[usize; 2]>,
 }
 
 #[derive(Serialize)]
@@ -141,6 +159,9 @@ struct VctDepthStatsOutput {
     defenses_generated: usize,
     max_attack_count: usize,
     max_defense_count: usize,
+    and_memo_context_observations: usize,
+    and_memo_context_collisions: usize,
+    and_memo_context_collision_keys: usize,
 }
 
 fn vct_depth_stats_output(stats: &VCTDepthStats) -> VctDepthStatsOutput {
@@ -158,6 +179,33 @@ fn vct_depth_stats_output(stats: &VCTDepthStats) -> VctDepthStatsOutput {
         defenses_generated: stats.defenses_generated,
         max_attack_count: stats.max_attack_count,
         max_defense_count: stats.max_defense_count,
+        and_memo_context_observations: stats.and_memo_context_observations,
+        and_memo_context_collisions: stats.and_memo_context_collisions,
+        and_memo_context_collision_keys: stats.and_memo_context_collision_keys,
+    }
+}
+
+fn vct_and_memo_collision_sample_output(
+    sample: &VCTAndMemoCollisionSample,
+) -> VctAndMemoCollisionSampleOutput {
+    let attack_move = move_to_xy(sample.attack_move)
+        .map(|(x, y)| [x, y])
+        .unwrap_or([usize::MAX, usize::MAX]);
+    let defenses = sample
+        .defenses
+        .iter()
+        .filter_map(|&move_| move_to_xy(move_).ok())
+        .map(|(x, y)| [x, y])
+        .collect();
+    VctAndMemoCollisionSampleOutput {
+        observed_depth: sample.observed_depth,
+        current_depth: sample.current_depth,
+        board_key: sample.board_key.to_string(),
+        observed_signature: sample.observed_signature.to_string(),
+        current_signature: sample.current_signature.to_string(),
+        attack_move,
+        attack_level: sample.attack_level,
+        defenses,
     }
 }
 
@@ -175,6 +223,14 @@ fn vct_stats_output(stats: &VCTStats) -> VctStatsOutput {
         defenses_generated: stats.defenses_generated,
         max_attack_count: stats.max_attack_count,
         max_defense_count: stats.max_defense_count,
+        and_memo_context_observations: stats.and_memo_context_observations,
+        and_memo_context_collisions: stats.and_memo_context_collisions,
+        and_memo_context_collision_keys: stats.and_memo_context_collision_keys,
+        and_memo_context_collision_samples: stats
+            .and_memo_context_collision_samples
+            .iter()
+            .map(vct_and_memo_collision_sample_output)
+            .collect(),
         depth_stats: stats
             .depth_stats
             .iter()
@@ -211,6 +267,7 @@ fn parse_args() -> Result<ProbeArgs, String> {
     let mut width = None;
     let mut tt_bits = None;
     let mut root_profile = false;
+    let mut vct_strict_and_memo_key = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--case" => {
@@ -264,6 +321,12 @@ fn parse_args() -> Result<ProbeArgs, String> {
             "--root-profile" => {
                 root_profile = true;
             }
+            "--vct-strict-and-memo-key" => {
+                vct_strict_and_memo_key = Some(true);
+            }
+            "--no-vct-strict-and-memo-key" => {
+                vct_strict_and_memo_key = Some(false);
+            }
             _ => {}
         }
     }
@@ -278,6 +341,7 @@ fn parse_args() -> Result<ProbeArgs, String> {
         width,
         tt_bits,
         root_profile,
+        vct_strict_and_memo_key,
     })
 }
 
@@ -346,6 +410,9 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
 
     let mut config = load_config_for_profile(args.profile);
     config.runtime.root_profile = args.root_profile;
+    if let Some(vct_strict_and_memo_key) = args.vct_strict_and_memo_key {
+        config.runtime.vct_strict_and_memo_key = vct_strict_and_memo_key;
+    }
     let default_limits = SearchLimits::fixed_from_config(&config);
     let limits = SearchLimits {
         max_depth: args.depth.unwrap_or(default_limits.max_depth),
