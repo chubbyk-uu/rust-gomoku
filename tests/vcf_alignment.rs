@@ -167,3 +167,61 @@ fn broken_four_reply_wrapper_matches_view() {
         view.broken_four_reply(x, y)
     );
 }
+
+#[test]
+fn broken_four_legal_reply_uses_composite_alternate_when_primary_is_occupied() {
+    let mut board = Board::new();
+    let moves = [
+        (4, 4),
+        (5, 4),
+        (6, 5),
+        (4, 5),
+        (6, 3),
+        (6, 4),
+        (7, 3),
+        (5, 3),
+        (7, 5),
+        (8, 5),
+        (6, 6),
+        (5, 6),
+        (5, 7),
+        (8, 4),
+        (7, 4),
+        (7, 6),
+        (6, 7),
+        (8, 3),
+        (8, 2),
+        (5, 2),
+        (5, 5),
+        (7, 7),
+        (6, 8),
+        (6, 9),
+        (4, 8),
+        (3, 9),
+        (7, 9),
+        (4, 6),
+        (6, 10),
+        (5, 10),
+        (7, 8),
+        (8, 8),
+        (9, 10),
+        (7, 11),
+        (10, 9),
+        (8, 10),
+        (9, 9),
+        (8, 9),
+    ];
+    for (x, y) in moves {
+        board.play(xy_to_move(x, y).unwrap(), None).unwrap();
+    }
+
+    let mut view = ThreatBoardView::from_board(board);
+    view.play(xy_to_move(8, 7).unwrap(), -1);
+    let raw_reply = view.broken_four_reply(8, 7).expect("raw reply exists");
+    assert_eq!(move_to_xy(raw_reply).unwrap(), (8, 8));
+    assert!(!view.board.is_legal_move(raw_reply));
+    let legal_reply = view
+        .broken_four_legal_reply(8, 7)
+        .expect("alternate legal reply exists");
+    assert_eq!(move_to_xy(legal_reply).unwrap(), (8, 6));
+}
