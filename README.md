@@ -200,6 +200,18 @@ python3 scripts/run_gomocup_match.py \
 
 默认 engine A 是 `base`，命令为 `gomocup_engine --profile base`；engine B 是 `fast`，命令为 `gomocup_engine --profile fast`。核心指标是胜率、avg、median、p95、max、错误率和超时率。
 
+同局面性能 benchmark：
+
+```bash
+cargo build --release --bin case_probe
+python3 scripts/bench_match_cases.py \
+  --case-file cases/match/standard.jsonl \
+  --jobs 16 \
+  --output /tmp/base_fast_standard_bench.json
+```
+
+`run_gomocup_match.py` 用于真实对战和棋力评估；`bench_match_cases.py` 用于同一批前缀局面的一手搜索对照，输出 base/fast 的 move、score、nodes、elapsed_ms、是否变招、节点比例和耗时比例。判断某个 fast 优化是否真的提速，应优先看同局面 benchmark，再用对战脚本验证棋力。
+
 从已有对战 JSON 抽取中盘 case：
 
 ```bash
@@ -219,7 +231,7 @@ cases/diff/          root 差分 case
 cases/match/         fast/base 对战 case
 data/static/         从 reference 提取的静态矩阵
 opponent/zhou/       zhou 基线对手
-scripts/             差分、reference 对战、通用 engine 对战、静态数据提取脚本
+scripts/             差分、reference 对战、通用 engine 对战、benchmark、静态数据提取脚本
 tests/               Rust 自动测试
 ```
 

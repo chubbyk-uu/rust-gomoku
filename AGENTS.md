@@ -96,6 +96,12 @@ base 当前只允许默认关闭的 `overlap_vct_alphabeta` 实验：
 
 如果任务涉及搜索、评估、候选、TT、VCF/VCT，不能只跑 `cargo test`。
 
+性能和棋力要分开验证：
+
+- `scripts/bench_match_cases.py`：同一批 `cases/match/*.jsonl` 前缀局面的一手搜索对照，用于判断 fast 是否真的减少 time/nodes。
+- `scripts/run_gomocup_match.py`：真实对战，用于判断 fast 对 base 胜率是否不低于 `50%`。
+- fast 优化至少应先过同局面 benchmark，再跑 fast vs base 对战。
+
 ## 性能工作格式
 
 每次性能工作至少说明：
@@ -120,11 +126,13 @@ base 当前只允许默认关闭的 `overlap_vct_alphabeta` 实验：
 - `src/bin/gomocup_engine.rs`：Gomocup 入口。
 - `src/bin/gomoku_gui.rs`：本地 Web GUI。
 - `src/bin/diff_probe.rs`：Rust 差分探针。
+- `src/bin/case_probe.rs`：单局面搜索 benchmark 探针。
 - `cases/diff/`：固定差分局面。
 - `cases/match/`：fast/base 对战局面 JSONL。
 - `scripts/run_diff.py`：批量差分。
 - `scripts/run_engine_match.py`：Rust/reference 对战。
 - `scripts/run_gomocup_match.py`：通用 Gomocup 对战，主要用于 fast vs base。
+- `scripts/bench_match_cases.py`：同局面 base/fast 性能对照。
 - `scripts/extract_match_cases.py`：从对战 JSON 抽取中盘对战 case。
 - `README.bak.md`：本地备份文件，不要提交，除非用户明确要求。
 
