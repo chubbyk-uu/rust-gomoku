@@ -14,18 +14,14 @@
 - fast profile 默认开启第三版 history/killer ordering：只在静态排序同组内调整安静着法顺序，base 不受影响。
 - 仓库内保留 `opponent/zhou` 作为轻量对手；完整 Python reference 不随仓库提交。
 
-不作为默认路径：
-
-- Lazy SMP、root YBWC、root full-window split、aspiration window。
-- LUT/indexed/batch-lines 等收益不稳定的局部 eval 优化。
-
-保留但默认关闭：
+可选诊断/实验：
 
 - `overlap_vct_alphabeta`：VCF miss 后重叠 VCT 与 alphabeta 的实验开关。
 - `root_profile`：root candidate 计时诊断。
-- TT generation 观测：只用于诊断跨手 TT best-move hint 新旧比例，不影响 TT cutoff、replacement 或排序策略。
+- TT generation 观测：Gomocup trace 可输出跨手 TT best-move hint 新旧比例，不影响 TT cutoff、replacement 或排序策略。
 
 GUI 入口为了降低手动对局体感等待，默认单独开启 `overlap_vct_alphabeta`；Gomocup、diff、case probe 和库默认仍保持关闭。
+历史性能实验和止损结论记录在 `docs/perf-log.md`，README 不重复维护失败方案清单。
 
 ## 默认参数
 
@@ -184,7 +180,7 @@ scripts/             差分、对战、benchmark、case 抽取脚本
 tests/               Rust 自动测试
 ```
 
-## 近期重点
+## 当前重点
 
 1. 继续扩大 reference/Rust 差分覆盖。
 2. 针对真实慢手优化 VCT miss 和 alphabeta 长尾，优先寻找能稳定压低 p95/max 的方案。
