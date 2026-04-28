@@ -1,11 +1,20 @@
 use rust_gomoku::{
-    move_to_xy, xy_to_move, Board, BoardError, PlayedMove, BLACK, BOARD_SIZE, EMPTY, WHITE,
+    move_to_rc, move_to_xy, rc_to_move, xy_to_move, Board, BoardError, PlayedMove, BLACK,
+    BOARD_SIZE, EMPTY, WHITE,
 };
 
 #[test]
 fn coordinate_conversion_round_trip() {
     let move_ = xy_to_move(7, 11).unwrap();
     assert_eq!(move_to_xy(move_).unwrap(), (7, 11));
+}
+
+#[test]
+fn row_col_helpers_match_xy_helpers() {
+    let move_ = xy_to_move(7, 11).unwrap();
+    assert_eq!(rc_to_move(11, 7).unwrap(), move_);
+    assert_eq!(move_to_xy(move_).unwrap(), (7, 11));
+    assert_eq!(move_to_rc(move_).unwrap(), (11, 7));
 }
 
 #[test]
@@ -119,8 +128,11 @@ fn board_replay_reconstructs_position() {
     board.replay(&moves, BLACK).unwrap();
     assert_eq!(board.occupied_moves(), moves);
     assert_eq!(board.at(7, 7).unwrap(), BLACK);
+    assert_eq!(board.at_rc(7, 7).unwrap(), BLACK);
     assert_eq!(board.at(8, 7).unwrap(), WHITE);
+    assert_eq!(board.at_rc(7, 8).unwrap(), WHITE);
     assert_eq!(board.at(7, 8).unwrap(), BLACK);
+    assert_eq!(board.at_rc(8, 7).unwrap(), BLACK);
 }
 
 #[test]

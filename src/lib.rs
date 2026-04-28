@@ -14,7 +14,7 @@ pub mod threats;
 pub mod types;
 pub mod zobrist;
 
-pub use board::{move_to_xy, xy_to_move, Board, BoardError};
+pub use board::{move_to_rc, move_to_xy, rc_to_move, xy_to_move, Board, BoardError};
 pub use config::{
     adjust_loaded_parameters, apply_engine_profile, default_eval_para, load_config_for_profile,
     load_default_config, EngineConfig, EngineProfile, EvalBucketTables, RootSearchDefaults,

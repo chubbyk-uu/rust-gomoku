@@ -1,4 +1,8 @@
 //! Board state, move encoding, and deterministic make/unmake semantics.
+//!
+//! Public protocol-style coordinates use `(x, y) = (column, row)`, matching
+//! Gomocup and GUI conventions. The internal grid is stored as
+//! `grid[row][column]`, and `Move` is encoded as `row * BOARD_SIZE + column`.
 
 use crate::constants::{BLACK, BOARD_AREA, BOARD_SIZE, EMPTY};
 use crate::types::{is_valid_side, opposite_side, Move, PlayedMove, Side};
@@ -32,12 +36,21 @@ pub fn xy_to_move(x: usize, y: usize) -> Result<Move, BoardError> {
     Ok((y * BOARD_SIZE + x) as Move)
 }
 
+pub fn rc_to_move(row: usize, col: usize) -> Result<Move, BoardError> {
+    xy_to_move(col, row)
+}
+
 pub fn move_to_xy(move_: Move) -> Result<(usize, usize), BoardError> {
     let index = usize::from(move_);
     if index >= BOARD_AREA {
         return Err(BoardError::MoveOutOfRange(move_));
     }
     Ok((index % BOARD_SIZE, index / BOARD_SIZE))
+}
+
+pub fn move_to_rc(move_: Move) -> Result<(usize, usize), BoardError> {
+    let (col, row) = move_to_xy(move_)?;
+    Ok((row, col))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,14 +123,18 @@ impl Board {
         Ok(self.grid[y][x])
     }
 
+    pub fn at_rc(&self, row: usize, col: usize) -> Result<Side, BoardError> {
+        self.at(col, row)
+    }
+
     pub fn is_legal_move(&self, move_: Move) -> bool {
         if self.winner != EMPTY {
             return false;
         }
-        let Ok((x, y)) = move_to_xy(move_) else {
+        let Ok((col, row)) = move_to_xy(move_) else {
             return false;
         };
-        self.grid[y][x] == EMPTY
+        self.grid[row][col] == EMPTY
     }
 
     pub fn play(&mut self, move_: Move, side: Option<Side>) -> Result<PlayedMove, BoardError> {
@@ -135,13 +152,13 @@ impl Board {
             return Err(BoardError::IllegalMove(move_));
         }
 
-        let (x, y) = move_to_xy(move_)?;
-        self.grid[y][x] = side;
+        let (col, row) = move_to_xy(move_)?;
+        self.grid[row][col] = side;
         let played = PlayedMove { move_, side };
         self.move_history.push(played);
         self.zobrist_key ^= self.zobrist_table.key_for_turn();
         self.zobrist_key ^= self.zobrist_table.key_for(move_, side)?;
-        if self.is_winning_move(x, y, side) {
+        if self.is_winning_move(col, row, side) {
             self.winner = side;
         }
         self.side_to_move = opposite_side(side);
@@ -150,8 +167,8 @@ impl Board {
 
     pub fn undo(&mut self) -> Result<PlayedMove, BoardError> {
         let played = self.move_history.pop().ok_or(BoardError::EmptyHistory)?;
-        let (x, y) = move_to_xy(played.move_)?;
-        self.grid[y][x] = EMPTY;
+        let (col, row) = move_to_xy(played.move_)?;
+        self.grid[row][col] = EMPTY;
         self.zobrist_key ^= self.zobrist_table.key_for(played.move_, played.side)?;
         self.zobrist_key ^= self.zobrist_table.key_for_turn();
         self.side_to_move = played.side;

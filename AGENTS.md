@@ -45,8 +45,8 @@ fast 实验合入或设为推荐配置前，至少要报告胜率、avg、median
 
 ## 核心语义
 
-- 坐标统一为 `(x, y)`，即 `(列, 行)`。
-- `Move` 是扁平化索引，坐标转换优先使用统一辅助函数。
+- 外部坐标统一为 `(x, y)`，即 `(列, 行)`；内部矩阵访问是 `grid[row][col]`。
+- `Move` 是扁平化索引，编码为 `row * BOARD_SIZE + col`；坐标转换优先使用 `xy_to_move` / `move_to_xy`，矩阵语境可用 `rc_to_move` / `move_to_rc`。
 - 常量语义保持：`BOARD_SIZE = 15`，`BLACK = 1`，`WHITE = -1`，`EMPTY = 0`。
 - 搜索主流程通过 `play / undo` 修改局面。
 - `winner / side_to_move / move_history / move_count / zobrist_key` 必须同步。

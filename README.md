@@ -51,6 +51,10 @@ GUI 入口为了降低手动对局体感等待，默认单独开启 `overlap_vct
 
 默认 profile 是 `base`，用于守住 classic 语义和 reference 差分。`--profile fast` 当前会默认开启 `fast_history_ordering`；如需对照可用 `--no-fast-history-ordering` 关闭。
 
+## 坐标约定
+
+外部坐标统一为 `(x, y) = (列, 行)`，与 Gomocup、GUI 和 case JSON 保持一致。内部棋盘矩阵按 Rust 数组习惯存为 `grid[row][col]`，`Move` 编码为 `row * BOARD_SIZE + col`。代码里优先使用 `xy_to_move` / `move_to_xy`；在矩阵语境下可使用别名 `rc_to_move` / `move_to_rc` 避免误读。
+
 ## Reference 路径
 
 完整 Python reference 默认放在本机外部目录：
