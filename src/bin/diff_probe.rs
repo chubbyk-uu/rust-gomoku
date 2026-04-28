@@ -179,6 +179,11 @@ struct RootCandidateProfileSummary {
     alpha_after: i32,
     beta: i32,
     reason: String,
+    zero_window_nodes: usize,
+    zero_window_elapsed_ms: f64,
+    full_window_nodes: usize,
+    full_window_elapsed_ms: f64,
+    pvs_research: bool,
 }
 
 fn vct_depth_stats_summary(stats: &VCTDepthStats) -> VctDepthStatsSummary {
@@ -426,6 +431,13 @@ fn run_case(case: DiffCase, root_profile: bool) -> ProbeOutput {
                                     alpha_after: candidate.alpha_after,
                                     beta: candidate.beta,
                                     reason: candidate.reason.to_string(),
+                                    zero_window_nodes: candidate.zero_window_nodes,
+                                    zero_window_elapsed_ms: candidate.zero_window_elapsed_us as f64
+                                        / 1000.0,
+                                    full_window_nodes: candidate.full_window_nodes,
+                                    full_window_elapsed_ms: candidate.full_window_elapsed_us as f64
+                                        / 1000.0,
+                                    pvs_research: candidate.pvs_research,
                                 }
                             })
                             .collect(),

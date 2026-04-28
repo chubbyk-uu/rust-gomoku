@@ -50,6 +50,44 @@ def move_key(move: Any) -> str:
     return str(move)
 
 
+def candidate_float(candidate: dict[str, Any], *keys: str) -> float:
+    for key in keys:
+        value = candidate.get(key)
+        if value is not None:
+            return float(value)
+    return 0.0
+
+
+def candidate_bool(candidate: dict[str, Any], key: str) -> bool:
+    value = candidate.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() == "true"
+    return bool(value)
+
+
+@dataclass
+class TailCutoffConfig:
+    min_depth: int
+    min_candidates: int
+    window: int
+    min_elapsed_ms: float
+    score_guard: int
+
+
+@dataclass
+class TailCutoffSimulation:
+    triggered: bool
+    evaluated: int
+    cutoff_after_index: int | None
+    saved_ms: float
+    saved_pct: float
+    missed_improvements: int
+    missed_cutoffs: int
+    safe: bool
+
+
 @dataclass
 class DepthAnalysis:
     depth: int
@@ -74,6 +112,12 @@ class DepthAnalysis:
     speculative_fail_high_vs_first: int
     speculative_fail_high_ms_vs_first: float
     speculative_fail_high_pct_vs_first: float
+    zero_window_ms: float
+    full_window_ms: float
+    pvs_researches: int
+    pvs_research_full_ms: float
+    pvs_research_full_pct: float
+    tail_cutoff: dict[str, Any]
     improved_after_width: dict[str, int]
     saved_ms_by_width: dict[str, float]
     late_parallel_ms: dict[str, float]
@@ -82,7 +126,73 @@ class DepthAnalysis:
     ordered_tail_parallel_speedup: dict[str, float]
 
 
-def analyze_depth(profile: dict[str, Any], widths: list[int], workers: list[int]) -> DepthAnalysis:
+def simulate_tail_cutoff(
+    *,
+    depth: int,
+    elapsed_ms: float,
+    candidates: list[dict[str, Any]],
+    config: TailCutoffConfig,
+) -> TailCutoffSimulation:
+    if depth < config.min_depth or len(candidates) < config.min_candidates:
+        return TailCutoffSimulation(False, 0, None, 0.0, 0.0, 0, 0, True)
+
+    current_best_score: int | None = None
+    last_improved_index: int | None = None
+
+    for index, candidate in enumerate(candidates):
+        reason = candidate.get("reason")
+        if reason in ("improved", "root_win"):
+            current_best_score = int(candidate.get("score") or 0)
+            last_improved_index = index
+
+        evaluated = index + 1
+        if evaluated < config.min_candidates or evaluated < config.window:
+            continue
+        if current_best_score is None or abs(current_best_score) >= config.score_guard:
+            continue
+
+        recent = candidates[evaluated - config.window : evaluated]
+        if any(
+            candidate.get("reason") in ("improved", "root_win", "beta_cutoff")
+            for candidate in recent
+        ):
+            continue
+        if any(candidate_bool(candidate, "pvs_research") for candidate in recent):
+            continue
+
+        since_index = 0 if last_improved_index is None else last_improved_index + 1
+        elapsed_since_improve = sum(
+            float(candidate["elapsed_ms"]) for candidate in candidates[since_index:evaluated]
+        )
+        if elapsed_since_improve < config.min_elapsed_ms:
+            continue
+
+        tail = candidates[evaluated:]
+        saved_ms = sum(float(candidate["elapsed_ms"]) for candidate in tail)
+        missed_improvements = sum(1 for candidate in tail if candidate.get("reason") == "improved")
+        missed_cutoffs = sum(
+            1 for candidate in tail if candidate.get("reason") in ("root_win", "beta_cutoff")
+        )
+        return TailCutoffSimulation(
+            triggered=True,
+            evaluated=evaluated,
+            cutoff_after_index=index,
+            saved_ms=round(saved_ms, 3),
+            saved_pct=round(pct(saved_ms, elapsed_ms), 1),
+            missed_improvements=missed_improvements,
+            missed_cutoffs=missed_cutoffs,
+            safe=missed_improvements == 0 and missed_cutoffs == 0,
+        )
+
+    return TailCutoffSimulation(False, 0, None, 0.0, 0.0, 0, 0, True)
+
+
+def analyze_depth(
+    profile: dict[str, Any],
+    widths: list[int],
+    workers: list[int],
+    tail_config: TailCutoffConfig,
+) -> DepthAnalysis:
     candidates = profile.get("candidates") or []
     elapsed_ms = float(profile.get("elapsed_ms") or 0.0)
     first_ms = float(candidates[0]["elapsed_ms"]) if candidates else 0.0
@@ -113,6 +223,27 @@ def analyze_depth(profile: dict[str, Any], widths: list[int], workers: list[int]
     )
     speculative_fail_high_ms = sum(
         float(candidate["elapsed_ms"]) for candidate in speculative_fail_high_candidates
+    )
+    zero_window_ms = sum(
+        candidate_float(candidate, "zero_window_elapsed_ms", "zero_window_ms")
+        for candidate in candidates
+    )
+    full_window_ms = sum(
+        candidate_float(candidate, "full_window_elapsed_ms", "full_window_ms")
+        for candidate in candidates
+    )
+    pvs_research_candidates = [
+        candidate for candidate in candidates if candidate_bool(candidate, "pvs_research")
+    ]
+    pvs_research_full_ms = sum(
+        candidate_float(candidate, "full_window_elapsed_ms", "full_window_ms")
+        for candidate in pvs_research_candidates
+    )
+    tail_cutoff = simulate_tail_cutoff(
+        depth=int(profile["depth"]),
+        elapsed_ms=elapsed_ms,
+        candidates=candidates,
+        config=tail_config,
     )
 
     saved_ms_by_width: dict[str, float] = {}
@@ -187,6 +318,12 @@ def analyze_depth(profile: dict[str, Any], widths: list[int], workers: list[int]
         speculative_fail_high_vs_first=len(speculative_fail_high_candidates),
         speculative_fail_high_ms_vs_first=round(speculative_fail_high_ms, 3),
         speculative_fail_high_pct_vs_first=round(pct(speculative_fail_high_ms, elapsed_ms), 1),
+        zero_window_ms=round(zero_window_ms, 3),
+        full_window_ms=round(full_window_ms, 3),
+        pvs_researches=len(pvs_research_candidates),
+        pvs_research_full_ms=round(pvs_research_full_ms, 3),
+        pvs_research_full_pct=round(pct(pvs_research_full_ms, elapsed_ms), 1),
+        tail_cutoff=tail_cutoff.__dict__,
         improved_after_width=improved_after_width,
         saved_ms_by_width=saved_ms_by_width,
         late_parallel_ms=late_parallel_ms,
@@ -213,11 +350,16 @@ def classify(depth: DepthAnalysis) -> list[str]:
     return labels
 
 
-def analyze_file(path: Path, widths: list[int], workers: list[int]) -> dict[str, Any]:
+def analyze_file(
+    path: Path,
+    widths: list[int],
+    workers: list[int],
+    tail_config: TailCutoffConfig,
+) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     root = payload["root"]
     profiles = root.get("trace", {}).get("root_profiles") or []
-    depths = [analyze_depth(profile, widths, workers) for profile in profiles]
+    depths = [analyze_depth(profile, widths, workers, tail_config) for profile in profiles]
     final_depth = max(depths, key=lambda item: item.depth) if depths else None
     return {
         "path": str(path),
@@ -278,6 +420,55 @@ def markdown_report(summary: dict[str, Any]) -> str:
             )
         )
     lines.append("")
+    lines.append("## PVS Re-search")
+    lines.append("")
+    lines.append(
+        "| case | d | pvs researches | re-search full ms | re-search full % | zero-window ms | full-window ms |"
+    )
+    lines.append("|---|---:|---:|---:|---:|---:|---:|")
+    for case in summary["cases"]:
+        depths = case["depths"]
+        if not depths:
+            continue
+        d = depths[-1]
+        lines.append(
+            "| {name} | {depth} | {researches} | {research_ms:.1f} | {research_pct:.1f} | {zero_ms:.1f} | {full_ms:.1f} |".format(
+                name=case["name"],
+                depth=d["depth"],
+                researches=d["pvs_researches"],
+                research_ms=d["pvs_research_full_ms"],
+                research_pct=d["pvs_research_full_pct"],
+                zero_ms=d["zero_window_ms"],
+                full_ms=d["full_window_ms"],
+            )
+        )
+    lines.append("")
+    lines.append("## Tail Cutoff Simulation")
+    lines.append("")
+    lines.append(
+        "| case | d | triggered | evaluated | saved ms | saved % | missed improved | missed cutoffs | safe |"
+    )
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    for case in summary["cases"]:
+        depths = case["depths"]
+        if not depths:
+            continue
+        d = depths[-1]
+        tail = d["tail_cutoff"]
+        lines.append(
+            "| {name} | {depth} | {triggered} | {evaluated} | {saved_ms:.1f} | {saved_pct:.1f} | {missed_improvements} | {missed_cutoffs} | {safe} |".format(
+                name=case["name"],
+                depth=d["depth"],
+                triggered=tail["triggered"],
+                evaluated=tail["evaluated"],
+                saved_ms=tail["saved_ms"],
+                saved_pct=tail["saved_pct"],
+                missed_improvements=tail["missed_improvements"],
+                missed_cutoffs=tail["missed_cutoffs"],
+                safe=tail["safe"],
+            )
+        )
+    lines.append("")
     lines.append("## Aggregate")
     lines.append("")
     aggregate = summary["aggregate"]
@@ -308,6 +499,27 @@ def aggregate(cases: list[dict[str, Any]]) -> dict[str, Any]:
         "speculative_fail_high_count_vs_first": sum(
             d["speculative_fail_high_vs_first"] for d in final_depths
         ),
+        "pvs_research_count": sum(d["pvs_researches"] for d in final_depths),
+        "pvs_research_full_ms": stats([d["pvs_research_full_ms"] for d in final_depths]),
+        "pvs_research_full_pct": stats([d["pvs_research_full_pct"] for d in final_depths]),
+        "zero_window_ms": stats([d["zero_window_ms"] for d in final_depths]),
+        "full_window_ms": stats([d["full_window_ms"] for d in final_depths]),
+        "tail_cutoff_triggered": sum(1 for d in final_depths if d["tail_cutoff"]["triggered"]),
+        "tail_cutoff_safe": sum(
+            1
+            for d in final_depths
+            if d["tail_cutoff"]["triggered"] and d["tail_cutoff"]["safe"]
+        ),
+        "tail_cutoff_saved_ms": stats(
+            [d["tail_cutoff"]["saved_ms"] for d in final_depths if d["tail_cutoff"]["triggered"]]
+        ),
+        "tail_cutoff_saved_pct": stats(
+            [d["tail_cutoff"]["saved_pct"] for d in final_depths if d["tail_cutoff"]["triggered"]]
+        ),
+        "tail_cutoff_missed_improvements": sum(
+            d["tail_cutoff"]["missed_improvements"] for d in final_depths
+        ),
+        "tail_cutoff_missed_cutoffs": sum(d["tail_cutoff"]["missed_cutoffs"] for d in final_depths),
         "ideal_x4_speedup": stats(
             [d["late_parallel_speedup"].get("4", 0.0) for d in final_depths]
         ),
@@ -326,6 +538,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("profiles", nargs="+", type=Path)
     parser.add_argument("--width", action="append", type=int, default=[10, 20, 30])
     parser.add_argument("--worker", action="append", type=int, default=[2, 4, 8])
+    parser.add_argument("--tail-min-depth", type=int, default=8)
+    parser.add_argument("--tail-min-candidates", type=int, default=20)
+    parser.add_argument("--tail-window", type=int, default=10)
+    parser.add_argument("--tail-min-elapsed-ms", type=float, default=800.0)
+    parser.add_argument("--tail-score-guard", type=int, default=19_000)
     parser.add_argument("--output-json", type=Path, default=Path("/tmp/root_profile_analysis.json"))
     parser.add_argument("--output-md", type=Path, default=Path("/tmp/root_profile_analysis.md"))
     return parser.parse_args()
@@ -335,12 +552,20 @@ def main() -> int:
     args = parse_args()
     widths = sorted(set(args.width))
     workers = sorted(set(args.worker))
-    cases = [analyze_file(path, widths, workers) for path in args.profiles]
+    tail_config = TailCutoffConfig(
+        min_depth=args.tail_min_depth,
+        min_candidates=args.tail_min_candidates,
+        window=args.tail_window,
+        min_elapsed_ms=args.tail_min_elapsed_ms,
+        score_guard=args.tail_score_guard,
+    )
+    cases = [analyze_file(path, widths, workers, tail_config) for path in args.profiles]
     summary = {
         "settings": {
             "profiles": [str(path) for path in args.profiles],
             "widths": widths,
             "workers": workers,
+            "tail_cutoff": tail_config.__dict__,
         },
         "aggregate": aggregate(cases),
         "cases": cases,

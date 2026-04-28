@@ -440,7 +440,7 @@ fn trace_messages(trace: Option<&crate::search::RootTrace>) -> Vec<String> {
         for candidate in &depth.candidates {
             let (x, y) = move_to_xy(candidate.move_).expect("profile move stays valid");
             messages.push(format!(
-                "MESSAGE root_candidate depth={} index={} move={},{} score={} nodes={} elapsed_ms={:.3} alpha_before={} alpha_after={} beta={} reason={}",
+                "MESSAGE root_candidate depth={} index={} move={},{} score={} nodes={} elapsed_ms={:.3} alpha_before={} alpha_after={} beta={} reason={} zero_window_nodes={} zero_window_ms={:.3} full_window_nodes={} full_window_ms={:.3} pvs_research={}",
                 depth.depth,
                 candidate.index,
                 x,
@@ -452,6 +452,11 @@ fn trace_messages(trace: Option<&crate::search::RootTrace>) -> Vec<String> {
                 candidate.alpha_after,
                 candidate.beta,
                 candidate.reason,
+                candidate.zero_window_nodes,
+                candidate.zero_window_elapsed_us as f64 / 1000.0,
+                candidate.full_window_nodes,
+                candidate.full_window_elapsed_us as f64 / 1000.0,
+                candidate.pvs_research,
             ));
         }
     }

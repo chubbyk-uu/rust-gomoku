@@ -37,6 +37,11 @@ pub struct RootCandidateProfile {
     pub alpha_after: i32,
     pub beta: i32,
     pub reason: &'static str,
+    pub zero_window_nodes: usize,
+    pub zero_window_elapsed_us: u128,
+    pub full_window_nodes: usize,
+    pub full_window_elapsed_us: u128,
+    pub pvs_research: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -466,6 +471,11 @@ impl AlphaBetaSearcher {
             let profile_start = profile_root_candidate.then(Instant::now);
             let profile_nodes_before = stats.nodes;
             let profile_alpha_before = alpha;
+            let mut profile_zero_window_nodes = 0_usize;
+            let mut profile_zero_window_elapsed_us = 0_u128;
+            let mut profile_full_window_nodes = 0_usize;
+            let mut profile_full_window_elapsed_us = 0_u128;
+            let mut profile_pvs_research = false;
             board
                 .play(candidate.move_, Some(side))
                 .expect("ordered candidate stays legal");
@@ -512,6 +522,8 @@ impl AlphaBetaSearcher {
                     priority_base: Some(priority_base),
                 };
                 let score = if found_pv {
+                    let narrow_start = profile_root_candidate.then(Instant::now);
+                    let narrow_nodes_before = stats.nodes;
                     let (narrow_score, _) = self.search_with_coverage(
                         board,
                         caches,
@@ -524,11 +536,19 @@ impl AlphaBetaSearcher {
                         child_options,
                         coverage,
                     );
+                    if let Some(start) = narrow_start {
+                        profile_zero_window_nodes +=
+                            stats.nodes.saturating_sub(narrow_nodes_before);
+                        profile_zero_window_elapsed_us += start.elapsed().as_micros();
+                    }
                     if stats.stop {
                         break narrow_score;
                     }
                     let narrowed = -atdown - narrow_score;
                     if alpha < narrowed && narrowed < beta {
+                        profile_pvs_research = true;
+                        let full_start = profile_root_candidate.then(Instant::now);
+                        let full_nodes_before = stats.nodes;
                         let (full_score, _) = self.search_with_coverage(
                             board,
                             caches,
@@ -541,6 +561,11 @@ impl AlphaBetaSearcher {
                             child_options,
                             coverage,
                         );
+                        if let Some(start) = full_start {
+                            profile_full_window_nodes +=
+                                stats.nodes.saturating_sub(full_nodes_before);
+                            profile_full_window_elapsed_us += start.elapsed().as_micros();
+                        }
                         if stats.stop {
                             break full_score;
                         }
@@ -549,6 +574,8 @@ impl AlphaBetaSearcher {
                         narrowed
                     }
                 } else {
+                    let full_start = profile_root_candidate.then(Instant::now);
+                    let full_nodes_before = stats.nodes;
                     let (full_score, _) = self.search_with_coverage(
                         board,
                         caches,
@@ -561,6 +588,10 @@ impl AlphaBetaSearcher {
                         child_options,
                         coverage,
                     );
+                    if let Some(start) = full_start {
+                        profile_full_window_nodes += stats.nodes.saturating_sub(full_nodes_before);
+                        profile_full_window_elapsed_us += start.elapsed().as_micros();
+                    }
                     if stats.stop {
                         break full_score;
                     }
@@ -581,7 +612,7 @@ impl AlphaBetaSearcher {
             coverage.remove_move(candidate.move_);
             caches.restore_snapshot(&snapshot);
             if stats.stop {
-                if let Some(start) = profile_start {
+                if profile_root_candidate {
                     stats.root_candidates.push(RootCandidateProfile {
                         index,
                         move_: candidate.move_,
@@ -593,11 +624,18 @@ impl AlphaBetaSearcher {
                         attempt_depth_milli: (attempt_depth * 1000.0).round() as i32,
                         score,
                         nodes: stats.nodes.saturating_sub(profile_nodes_before),
-                        elapsed_us: start.elapsed().as_micros(),
+                        elapsed_us: profile_start
+                            .map(|start| start.elapsed().as_micros())
+                            .unwrap_or_default(),
                         alpha_before: profile_alpha_before,
                         alpha_after: alpha,
                         beta,
                         reason: "stop",
+                        zero_window_nodes: profile_zero_window_nodes,
+                        zero_window_elapsed_us: profile_zero_window_elapsed_us,
+                        full_window_nodes: profile_full_window_nodes,
+                        full_window_elapsed_us: profile_full_window_elapsed_us,
+                        pvs_research: profile_pvs_research,
                     });
                 }
                 break;
@@ -615,7 +653,10 @@ impl AlphaBetaSearcher {
             }
             let root_win = options.root && score >= WIN;
             let beta_cutoff = alpha >= beta;
-            if let Some(start) = profile_start {
+            let profile_elapsed_us = profile_start
+                .map(|start| start.elapsed().as_micros())
+                .unwrap_or_default();
+            if profile_root_candidate {
                 let reason = if root_win {
                     "root_win"
                 } else if beta_cutoff {
@@ -636,11 +677,16 @@ impl AlphaBetaSearcher {
                     attempt_depth_milli: (attempt_depth * 1000.0).round() as i32,
                     score,
                     nodes: stats.nodes.saturating_sub(profile_nodes_before),
-                    elapsed_us: start.elapsed().as_micros(),
+                    elapsed_us: profile_elapsed_us,
                     alpha_before: profile_alpha_before,
                     alpha_after: alpha,
                     beta,
                     reason,
+                    zero_window_nodes: profile_zero_window_nodes,
+                    zero_window_elapsed_us: profile_zero_window_elapsed_us,
+                    full_window_nodes: profile_full_window_nodes,
+                    full_window_elapsed_us: profile_full_window_elapsed_us,
+                    pvs_research: profile_pvs_research,
                 });
             }
             if root_win {
