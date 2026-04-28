@@ -9,8 +9,9 @@ use std::time::Instant;
 use serde::Serialize;
 
 use rust_gomoku::{
-    load_default_config, move_to_xy, xy_to_move, Board, EngineConfig, RootSearcher, RootTrace,
-    SearchLimits, SearchResult, Side, BLACK, BOARD_SIZE, EMPTY, WHITE,
+    apply_engine_profile, load_default_config, move_to_xy, xy_to_move, Board, EngineConfig,
+    EngineProfile, RootSearcher, RootTrace, SearchLimits, SearchResult, Side, BLACK, BOARD_SIZE,
+    EMPTY, WHITE,
 };
 
 const DEFAULT_ADDR: &str = "127.0.0.1:7878";
@@ -146,6 +147,21 @@ impl GameState {
     fn search_limits(&self) -> SearchLimits {
         SearchLimits::fixed_from_config(&self.config)
     }
+
+    fn set_profile(&mut self, profile: EngineProfile) {
+        apply_engine_profile(&mut self.config, profile);
+        self.error = None;
+        self.last_result = None;
+        self.last_trace = None;
+        self.last_search_ms = None;
+        self.status = format!(
+            "已切换到 {} 模式，当前棋局不变，下一次引擎思考生效。",
+            match profile {
+                EngineProfile::Base => "Base",
+                EngineProfile::Fast => "Fast",
+            }
+        );
+    }
 }
 
 #[derive(Serialize)]
@@ -200,10 +216,14 @@ struct TraceResponse {
     overlap_ab_cancelled: bool,
     overlap_wait_ms: Option<f64>,
     tt_snapshot_ms: Option<f64>,
+    fast_history_ordering: bool,
+    killer_hits: usize,
+    history_hits: usize,
 }
 
 #[derive(Serialize)]
 struct ParamsResponse {
+    profile: &'static str,
     depth: i32,
     width: usize,
     compute_vcf: bool,
@@ -212,6 +232,7 @@ struct ParamsResponse {
     compute_vct: bool,
     root_vct_depth: i32,
     overlap_vct_alphabeta: bool,
+    fast_history_ordering: bool,
     static_board: bool,
     dynamic_board_margin: i32,
 }
@@ -242,6 +263,9 @@ fn snapshot_state(state: &GameState) -> StateResponse {
         overlap_ab_cancelled: trace.overlap_ab_cancelled,
         overlap_wait_ms: trace.overlap_wait_ms,
         tt_snapshot_ms: trace.tt_snapshot_ms,
+        fast_history_ordering: trace.fast_history_ordering,
+        killer_hits: trace.killer_hits,
+        history_hits: trace.history_hits,
     });
     let limits = state.search_limits();
     StateResponse {
@@ -274,6 +298,7 @@ fn snapshot_state(state: &GameState) -> StateResponse {
         last_result,
         last_trace,
         params: ParamsResponse {
+            profile: state.config.profile.as_str(),
             depth: limits.max_depth,
             width: limits.root_width,
             compute_vcf: state.config.runtime.compute_vcf,
@@ -282,6 +307,7 @@ fn snapshot_state(state: &GameState) -> StateResponse {
             compute_vct: state.config.runtime.compute_vct,
             root_vct_depth: state.config.runtime.root_vct_depth,
             overlap_vct_alphabeta: state.config.runtime.overlap_vct_alphabeta,
+            fast_history_ordering: state.config.runtime.fast_history_ordering,
             static_board: state.config.runtime.static_board,
             dynamic_board_margin: state.config.runtime.dynamic_board_margin,
         },
@@ -361,6 +387,20 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameState>>) {
                 } else {
                     game.error = None;
                     undo_turn(&mut game);
+                }
+            }
+            json_response(&snapshot_state(&state.lock().expect("state lock")))
+        }
+        ("POST", "/profile") => {
+            let profile = query_param(query, "value").and_then(|value| value.parse().ok());
+            {
+                let mut game = state.lock().expect("state lock");
+                if game.engine_thinking {
+                    game.error = Some("引擎思考中，暂不能切换模式。".to_string());
+                } else if let Some(profile) = profile {
+                    game.set_profile(profile);
+                } else {
+                    game.error = Some("未知模式，请选择 base 或 fast。".to_string());
                 }
             }
             json_response(&snapshot_state(&state.lock().expect("state lock")))
@@ -589,6 +629,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
       grid-template-columns: 1fr 1fr;
       gap: 12px;
     }
+    .profile-switch {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
     .actions {
       display: grid;
       grid-template-columns: 1fr;
@@ -615,6 +660,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
     button.primary { background: linear-gradient(180deg, #ead2a2, #c99b5a); }
     button.secondary { background: linear-gradient(180deg, #e7ddc8, #c9b188); }
+    button.active {
+      background: linear-gradient(180deg, #5c8c73, #27664f);
+      color: #fff8e8;
+      border-color: rgba(15, 76, 57, .58);
+    }
     button.warn {
       background: linear-gradient(180deg, #efe0ca, #d4a972);
       color: #562018;
@@ -667,10 +717,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <button class="primary" onclick="newGame('black')">执黑</button>
           <button class="primary" onclick="newGame('white')">执白</button>
         </div>
+        <div class="profile-switch">
+          <button id="profile-base" class="secondary" onclick="setProfile('base')">Base</button>
+          <button id="profile-fast" class="secondary" onclick="setProfile('fast')">Fast</button>
+        </div>
         <div class="actions">
           <button class="warn" onclick="undo()">悔棋</button>
         </div>
-        <div class="hint">棋盘会自动刷新；点击“执黑/执白”会按对应颜色重新开局。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
+        <div class="hint">棋盘会自动刷新；点击“执黑/执白”会按对应颜色重新开局。Base/Fast 可在引擎未思考时切换，只影响下一次引擎思考。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
       </div>
       <div class="kv" id="info"></div>
     </aside>
@@ -689,6 +743,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
     function refresh() { api('/state').catch(showError); }
     function newGame(side) { api('/new?side=' + side).catch(showError); }
+    function setProfile(profile) { api('/profile?value=' + profile).catch(showError); }
     function restartSameSide() {
       const side = state && state.human_side === -1 ? 'white' : 'black';
       newGame(side);
@@ -787,11 +842,20 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const r = state.last_result;
       const t = state.last_trace;
       const p = state.params;
+      const baseButton = document.getElementById('profile-base');
+      const fastButton = document.getElementById('profile-fast');
+      if (baseButton && fastButton) {
+        baseButton.className = 'secondary' + (p.profile === 'base' ? ' active' : '');
+        fastButton.className = 'secondary' + (p.profile === 'fast' ? ' active' : '');
+        baseButton.disabled = !!state.engine_thinking;
+        fastButton.disabled = !!state.engine_thinking;
+      }
       const rows = [
         ['你执', sideName(state.human_side)],
         ['轮到', sideName(state.side_to_move)],
         ['胜者', sideName(state.winner)],
         ['手数', state.move_count],
+        ['引擎模式', `${p.profile === 'fast' ? 'Fast' : 'Base'}${p.fast_history_ordering ? ' / history+killer' : ''}`],
         ['搜索参数', `d${p.depth} / w${p.width}`],
         ['VCF/VCT', `${p.compute_vcf ? 'VCF' + p.root_vcf_depth : 'VCF off'} / ${p.compute_vct ? 'VCT' + p.root_vct_depth : 'VCT off'}`],
         ['Overlap VCT/AB', yesNo(p.overlap_vct_alphabeta)],
@@ -801,6 +865,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         ['VCT 使用/触发', t ? `${yesNo(t.used_vct)} / ${yesNo(t.vct_triggered)}` : '-'],
         ['VCT 结果/耗时', t ? `${yesNo(t.vct_found)} / ${t.vct_ms == null ? '-' : t.vct_ms.toFixed(3) + ' ms'}` : '-'],
         ['AB 耗时', t && t.alphabeta_ms != null ? `${t.alphabeta_ms.toFixed(3)} ms` : '-'],
+        ['Fast ordering', t ? `${yesNo(t.fast_history_ordering)} / killer ${t.killer_hits}, history ${t.history_hits}` : '-'],
         ['Overlap', t ? `${yesNo(t.overlap_used)} / AB ${t.overlap_ab_ms == null ? '-' : t.overlap_ab_ms.toFixed(3) + ' ms'}` : '-'],
         ['Overlap 等待/TT', t ? `${t.overlap_wait_ms == null ? '-' : t.overlap_wait_ms.toFixed(3) + ' ms'} / ${t.tt_snapshot_ms == null ? '-' : t.tt_snapshot_ms.toFixed(3) + ' ms'}` : '-'],
       ];
