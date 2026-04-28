@@ -10,6 +10,8 @@
 - root VCF、root-only VCT 触发/验证/trace。
 - Gomocup stdin/stdout 引擎入口和本地 Web GUI。
 - Rust/reference 差分、Rust/reference 对战、base/fast 对战和同局面 benchmark 脚手架。
+- 非 root 候选排序成本优化：保持原排序 key 不变，减少 `getmi` 和候选复制开销。
+- fast profile 默认开启第三版 history/killer ordering：只在静态排序同组内调整安静着法顺序，base 不受影响。
 - 仓库内保留 `opponent/zhou` 作为轻量对手；完整 Python reference 不随仓库提交。
 
 不作为默认路径：
@@ -43,13 +45,14 @@ GUI 入口为了降低手动对局体感等待，默认单独开启 `overlap_vct
 | TT bucket bits | `20` |
 | `compute_vcf` / `compute_vct` | 开启 |
 | `overlap_vct_alphabeta` | 关闭，GUI 入口单独开启 |
+| `fast_history_ordering` | base 关闭，fast 开启 |
 | `nonroot_vcf` | 关闭 |
 | `static_board` | 开启 |
 | `dynamic_board_margin` | `4` |
 
 与 Python reference 严格差分或复现实验时，通常显式使用 `depth=6,width=20,root_vct_depth=4`。
 
-`--profile fast` 保留为实验入口；当前默认行为不应依赖 fast profile 才启用关键修复。新的激进优化应通过独立开关、分支或明确参数进入。
+默认 profile 是 `base`，用于守住 classic 语义和 reference 差分。`--profile fast` 当前会默认开启 `fast_history_ordering`；如需对照可用 `--no-fast-history-ordering` 关闭。
 
 ## Reference 路径
 
@@ -98,6 +101,7 @@ cargo run --release --bin gomocup_engine
 target/release/gomocup_engine --depth 8 --width 40
 target/release/gomocup_engine --depth 6 --width 20 --root-profile
 target/release/gomocup_engine --tt-bits 22
+target/release/gomocup_engine --profile fast
 ```
 
 常用 `INFO`：
@@ -114,6 +118,7 @@ target/release/gomocup_engine --tt-bits 22
 - `INFO compute_vct 0|1`
 - `INFO root_vct_depth N`
 - `INFO vct_strict_and_memo_key 0|1`
+- `INFO fast_history_ordering 0|1`
 - `INFO nonroot_vcf 0|1`
 - `INFO overlap_vct_alphabeta 0|1`
 - `INFO tt_bits N`
@@ -179,6 +184,6 @@ tests/               Rust 自动测试
 ## 近期重点
 
 1. 继续扩大 reference/Rust 差分覆盖。
-2. 针对真实慢手优化 VCT miss 和 alphabeta 长尾。
-3. 继续验证 `vct_strict_and_memo_key=true` 在更大局面集上的稳定性。
+2. 针对真实慢手优化 VCT miss 和 alphabeta 长尾，优先寻找能稳定压低 p95/max 的方案。
+3. 继续扩大 fast profile 的 fast vs base 对战覆盖，确认默认开启的 history/killer ordering 在更大样本下胜率不低于 base。
 4. 所有性能实验都要同时报告正确性、耗时、nodes、move/score/trace 是否变化。

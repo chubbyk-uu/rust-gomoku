@@ -2,12 +2,14 @@ use rust_gomoku::{
     adjust_loaded_parameters, bucket_for_lines, default_eval_para, line_backend_name,
     load_config_for_profile, load_default_config, xy_to_move, Board, EngineProfile, Line,
     PackedShape, SearchLimits, ShapeLabel, BLACK, BOARD_SIZE, DEFAULT_DYNAMIC_BOARD_MARGIN,
-    DEFAULT_ENGINE_PROFILE, DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_OVERLAP_VCT_ALPHABETA,
-    DEFAULT_ROOT_PROFILE, DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH,
-    DEFAULT_SEARCH_WIDTH, DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
-    DEFAULT_VCF_MULTI_REPLY, DEFAULT_VCT_STRICT_AND_MEMO_KEY,
-    DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH, DIAGONAL_DOWN, DIAGONAL_UP, DIRECTION_IDS, DOUBLE_SHAPE,
-    HORIZONTAL, VERTICAL,
+    DEFAULT_ENGINE_PROFILE, DEFAULT_FAST_HISTORY_BONUS_CAP, DEFAULT_FAST_HISTORY_BONUS_SCALE,
+    DEFAULT_FAST_HISTORY_ORDERING, DEFAULT_FAST_KILLER_BONUS,
+    DEFAULT_FAST_PROFILE_HISTORY_ORDERING, DEFAULT_OPPONENT_VCF_DEPTH,
+    DEFAULT_OVERLAP_VCT_ALPHABETA, DEFAULT_ROOT_PROFILE, DEFAULT_ROOT_VCF_DEPTH,
+    DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
+    DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH, DEFAULT_VCF_MULTI_REPLY,
+    DEFAULT_VCT_STRICT_AND_MEMO_KEY, DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH, DIAGONAL_DOWN,
+    DIAGONAL_UP, DIRECTION_IDS, DOUBLE_SHAPE, HORIZONTAL, VERTICAL,
 };
 
 #[test]
@@ -82,14 +84,32 @@ fn runtime_defaults_match_rust_policy() {
         config.runtime.overlap_vct_alphabeta,
         DEFAULT_OVERLAP_VCT_ALPHABETA
     );
+    assert_eq!(
+        config.runtime.fast_history_ordering,
+        DEFAULT_FAST_HISTORY_ORDERING
+    );
+    assert_eq!(config.runtime.fast_killer_bonus, DEFAULT_FAST_KILLER_BONUS);
+    assert_eq!(
+        config.runtime.fast_history_bonus_scale,
+        DEFAULT_FAST_HISTORY_BONUS_SCALE
+    );
+    assert_eq!(
+        config.runtime.fast_history_bonus_cap,
+        DEFAULT_FAST_HISTORY_BONUS_CAP
+    );
     assert_eq!(config.runtime.root_profile, DEFAULT_ROOT_PROFILE);
 }
 
 #[test]
-fn fast_profile_currently_matches_base_except_profile() {
+fn fast_profile_enables_only_fast_runtime_defaults() {
     let base = load_default_config();
     let mut fast = load_config_for_profile(EngineProfile::Fast);
     assert_eq!(fast.profile, EngineProfile::Fast);
+    assert_eq!(
+        fast.runtime.fast_history_ordering,
+        DEFAULT_FAST_PROFILE_HISTORY_ORDERING
+    );
+    fast.runtime.fast_history_ordering = base.runtime.fast_history_ordering;
     fast.profile = EngineProfile::Base;
     assert_eq!(fast, base);
 }

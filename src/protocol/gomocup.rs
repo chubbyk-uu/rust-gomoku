@@ -320,6 +320,12 @@ impl GomocupProtocol {
                     self.searcher = None;
                 }
             }
+            "fast_history_ordering" => {
+                if let Some(parsed) = parse_one::<i32>(value) {
+                    self.config.runtime.fast_history_ordering = parsed != 0;
+                    self.searcher = None;
+                }
+            }
             "tt_bits" => {
                 if let Some(parsed) = parse_one::<u32>(value) {
                     self.tt_bits = Some(parsed);

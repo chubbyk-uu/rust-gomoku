@@ -281,6 +281,16 @@ fn protocol_info_overlap_vct_alphabeta_updates_runtime() {
 }
 
 #[test]
+fn protocol_info_fast_history_ordering_updates_runtime() {
+    let mut proto = proto();
+    assert!(!proto.config.runtime.fast_history_ordering);
+    proto.handle_line("INFO fast_history_ordering 1");
+    assert!(proto.config.runtime.fast_history_ordering);
+    proto.handle_line("INFO fast_history_ordering 0");
+    assert!(!proto.config.runtime.fast_history_ordering);
+}
+
+#[test]
 fn protocol_info_tt_bits_updates_engine_option() {
     let mut proto = proto();
     proto.handle_line("INFO tt_bits 24");
@@ -294,12 +304,14 @@ fn protocol_info_profile_updates_config_profile() {
     proto.handle_line("INFO profile fast");
     assert_eq!(proto.config.profile, EngineProfile::Fast);
     assert!(proto.config.runtime.vcf_multi_reply);
+    assert!(proto.config.runtime.fast_history_ordering);
     proto.handle_line("INFO profile classic");
     assert_eq!(proto.config.profile, EngineProfile::Base);
     assert_eq!(
         proto.config.runtime.vcf_multi_reply,
         DEFAULT_VCF_MULTI_REPLY
     );
+    assert!(!proto.config.runtime.fast_history_ordering);
 }
 
 #[test]

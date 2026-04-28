@@ -20,6 +20,11 @@ pub const DEFAULT_ROOT_VCT_DEPTH: i32 = 6;
 pub const DEFAULT_VCT_STRICT_AND_MEMO_KEY: bool = true;
 pub const DEFAULT_ROOT_PROFILE: bool = false;
 pub const DEFAULT_OVERLAP_VCT_ALPHABETA: bool = false;
+pub const DEFAULT_FAST_HISTORY_ORDERING: bool = false;
+pub const DEFAULT_FAST_PROFILE_HISTORY_ORDERING: bool = true;
+pub const DEFAULT_FAST_KILLER_BONUS: i32 = 512;
+pub const DEFAULT_FAST_HISTORY_BONUS_SCALE: i32 = 4;
+pub const DEFAULT_FAST_HISTORY_BONUS_CAP: i32 = 1_024;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EvalBucketTables {
@@ -81,6 +86,10 @@ pub struct RuntimeOptions {
     pub root_vct_depth: i32,
     pub vct_strict_and_memo_key: bool,
     pub overlap_vct_alphabeta: bool,
+    pub fast_history_ordering: bool,
+    pub fast_killer_bonus: i32,
+    pub fast_history_bonus_scale: i32,
+    pub fast_history_bonus_cap: i32,
     /// Optional root candidate timing probe. Defaults to off and must not
     /// affect search decisions.
     pub root_profile: bool,
@@ -143,9 +152,11 @@ pub fn apply_engine_profile(config: &mut EngineConfig, profile: EngineProfile) {
     match profile {
         EngineProfile::Base => {
             config.runtime.vcf_multi_reply = DEFAULT_VCF_MULTI_REPLY;
+            config.runtime.fast_history_ordering = DEFAULT_FAST_HISTORY_ORDERING;
         }
         EngineProfile::Fast => {
             config.runtime.vcf_multi_reply = true;
+            config.runtime.fast_history_ordering = DEFAULT_FAST_PROFILE_HISTORY_ORDERING;
         }
     }
 }
@@ -187,6 +198,10 @@ fn default_runtime_options(para: &[f64]) -> RuntimeOptions {
         root_vct_depth: DEFAULT_ROOT_VCT_DEPTH,
         vct_strict_and_memo_key: DEFAULT_VCT_STRICT_AND_MEMO_KEY,
         overlap_vct_alphabeta: DEFAULT_OVERLAP_VCT_ALPHABETA,
+        fast_history_ordering: DEFAULT_FAST_HISTORY_ORDERING,
+        fast_killer_bonus: DEFAULT_FAST_KILLER_BONUS,
+        fast_history_bonus_scale: DEFAULT_FAST_HISTORY_BONUS_SCALE,
+        fast_history_bonus_cap: DEFAULT_FAST_HISTORY_BONUS_CAP,
         root_profile: DEFAULT_ROOT_PROFILE,
     }
 }

@@ -13,6 +13,9 @@ fn main() {
     if let Some(root_profile) = args.root_profile {
         config.runtime.root_profile = root_profile;
     }
+    if let Some(fast_history_ordering) = args.fast_history_ordering {
+        config.runtime.fast_history_ordering = fast_history_ordering;
+    }
     let search_limits = if args.depth.is_some() || args.width.is_some() {
         let fixed = SearchLimits::fixed_from_config(&config);
         Some(SearchLimits {
@@ -47,6 +50,7 @@ struct CliArgs {
     depth: Option<i32>,
     width: Option<usize>,
     root_profile: Option<bool>,
+    fast_history_ordering: Option<bool>,
     tt_bits: Option<u32>,
     profile: EngineProfile,
 }
@@ -55,6 +59,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut depth = None;
     let mut width = None;
     let mut root_profile = None;
+    let mut fast_history_ordering = None;
     let mut tt_bits = None;
     let mut profile = EngineProfile::Base;
     let mut args = std::env::args().skip(1);
@@ -76,6 +81,12 @@ fn parse_args() -> Result<CliArgs, String> {
             "--no-root-profile" => {
                 root_profile = Some(false);
             }
+            "--fast-history-ordering" => {
+                fast_history_ordering = Some(true);
+            }
+            "--no-fast-history-ordering" => {
+                fast_history_ordering = Some(false);
+            }
             "--tt-bits" => {
                 if let Some(value) = args.next().and_then(|value| value.parse::<u32>().ok()) {
                     tt_bits = Some(value);
@@ -94,6 +105,7 @@ fn parse_args() -> Result<CliArgs, String> {
         depth,
         width,
         root_profile,
+        fast_history_ordering,
         tt_bits,
         profile,
     })

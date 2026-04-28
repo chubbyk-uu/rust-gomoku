@@ -66,6 +66,7 @@ struct ProbeArgs {
     tt_bits: Option<u32>,
     root_profile: bool,
     vct_strict_and_memo_key: Option<bool>,
+    fast_history_ordering: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -109,6 +110,11 @@ struct TraceOutput {
     vct_stats: Option<VctStatsOutput>,
     alphabeta_ms: Option<f64>,
     root_profile_depths: usize,
+    fast_history_ordering: bool,
+    killer_hits: usize,
+    history_hits: usize,
+    killer_updates: usize,
+    history_updates: usize,
 }
 
 #[derive(Serialize)]
@@ -268,6 +274,7 @@ fn parse_args() -> Result<ProbeArgs, String> {
     let mut tt_bits = None;
     let mut root_profile = false;
     let mut vct_strict_and_memo_key = None;
+    let mut fast_history_ordering = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--case" => {
@@ -327,6 +334,12 @@ fn parse_args() -> Result<ProbeArgs, String> {
             "--no-vct-strict-and-memo-key" => {
                 vct_strict_and_memo_key = Some(false);
             }
+            "--fast-history-ordering" => {
+                fast_history_ordering = Some(true);
+            }
+            "--no-fast-history-ordering" => {
+                fast_history_ordering = Some(false);
+            }
             _ => {}
         }
     }
@@ -342,6 +355,7 @@ fn parse_args() -> Result<ProbeArgs, String> {
         tt_bits,
         root_profile,
         vct_strict_and_memo_key,
+        fast_history_ordering,
     })
 }
 
@@ -413,6 +427,9 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
     if let Some(vct_strict_and_memo_key) = args.vct_strict_and_memo_key {
         config.runtime.vct_strict_and_memo_key = vct_strict_and_memo_key;
     }
+    if let Some(fast_history_ordering) = args.fast_history_ordering {
+        config.runtime.fast_history_ordering = fast_history_ordering;
+    }
     let default_limits = SearchLimits::fixed_from_config(&config);
     let limits = SearchLimits {
         max_depth: args.depth.unwrap_or(default_limits.max_depth),
@@ -460,6 +477,11 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
             vct_stats: trace.vct_stats.as_ref().map(vct_stats_output),
             alphabeta_ms: trace.alphabeta_ms,
             root_profile_depths: trace.root_profiles.len(),
+            fast_history_ordering: trace.fast_history_ordering,
+            killer_hits: trace.killer_hits,
+            history_hits: trace.history_hits,
+            killer_updates: trace.killer_updates,
+            history_updates: trace.history_updates,
         },
     })
 }

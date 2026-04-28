@@ -26,6 +26,7 @@ base 是默认主线，优先行为一致和可回归。
 - 固定局面、固定深度、固定宽度下，默认不改变 best move、score、depth、tactical trace。
 - 当前 root 差分兼容模式下，默认也不改变 nodes。
 - 不擅自改变候选排序、TT 读写语义、VCF/VCT 触发顺序、fallback RNG。
+- 候选排序成本优化应优先保持排序 key 完全一致；改变排序策略属于 fast/实验，不应混入 base。
 - root tactical fast path 保持 VCF 优先于 VCT；VCT 只在 trigger 命中后运行。
 - 如果优化导致 base 固定 case 的 move/score/nodes 变化，必须停下来说明原因；除非用户明确批准，否则回退或转入实验分支。
 
@@ -33,6 +34,7 @@ base 是默认主线，优先行为一致和可回归。
 
 fast/profile 或实验分支用于尝试激进优化，但不能以棋力下降为代价。
 
+- 当前 `fast` profile 默认开启第三版 history/killer ordering；base 仍关闭。该策略只应通过 fast 路径使用，并保留 `--no-fast-history-ordering` / `INFO fast_history_ordering 0` 回退。
 - 可以尝试 TT 策略、现代 pruning/reduction/ordering/window、并行、线程池和 `unsafe` 热点优化。
 - 可以不等价 base 的固定局面结果，但必须保留可回退到 base 的路径。
 - fast 对 base 胜率不能低于 `50%`。

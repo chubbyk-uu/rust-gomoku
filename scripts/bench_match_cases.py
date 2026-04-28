@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import subprocess
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -51,6 +52,7 @@ def probe_command(
     width: int | None,
     tt_bits: int | None,
     root_profile: bool,
+    extra_args: list[str],
 ) -> list[str]:
     cmd = [
         binary,
@@ -67,6 +69,7 @@ def probe_command(
         cmd += ["--tt-bits", str(tt_bits)]
     if root_profile:
         cmd.append("--root-profile")
+    cmd.extend(extra_args)
     return cmd
 
 
@@ -79,6 +82,7 @@ def run_probe(
     width: int | None,
     tt_bits: int | None,
     root_profile: bool,
+    extra_args: list[str],
 ) -> dict[str, Any]:
     result = subprocess.run(
         probe_command(
@@ -89,6 +93,7 @@ def run_probe(
             width=width,
             tt_bits=tt_bits,
             root_profile=root_profile,
+            extra_args=extra_args,
         ),
         cwd=repo_root(),
         check=True,
@@ -110,6 +115,8 @@ def run_one_case(
     depth: int | None,
     width: int | None,
     root_profile: bool,
+    base_extra_args: list[str],
+    fast_extra_args: list[str],
 ) -> dict[str, Any]:
     base = run_probe(
         binary=binary,
@@ -119,6 +126,7 @@ def run_one_case(
         width=width,
         tt_bits=base_tt_bits,
         root_profile=root_profile,
+        extra_args=base_extra_args,
     )
     fast = run_probe(
         binary=binary,
@@ -128,6 +136,7 @@ def run_one_case(
         width=width,
         tt_bits=fast_tt_bits,
         root_profile=root_profile,
+        extra_args=fast_extra_args,
     )
     base_result = base["result"]
     fast_result = fast["result"]
@@ -219,6 +228,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth", type=int)
     parser.add_argument("--width", type=int)
     parser.add_argument("--root-profile", action="store_true")
+    parser.add_argument("--base-extra-arg", action="append", default=[])
+    parser.add_argument("--fast-extra-arg", action="append", default=[])
+    parser.add_argument("--base-extra-args", default="")
+    parser.add_argument("--fast-extra-args", default="")
     parser.add_argument("--output", type=Path, default=Path("/tmp/base_fast_case_bench.json"))
     return parser.parse_args()
 
@@ -229,6 +242,8 @@ def main() -> int:
     if not cases:
         raise SystemExit(f"no cases selected from {args.case_file}")
     binary = str(Path(args.binary).expanduser())
+    base_extra_args = [*shlex.split(args.base_extra_args), *args.base_extra_arg]
+    fast_extra_args = [*shlex.split(args.fast_extra_args), *args.fast_extra_arg]
     started = time.perf_counter()
     results: list[dict[str, Any]] = []
     jobs = max(1, args.jobs)
@@ -245,6 +260,8 @@ def main() -> int:
                 depth=args.depth,
                 width=args.width,
                 root_profile=args.root_profile,
+                base_extra_args=base_extra_args,
+                fast_extra_args=fast_extra_args,
             )
             results.append(result)
             print_progress(len(results), len(cases), result)
@@ -263,6 +280,8 @@ def main() -> int:
                     depth=args.depth,
                     width=args.width,
                     root_profile=args.root_profile,
+                    base_extra_args=base_extra_args,
+                    fast_extra_args=fast_extra_args,
                 ): index
                 for index, case in enumerate(cases)
             }
@@ -288,6 +307,8 @@ def main() -> int:
             "depth": args.depth,
             "width": args.width,
             "root_profile": args.root_profile,
+            "base_extra_args": base_extra_args,
+            "fast_extra_args": fast_extra_args,
         },
         "summary": summarize(results),
         "results": results,

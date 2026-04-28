@@ -8,11 +8,14 @@ use std::sync::{
 use std::time::Instant;
 
 use crate::board::{move_to_xy, Board};
-use crate::config::EngineConfig;
-use crate::constants::{HASHF_ALPHA, HASHF_BETA, HASHF_EXACT, INF, WIN};
+use crate::config::{EngineConfig, EngineProfile};
+use crate::constants::{BOARD_AREA, HASHF_ALPHA, HASHF_BETA, HASHF_EXACT, INF, WIN};
 use crate::eval::{evaluate_board, value_wide_compute, EvalCaches};
-use crate::search::movegen::{generate_candidates_with_coverage, CoverageTracker};
-use crate::search::ordering::order_candidates_owned;
+use crate::search::movegen::{generate_candidates_with_coverage, Candidate, CoverageTracker};
+use crate::search::ordering::{
+    is_quiet_ordering_candidate, order_candidates_fast_history_owned, order_candidates_owned,
+    NO_KILLER_MOVE, ORDERING_MAX_PLY,
+};
 use crate::search::{order_candidates_root_classic, TTEntry, TranspositionTable};
 use crate::threats::VCFSearcher;
 use crate::types::{Move, Side};
@@ -49,6 +52,11 @@ pub struct SearchStats {
     pub root_profile: bool,
     pub root_candidates: Vec<RootCandidateProfile>,
     pub cancel: Option<Arc<AtomicBool>>,
+    pub fast_history_ordering: bool,
+    pub killer_hits: usize,
+    pub history_hits: usize,
+    pub killer_updates: usize,
+    pub history_updates: usize,
 }
 
 impl Default for SearchStats {
@@ -65,6 +73,11 @@ impl Default for SearchStats {
             root_profile: false,
             root_candidates: Vec::new(),
             cancel: None,
+            fast_history_ordering: false,
+            killer_hits: 0,
+            history_hits: 0,
+            killer_updates: 0,
+            history_updates: 0,
         }
     }
 }
@@ -146,6 +159,8 @@ pub struct AlphaBetaSearcher {
     pub config: EngineConfig,
     pub tt: TranspositionTable,
     pub vcf: VCFSearcher,
+    killer_moves: [[Move; 2]; ORDERING_MAX_PLY],
+    history_scores: [[i32; BOARD_AREA]; 2],
 }
 
 impl AlphaBetaSearcher {
@@ -154,6 +169,8 @@ impl AlphaBetaSearcher {
             config,
             tt: TranspositionTable::default(),
             vcf: VCFSearcher::default(),
+            killer_moves: [[NO_KILLER_MOVE; 2]; ORDERING_MAX_PLY],
+            history_scores: [[0; BOARD_AREA]; 2],
         }
     }
 
@@ -162,7 +179,52 @@ impl AlphaBetaSearcher {
             config,
             tt,
             vcf: VCFSearcher::default(),
+            killer_moves: [[NO_KILLER_MOVE; 2]; ORDERING_MAX_PLY],
+            history_scores: [[0; BOARD_AREA]; 2],
         }
+    }
+
+    fn fast_history_ordering_enabled(&self) -> bool {
+        self.config.profile == EngineProfile::Fast && self.config.runtime.fast_history_ordering
+    }
+
+    fn side_index(side: Side) -> usize {
+        usize::from(side != 1)
+    }
+
+    fn record_fast_history_cutoff(
+        &mut self,
+        side: Side,
+        ply: i32,
+        depth: f64,
+        candidate: Candidate,
+        hostile_threat: bool,
+        stats: &mut SearchStats,
+    ) {
+        if !self.fast_history_ordering_enabled()
+            || !is_quiet_ordering_candidate(candidate, hostile_threat)
+        {
+            return;
+        }
+
+        let ply_index = (ply.max(0) as usize).min(ORDERING_MAX_PLY - 1);
+        let killers = &mut self.killer_moves[ply_index];
+        if killers[0] != candidate.move_ {
+            killers[1] = killers[0];
+            killers[0] = candidate.move_;
+            stats.killer_updates += 1;
+        }
+
+        let side_index = Self::side_index(side);
+        let move_index = candidate.move_ as usize;
+        let depth_units = (depth.max(1.0).round() as i32).max(1);
+        let scale = self.config.runtime.fast_history_bonus_scale.max(1);
+        let cap = self.config.runtime.fast_history_bonus_cap.max(1);
+        let bonus = (depth_units * depth_units).saturating_mul(scale).min(cap);
+        let current = self.history_scores[side_index][move_index];
+        let updated = current + bonus - (current * bonus.abs() / cap);
+        self.history_scores[side_index][move_index] = updated.clamp(0, cap);
+        stats.history_updates += 1;
     }
 
     pub fn nonroot_vcf_depth(depth: f64, root_depth: f64) -> i32 {
@@ -287,8 +349,27 @@ impl AlphaBetaSearcher {
         );
         let win_priority = generated.win_priority;
         let single_forcing = generated.single_forcing;
+        let hostile_threat = generated.hostile_threat;
+        let use_fast_history_ordering = self.fast_history_ordering_enabled() && !options.root;
         let mut ordered = if options.root {
             order_candidates_root_classic(board, &generated.candidates, side)
+        } else if use_fast_history_ordering {
+            let (ordered, ordering_stats) = order_candidates_fast_history_owned(
+                board,
+                generated.candidates,
+                side,
+                probe.best_move,
+                options.ply.max(0) as usize,
+                hostile_threat,
+                &self.killer_moves,
+                &self.history_scores,
+                self.config.runtime.fast_killer_bonus,
+                self.config.runtime.fast_history_bonus_cap,
+            );
+            stats.fast_history_ordering = true;
+            stats.killer_hits += ordering_stats.killer_hits;
+            stats.history_hits += ordering_stats.history_hits;
+            ordered
         } else {
             order_candidates_owned(board, generated.candidates, side, probe.best_move)
         };
@@ -544,6 +625,14 @@ impl AlphaBetaSearcher {
                 break;
             }
             if beta_cutoff {
+                self.record_fast_history_cutoff(
+                    side,
+                    options.ply,
+                    attempt_depth,
+                    candidate,
+                    hostile_threat,
+                    stats,
+                );
                 hash_flag = HASHF_BETA;
                 stats.cutoffs += 1;
                 break;
