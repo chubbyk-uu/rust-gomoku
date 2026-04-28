@@ -23,6 +23,7 @@
 
 - `overlap_vct_alphabeta`：VCF miss 后重叠 VCT 与 alphabeta 的实验开关。
 - `root_profile`：root candidate 计时诊断。
+- TT generation 观测：只用于诊断跨手 TT best-move hint 新旧比例，不影响 TT cutoff、replacement 或排序策略。
 
 GUI 入口为了降低手动对局体感等待，默认单独开启 `overlap_vct_alphabeta`；Gomocup、diff、case probe 和库默认仍保持关闭。
 
@@ -168,6 +169,8 @@ python3 scripts/bench_match_cases.py \
 ```
 
 `run_gomocup_match.py` 用于真实对战和棋力评估；`bench_match_cases.py` 用于同一批前缀局面的一手搜索对照。判断优化是否真的提速，应先看同局面 benchmark，再看对战胜率和长尾耗时。
+
+如需观察真实跨手 TT，可给 `run_gomocup_match.py` 加 `--reuse-engine-state`。默认对战脚本每手 `RESTART`，更适合公平复现；`--reuse-engine-state` 会保留 engine/searcher 状态，并把每手 `MESSAGE tt_generation current=... old=...` 汇总到 JSON 的 `tt_generation` 字段。
 
 ## 目录
 

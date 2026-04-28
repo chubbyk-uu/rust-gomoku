@@ -407,20 +407,26 @@ impl GomocupProtocol {
         let side = self.board.side_to_move();
         self.play_xy(x, y, side)
             .expect("selected protocol move is legal");
-        let mut responses = root_profile_messages(trace.as_ref());
+        let mut responses = trace_messages(trace.as_ref());
         responses.push(format!("{x},{y}"));
         responses
     }
 }
 
-fn root_profile_messages(trace: Option<&crate::search::RootTrace>) -> Vec<String> {
+fn trace_messages(trace: Option<&crate::search::RootTrace>) -> Vec<String> {
     let Some(trace) = trace else {
         return Vec::new();
     };
-    if trace.root_profiles.is_empty() {
-        return Vec::new();
-    }
     let mut messages = Vec::new();
+    if trace.tt_bestmove_current_generation > 0 || trace.tt_bestmove_old_generation > 0 {
+        messages.push(format!(
+            "MESSAGE tt_generation current={} old={}",
+            trace.tt_bestmove_current_generation, trace.tt_bestmove_old_generation
+        ));
+    }
+    if trace.root_profiles.is_empty() {
+        return messages;
+    }
     for depth in &trace.root_profiles {
         messages.push(format!(
             "MESSAGE root_profile depth={} elapsed_ms={:.3} nodes={} candidates={} stopped={} score={}",

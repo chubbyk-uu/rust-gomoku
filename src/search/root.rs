@@ -100,6 +100,8 @@ pub struct RootTrace {
     pub history_hits: usize,
     pub killer_updates: usize,
     pub history_updates: usize,
+    pub tt_bestmove_current_generation: usize,
+    pub tt_bestmove_old_generation: usize,
 }
 
 impl Default for RootTrace {
@@ -128,6 +130,8 @@ impl Default for RootTrace {
             history_hits: 0,
             killer_updates: 0,
             history_updates: 0,
+            tt_bestmove_current_generation: 0,
+            tt_bestmove_old_generation: 0,
         }
     }
 }
@@ -504,6 +508,7 @@ impl RootSearcher {
         recompute_all(board, &mut caches);
 
         self.alphabeta.config = self.config.clone();
+        self.alphabeta.advance_tt_generation();
         let mut best_move = None;
         let mut best_score = -INF;
         let mut total_nodes = 0_usize;
@@ -605,6 +610,8 @@ impl RootSearcher {
             trace.history_hits += stats.history_hits;
             trace.killer_updates += stats.killer_updates;
             trace.history_updates += stats.history_updates;
+            trace.tt_bestmove_current_generation += stats.tt_bestmove_current_generation;
+            trace.tt_bestmove_old_generation += stats.tt_bestmove_old_generation;
             if self.config.runtime.root_profile {
                 trace.root_profiles.push(RootDepthProfile {
                     depth,
@@ -740,6 +747,8 @@ impl RootSearcher {
         trace.history_hits = ab_result.trace.history_hits;
         trace.killer_updates = ab_result.trace.killer_updates;
         trace.history_updates = ab_result.trace.history_updates;
+        trace.tt_bestmove_current_generation = ab_result.trace.tt_bestmove_current_generation;
+        trace.tt_bestmove_old_generation = ab_result.trace.tt_bestmove_old_generation;
         self.last_trace = Some(trace);
         ab_result.result
     }

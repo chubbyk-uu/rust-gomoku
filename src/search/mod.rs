@@ -19,4 +19,4 @@ pub use root::{
     fallback_ai_move, new_classic_fallback_rng, ClassicFallbackRng, RootDepthProfile, RootSearcher,
     RootTrace, SearchLimits, SearchResult,
 };
-pub use tt::{ProbeResult, TTEntry, TranspositionTable};
+pub use tt::{ProbeResult, TTBestMoveHint, TTEntry, TranspositionTable};

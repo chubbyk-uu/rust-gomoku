@@ -17,6 +17,7 @@ pub struct TTEntry {
     pub depth: i32,
     pub priority: i32,
     pub best_move: Option<Move>,
+    pub generation: u16,
 }
 
 impl Default for TTEntry {
@@ -28,7 +29,27 @@ impl Default for TTEntry {
             depth: 0,
             priority: 0,
             best_move: None,
+            generation: 0,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TTBestMoveHint {
+    pub move_: Move,
+    pub depth: i32,
+    pub flag: u8,
+    pub generation: u16,
+}
+
+impl TTBestMoveHint {
+    fn from_entry(entry: TTEntry) -> Option<Self> {
+        entry.best_move.map(|move_| Self {
+            move_,
+            depth: entry.depth,
+            flag: entry.flag,
+            generation: entry.generation,
+        })
     }
 }
 
@@ -36,6 +57,7 @@ impl Default for TTEntry {
 pub struct ProbeResult {
     pub value: Option<i32>,
     pub best_move: Option<Move>,
+    pub best_move_hint: Option<TTBestMoveHint>,
     pub hit: bool,
     pub has_window: bool,
     pub window_alpha: i32,
@@ -47,6 +69,7 @@ impl Default for ProbeResult {
         Self {
             value: None,
             best_move: None,
+            best_move_hint: None,
             hit: false,
             has_window: false,
             window_alpha: 0,
@@ -132,6 +155,7 @@ const DEPTH_SHIFT: u64 = 38;
 const PRIORITY_SHIFT: u64 = 22;
 const BEST_MOVE_SHIFT: u64 = 14;
 const BEST_MOVE_NONE: u8 = 0xFF;
+const GENERATION_MASK: u16 = 0x3FFF;
 
 fn pack_entry(entry: TTEntry) -> u64 {
     let value = (entry.value as i16 as u16 as u64) << VALUE_SHIFT;
@@ -143,7 +167,8 @@ fn pack_entry(entry: TTEntry) -> u64 {
         .and_then(|move_| u8::try_from(move_).ok())
         .unwrap_or(BEST_MOVE_NONE);
     let best_move = u64::from(best_move) << BEST_MOVE_SHIFT;
-    value | flag | depth | priority | best_move
+    let generation = u64::from(entry.generation & GENERATION_MASK);
+    value | flag | depth | priority | best_move | generation
 }
 
 fn unpack_entry(key: u64, data: u64) -> TTEntry {
@@ -152,6 +177,7 @@ fn unpack_entry(key: u64, data: u64) -> TTEntry {
     let depth = ((data >> DEPTH_SHIFT) & 0xFF) as i32;
     let priority = ((data >> PRIORITY_SHIFT) & 0xFFFF) as i32;
     let best_move = ((data >> BEST_MOVE_SHIFT) & 0xFF) as u8;
+    let generation = (data & u64::from(GENERATION_MASK)) as u16;
     TTEntry {
         key,
         value,
@@ -159,6 +185,7 @@ fn unpack_entry(key: u64, data: u64) -> TTEntry {
         depth,
         priority,
         best_move: (best_move != BEST_MOVE_NONE).then_some(best_move as Move),
+        generation,
     }
 }
 
@@ -222,15 +249,18 @@ impl TranspositionTable {
 
     pub fn probe(&self, key: u64, depth: i32, alpha: i32, beta: i32) -> ProbeResult {
         let mut fallback_best_move = None;
+        let mut fallback_best_move_hint = None;
         for entry in self.bucket(key) {
             if entry.key != key {
                 continue;
             }
+            let best_move_hint = TTBestMoveHint::from_entry(entry);
             if entry.depth >= depth {
                 if entry.flag == HASHF_EXACT {
                     return ProbeResult {
                         value: Some(entry.value),
                         best_move: entry.best_move,
+                        best_move_hint,
                         hit: true,
                         ..ProbeResult::default()
                     };
@@ -240,6 +270,7 @@ impl TranspositionTable {
                         return ProbeResult {
                             value: Some(entry.value),
                             best_move: None,
+                            best_move_hint,
                             hit: true,
                             ..ProbeResult::default()
                         };
@@ -247,6 +278,7 @@ impl TranspositionTable {
                     return ProbeResult {
                         value: None,
                         best_move: entry.best_move,
+                        best_move_hint,
                         hit: false,
                         has_window: true,
                         window_alpha: alpha,
@@ -258,6 +290,7 @@ impl TranspositionTable {
                         return ProbeResult {
                             value: Some(entry.value),
                             best_move: None,
+                            best_move_hint,
                             hit: true,
                             ..ProbeResult::default()
                         };
@@ -265,6 +298,7 @@ impl TranspositionTable {
                     return ProbeResult {
                         value: None,
                         best_move: entry.best_move,
+                        best_move_hint,
                         hit: false,
                         has_window: true,
                         window_alpha: alpha.max(entry.value),
@@ -273,10 +307,12 @@ impl TranspositionTable {
                 }
             }
             fallback_best_move = entry.best_move;
+            fallback_best_move_hint = best_move_hint;
         }
         ProbeResult {
             value: None,
             best_move: fallback_best_move,
+            best_move_hint: fallback_best_move_hint,
             hit: false,
             ..ProbeResult::default()
         }

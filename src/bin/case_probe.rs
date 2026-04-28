@@ -115,6 +115,8 @@ struct TraceOutput {
     history_hits: usize,
     killer_updates: usize,
     history_updates: usize,
+    tt_bestmove_current_generation: usize,
+    tt_bestmove_old_generation: usize,
 }
 
 #[derive(Serialize)]
@@ -482,6 +484,8 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
             history_hits: trace.history_hits,
             killer_updates: trace.killer_updates,
             history_updates: trace.history_updates,
+            tt_bestmove_current_generation: trace.tt_bestmove_current_generation,
+            tt_bestmove_old_generation: trace.tt_bestmove_old_generation,
         },
     })
 }

@@ -606,6 +606,7 @@ fn root_search_matches_expected_value_on_simple_tt_alpha_seed() {
         depth: 4,
         priority: board.move_count() as i32 * 10 + 4,
         best_move: Some(xy_to_move(7, 8).unwrap()),
+        generation: 0,
     });
 
     let result = searcher.search(
@@ -663,6 +664,7 @@ fn root_searcher_and_alphabeta_share_tt_storage() {
         depth: 3,
         priority: 13,
         best_move: Some(xy_to_move(7, 4).unwrap()),
+        generation: 0,
     });
 
     let probe = searcher

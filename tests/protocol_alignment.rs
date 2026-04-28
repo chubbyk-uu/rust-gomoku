@@ -18,8 +18,8 @@ fn proto() -> GomocupProtocol {
 }
 
 fn assert_xy(response: &[String]) {
-    assert_eq!(response.len(), 1);
-    let parts: Vec<_> = response[0].split(',').collect();
+    let move_response = response.last().expect("response has final move");
+    let parts: Vec<_> = move_response.split(',').collect();
     assert_eq!(parts.len(), 2);
     let x: usize = parts[0].parse().unwrap();
     let y: usize = parts[1].parse().unwrap();

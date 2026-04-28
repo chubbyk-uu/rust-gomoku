@@ -49,7 +49,7 @@ pub use search::{
     order_candidates_root_classic, ordering_backend_name, rootbonus, terminal_score,
     AlphaBetaSearcher, Candidate, CandidateGenerationResult, ClassicFallbackRng, ProbeResult,
     RootCandidateProfile, RootDepthProfile, RootSearcher, RootTrace, SearchLimits, SearchOptions,
-    SearchResult, SearchStats, TTEntry, TranspositionTable,
+    SearchResult, SearchStats, TTBestMoveHint, TTEntry, TranspositionTable,
 };
 pub use threats::{
     broken_four_reply, forcing_threat_moves, has_open_four, has_vct_trigger, threat_moves,

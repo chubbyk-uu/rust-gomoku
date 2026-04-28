@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import select
 import shlex
 import shutil
@@ -50,6 +51,7 @@ OPENING_SETS = {
 }
 
 RESERVED_WINNERS = {"draw", "timeout"}
+MESSAGE_RE = re.compile(r"^MESSAGE\s+(\S+)(?:\s+(.*))?$", re.IGNORECASE)
 
 
 def repo_root() -> Path:
@@ -125,6 +127,27 @@ def check_command(command: str, cwd: Path, label: str) -> None:
         raise SystemExit(f"{label}: executable not found: {argv[0]}")
 
 
+def parse_engine_message(text: str) -> dict[str, Any]:
+    match = MESSAGE_RE.match(text)
+    if not match:
+        return {"kind": "raw", "text": text}
+    kind = match.group(1)
+    fields: dict[str, Any] = {"kind": kind}
+    rest = match.group(2) or ""
+    for token in rest.split():
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        try:
+            fields[key] = int(value)
+        except ValueError:
+            try:
+                fields[key] = float(value)
+            except ValueError:
+                fields[key] = value
+    return fields
+
+
 class GomocupEngine:
     def __init__(
         self,
@@ -133,11 +156,13 @@ class GomocupEngine:
         command: str,
         cwd: Path,
         info: list[tuple[str, str]],
+        restart_each_move: bool,
     ) -> None:
         self.name = name
         self.command = command
         self.cwd = cwd
         self.info = info
+        self.restart_each_move = restart_each_move
         self.proc: subprocess.Popen[str] | None = None
 
     def start(self) -> None:
@@ -172,11 +197,16 @@ class GomocupEngine:
         self.proc.stdin.write(line + "\n")
         self.proc.stdin.flush()
 
-    def read(self, timeout_sec: float | None = None) -> str:
+    def read_with_messages(
+        self,
+        timeout_sec: float | None = None,
+    ) -> tuple[str, list[dict[str, Any]]]:
         self.start()
         assert self.proc is not None and self.proc.stdout is not None
+        messages: list[dict[str, Any]] = []
+        saw_output = False
         while True:
-            if timeout_sec is not None and timeout_sec > 0:
+            if not saw_output and timeout_sec is not None and timeout_sec > 0:
                 readable, _, _ = select.select([self.proc.stdout], [], [], timeout_sec)
                 if not readable:
                     self.kill()
@@ -187,10 +217,18 @@ class GomocupEngine:
                 if self.proc.stderr is not None:
                     stderr = self.proc.stderr.read()
                 raise RuntimeError(f"{self.name}: process exited: {stderr.strip()}")
+            saw_output = True
             text = line.strip()
-            if not text or text.upper().startswith("MESSAGE"):
+            if not text:
                 continue
-            return text
+            if text.upper().startswith("MESSAGE"):
+                messages.append(parse_engine_message(text))
+                continue
+            return text, messages
+
+    def read(self, timeout_sec: float | None = None) -> str:
+        response, _messages = self.read_with_messages(timeout_sec)
+        return response
 
     def restart(self) -> None:
         self.send("RESTART")
@@ -204,20 +242,25 @@ class GomocupEngine:
         moves: list[dict[str, Any]],
         side_to_move: int,
         move_timeout_sec: float,
-    ) -> tuple[tuple[int, int], float]:
-        self.restart()
+    ) -> tuple[tuple[int, int], float, list[dict[str, Any]]]:
+        if self.restart_each_move:
+            self.restart()
+        else:
+            self.start()
         self.send("BOARD")
         for move in moves:
             rel_side = 1 if move["side"] == side_to_move else 2
             self.send(f"{move['x']},{move['y']},{rel_side}")
         start = time.perf_counter()
         self.send("DONE")
-        response = self.read(None if move_timeout_sec <= 0 else move_timeout_sec)
+        response, messages = self.read_with_messages(
+            None if move_timeout_sec <= 0 else move_timeout_sec
+        )
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         if "," not in response:
             raise RuntimeError(f"{self.name}: unexpected move response: {response}")
         x_raw, y_raw = response.split(",", 1)
-        return (int(x_raw), int(y_raw)), elapsed_ms
+        return (int(x_raw), int(y_raw)), elapsed_ms, messages
 
     def kill(self) -> None:
         proc = self.proc
@@ -249,6 +292,7 @@ class EngineSpec:
     command: str
     cwd: Path
     info: list[tuple[str, str]]
+    restart_each_move: bool
 
 
 @dataclass(frozen=True)
@@ -381,12 +425,14 @@ def run_match_task(
             command=engine_a.command,
             cwd=engine_a.cwd,
             info=engine_a.info,
+            restart_each_move=engine_a.restart_each_move,
         ),
         engine_b.name: GomocupEngine(
             name=engine_b.name,
             command=engine_b.command,
             cwd=engine_b.cwd,
             info=engine_b.info,
+            restart_each_move=engine_b.restart_each_move,
         ),
     }
     side_to_engine = {
@@ -425,7 +471,7 @@ def run_match_task(
                 winner_engine = "timeout"
                 break
             try:
-                (mx, my), elapsed_ms = engines[engine_name].move(
+                (mx, my), elapsed_ms, messages = engines[engine_name].move(
                     moves,
                     side,
                     move_timeout_sec,
@@ -455,6 +501,17 @@ def run_match_task(
                 "opening": False,
                 "elapsed_ms": round(elapsed_ms, 3),
             }
+            if messages:
+                move["messages"] = messages
+                tt_generation = next(
+                    (message for message in messages if message.get("kind") == "tt_generation"),
+                    None,
+                )
+                if tt_generation is not None:
+                    move["tt_generation"] = {
+                        "current": int(tt_generation.get("current", 0)),
+                        "old": int(tt_generation.get("old", 0)),
+                    }
             moves.append(move)
             occupied.add((mx, my))
             times_ms[engine_name].append(elapsed_ms)
@@ -502,10 +559,20 @@ def summarize(games: list[dict[str, Any]], engine_names: tuple[str, str]) -> dic
         if winner in wins:
             wins[winner] += 1
     all_times = {engine_names[0]: [], engine_names[1]: []}
+    tt_generation = {
+        engine_names[0]: {"current": 0, "old": 0, "moves": 0, "old_pct": 0.0},
+        engine_names[1]: {"current": 0, "old": 0, "moves": 0, "old_pct": 0.0},
+    }
     for game in games:
         for move in game["moves"]:
             if not move.get("opening"):
                 all_times[move["engine"]].append(float(move["elapsed_ms"]))
+                generation = move.get("tt_generation")
+                if generation is not None:
+                    stats = tt_generation[move["engine"]]
+                    stats["current"] += int(generation.get("current", 0))
+                    stats["old"] += int(generation.get("old", 0))
+                    stats["moves"] += 1
     timing = {}
     for name, values in all_times.items():
         timing[name] = {
@@ -515,10 +582,17 @@ def summarize(games: list[dict[str, Any]], engine_names: tuple[str, str]) -> dic
             "max_ms": round(max(values), 3) if values else 0.0,
             "moves": len(values),
         }
+        total_hints = tt_generation[name]["current"] + tt_generation[name]["old"]
+        tt_generation[name]["old_pct"] = (
+            round(100.0 * tt_generation[name]["old"] / total_hints, 3)
+            if total_hints
+            else 0.0
+        )
     return {
         "wins": wins,
         "errors": sum(1 for game in games if game.get("error")),
         "timing": timing,
+        "tt_generation": tt_generation,
     }
 
 
@@ -579,6 +653,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--engine-b-cwd", type=Path, default=root)
     parser.add_argument("--engine-a-info", action="append", default=[])
     parser.add_argument("--engine-b-info", action="append", default=[])
+    parser.add_argument(
+        "--reuse-engine-state",
+        action="store_true",
+        help="do not RESTART before every move; preserves searcher state for TT tracing",
+    )
     return parser.parse_args()
 
 
@@ -594,12 +673,14 @@ def main() -> int:
         command=args.engine_a_command,
         cwd=args.engine_a_cwd.expanduser().resolve(),
         info=parse_info(args.engine_a_info),
+        restart_each_move=not args.reuse_engine_state,
     )
     engine_b = EngineSpec(
         name=args.engine_b_name,
         command=args.engine_b_command,
         cwd=args.engine_b_cwd.expanduser().resolve(),
         info=parse_info(args.engine_b_info),
+        restart_each_move=not args.reuse_engine_state,
     )
     check_command(engine_a.command, engine_a.cwd, engine_a.name)
     check_command(engine_b.command, engine_b.cwd, engine_b.name)
@@ -700,12 +781,14 @@ def main() -> int:
                 "command": engine_a.command,
                 "cwd": str(engine_a.cwd),
                 "info": engine_a.info,
+                "restart_each_move": engine_a.restart_each_move,
             },
             "engine_b": {
                 "name": engine_b.name,
                 "command": engine_b.command,
                 "cwd": str(engine_b.cwd),
                 "info": engine_b.info,
+                "restart_each_move": engine_b.restart_each_move,
             },
         },
         "summary": summarize(games, (engine_a.name, engine_b.name)),

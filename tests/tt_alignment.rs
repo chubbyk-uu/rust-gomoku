@@ -11,11 +11,34 @@ fn tt_exact_hit_returns_value_and_best_move() {
         depth: 4,
         priority: 9,
         best_move: Some(77),
+        generation: 0,
     });
     let result = table.probe(5, 4, -10, 10);
     assert!(result.hit);
     assert_eq!(result.value, Some(123));
     assert_eq!(result.best_move, Some(77));
+}
+
+#[test]
+fn tt_probe_reports_best_move_generation_metadata() {
+    let table = TranspositionTable::new(2);
+    table.store(TTEntry {
+        key: 5,
+        value: 123,
+        flag: HASHF_EXACT,
+        depth: 4,
+        priority: 9,
+        best_move: Some(77),
+        generation: 42,
+    });
+    let result = table.probe(5, 4, -10, 10);
+    let hint = result
+        .best_move_hint
+        .expect("stored best move reports probe metadata");
+    assert_eq!(hint.move_, 77);
+    assert_eq!(hint.depth, 4);
+    assert_eq!(hint.flag, HASHF_EXACT);
+    assert_eq!(hint.generation, 42);
 }
 
 #[test]
@@ -28,6 +51,7 @@ fn tt_alpha_entry_can_shrink_window() {
         depth: 4,
         priority: 9,
         best_move: Some(11),
+        generation: 0,
     });
     let result = table.probe(5, 4, 0, 100);
     assert!(!result.hit);
@@ -47,6 +71,7 @@ fn tt_beta_entry_cuts_when_value_exceeds_beta() {
         depth: 4,
         priority: 9,
         best_move: Some(33),
+        generation: 0,
     });
     let result = table.probe(5, 4, 0, 50);
     assert!(result.hit);
@@ -64,6 +89,7 @@ fn tt_alpha_entry_returns_unknown_with_best_move_when_no_cut() {
         depth: 4,
         priority: 9,
         best_move: Some(17),
+        generation: 0,
     });
     let result = table.probe(5, 5, 0, 100);
     assert!(!result.hit);
@@ -82,6 +108,7 @@ fn tt_beta_entry_narrows_alpha_window_when_no_cut() {
         depth: 4,
         priority: 9,
         best_move: Some(17),
+        generation: 0,
     });
     let result = table.probe(5, 4, 0, 100);
     assert!(!result.hit);
@@ -102,6 +129,7 @@ fn tt_beta_entry_alpha_already_above_value_keeps_alpha() {
         depth: 4,
         priority: 9,
         best_move: Some(17),
+        generation: 0,
     });
     let result = table.probe(5, 4, 50, 100);
     assert!(result.has_window);
@@ -119,6 +147,7 @@ fn tt_second_slot_checked_when_first_has_insufficient_depth() {
         depth: 1,
         priority: 100,
         best_move: Some(5),
+        generation: 0,
     });
     table.store(TTEntry {
         key: 2,
@@ -127,6 +156,7 @@ fn tt_second_slot_checked_when_first_has_insufficient_depth() {
         depth: 6,
         priority: 10,
         best_move: Some(7),
+        generation: 0,
     });
     let result = table.probe(2, 5, -200, 200);
     assert!(result.hit);
@@ -144,6 +174,7 @@ fn tt_prefers_second_slot_when_first_has_higher_priority() {
         depth: 1,
         priority: 100,
         best_move: Some(1),
+        generation: 0,
     });
     table.store(TTEntry {
         key: 4,
@@ -152,6 +183,7 @@ fn tt_prefers_second_slot_when_first_has_higher_priority() {
         depth: 1,
         priority: 10,
         best_move: Some(2),
+        generation: 0,
     });
     assert_eq!(table.probe(2, 1, -5, 5).value, Some(10));
     assert_eq!(table.probe(4, 1, -5, 5).value, Some(20));
@@ -175,6 +207,7 @@ fn tt_allocates_fixed_bucket_count() {
         depth: 2,
         priority: 5,
         best_move: Some(7),
+        generation: 0,
     });
     assert_eq!(table.bucket_count(), 16);
 }
@@ -200,6 +233,7 @@ fn tt_probe_does_not_create_bucket_for_miss_in_existing_slot() {
         depth: 2,
         priority: 5,
         best_move: Some(7),
+        generation: 0,
     });
     let before = table.bucket(5);
     let result = table.probe(5, 2, -10, 10);
@@ -219,6 +253,7 @@ fn tt_third_store_in_same_slot_replaces_second_slot_only() {
         depth: 4,
         priority: 100,
         best_move: Some(1),
+        generation: 0,
     });
     table.store(TTEntry {
         key: 4,
@@ -227,6 +262,7 @@ fn tt_third_store_in_same_slot_replaces_second_slot_only() {
         depth: 4,
         priority: 10,
         best_move: Some(2),
+        generation: 0,
     });
     table.store(TTEntry {
         key: 6,
@@ -235,6 +271,7 @@ fn tt_third_store_in_same_slot_replaces_second_slot_only() {
         depth: 4,
         priority: 5,
         best_move: Some(3),
+        generation: 0,
     });
     assert_eq!(table.probe(2, 4, -50, 50).value, Some(10));
     assert_eq!(table.probe(4, 4, -50, 50).value, None);
@@ -254,6 +291,7 @@ fn tt_higher_priority_third_store_replaces_first_slot() {
         depth: 4,
         priority: 100,
         best_move: Some(1),
+        generation: 0,
     });
     table.store(TTEntry {
         key: 4,
@@ -262,6 +300,7 @@ fn tt_higher_priority_third_store_replaces_first_slot() {
         depth: 4,
         priority: 10,
         best_move: Some(2),
+        generation: 0,
     });
     table.store(TTEntry {
         key: 6,
@@ -270,6 +309,7 @@ fn tt_higher_priority_third_store_replaces_first_slot() {
         depth: 4,
         priority: 200,
         best_move: Some(3),
+        generation: 0,
     });
     assert_eq!(table.probe(2, 4, -50, 50).value, None);
     assert_eq!(table.probe(4, 4, -50, 50).value, Some(20));
@@ -290,6 +330,7 @@ fn tt_bucket_returns_stored_entries_for_masked_slot() {
         depth: 3,
         priority: 7,
         best_move: Some(best_move),
+        generation: 0,
     });
     let bucket = table.bucket(5);
     assert!(bucket.iter().any(|entry| {
@@ -312,6 +353,7 @@ fn tt_clone_shares_storage() {
         depth: 3,
         priority: 7,
         best_move: Some(9),
+        generation: 0,
     });
     assert_eq!(cloned.probe(5, 3, -10, 10).value, Some(123));
 }
@@ -326,6 +368,7 @@ fn tt_fork_snapshot_copies_entries_without_sharing_storage() {
         depth: 3,
         priority: 7,
         best_move: Some(9),
+        generation: 0,
     });
 
     let snapshot = table.fork_snapshot();
@@ -341,6 +384,7 @@ fn tt_fork_snapshot_copies_entries_without_sharing_storage() {
         depth: 3,
         priority: 8,
         best_move: Some(10),
+        generation: 0,
     });
     assert_eq!(table.probe(5, 3, -10, 10).value, Some(456));
     assert_eq!(snapshot.probe(5, 3, -10, 10).value, Some(123));

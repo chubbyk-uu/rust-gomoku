@@ -57,6 +57,8 @@ pub struct SearchStats {
     pub history_hits: usize,
     pub killer_updates: usize,
     pub history_updates: usize,
+    pub tt_bestmove_current_generation: usize,
+    pub tt_bestmove_old_generation: usize,
 }
 
 impl Default for SearchStats {
@@ -78,6 +80,8 @@ impl Default for SearchStats {
             history_hits: 0,
             killer_updates: 0,
             history_updates: 0,
+            tt_bestmove_current_generation: 0,
+            tt_bestmove_old_generation: 0,
         }
     }
 }
@@ -161,6 +165,7 @@ pub struct AlphaBetaSearcher {
     pub vcf: VCFSearcher,
     killer_moves: [[Move; 2]; ORDERING_MAX_PLY],
     history_scores: [[i32; BOARD_AREA]; 2],
+    tt_generation: u16,
 }
 
 impl AlphaBetaSearcher {
@@ -171,6 +176,7 @@ impl AlphaBetaSearcher {
             vcf: VCFSearcher::default(),
             killer_moves: [[NO_KILLER_MOVE; 2]; ORDERING_MAX_PLY],
             history_scores: [[0; BOARD_AREA]; 2],
+            tt_generation: 0,
         }
     }
 
@@ -181,6 +187,14 @@ impl AlphaBetaSearcher {
             vcf: VCFSearcher::default(),
             killer_moves: [[NO_KILLER_MOVE; 2]; ORDERING_MAX_PLY],
             history_scores: [[0; BOARD_AREA]; 2],
+            tt_generation: 0,
+        }
+    }
+
+    pub fn advance_tt_generation(&mut self) {
+        self.tt_generation = (self.tt_generation + 1) & 0x3FFF;
+        if self.tt_generation == 0 {
+            self.tt_generation = 1;
         }
     }
 
@@ -303,6 +317,13 @@ impl AlphaBetaSearcher {
         }
 
         let probe = self.tt.probe(board.zobrist_key(), hash_depth, alpha, beta);
+        if let Some(best_move_hint) = probe.best_move_hint {
+            if best_move_hint.generation == self.tt_generation {
+                stats.tt_bestmove_current_generation += 1;
+            } else {
+                stats.tt_bestmove_old_generation += 1;
+            }
+        }
         if probe.hit && probe.value.is_some() {
             stats.tt_hits += 1;
             return (probe.value.expect("checked above"), probe.best_move);
@@ -328,6 +349,7 @@ impl AlphaBetaSearcher {
                 depth: 0,
                 priority: priority_base * 10,
                 best_move: None,
+                generation: self.tt_generation,
             });
             return (score, None);
         }
@@ -660,6 +682,7 @@ impl AlphaBetaSearcher {
             depth: store_depth,
             priority: priority_base * 10 + hash_depth,
             best_move,
+            generation: self.tt_generation,
         });
         (current, best_move)
     }
