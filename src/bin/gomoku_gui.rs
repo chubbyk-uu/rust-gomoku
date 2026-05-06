@@ -14,7 +14,7 @@ use rust_gomoku::{
     EMPTY, WHITE,
 };
 
-const DEFAULT_ADDR: &str = "127.0.0.1:7878";
+const DEFAULT_ADDR: &str = "127.0.0.1:18080";
 
 fn main() {
     if cfg!(debug_assertions) {

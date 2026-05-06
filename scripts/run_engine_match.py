@@ -154,8 +154,9 @@ class GomocupEngine:
     def read(self, timeout_sec: float | None = None) -> str:
         self.start()
         assert self.proc is not None and self.proc.stdout is not None
+        saw_output = False
         while True:
-            if timeout_sec is not None and timeout_sec > 0:
+            if not saw_output and timeout_sec is not None and timeout_sec > 0:
                 readable, _, _ = select.select([self.proc.stdout], [], [], timeout_sec)
                 if not readable:
                     self.kill()
@@ -166,6 +167,7 @@ class GomocupEngine:
                 if self.proc.stderr is not None:
                     stderr = self.proc.stderr.read()
                 raise RuntimeError(f"{self.name}: process exited: {stderr.strip()}")
+            saw_output = True
             text = line.strip()
             if not text or text.upper().startswith("MESSAGE"):
                 continue

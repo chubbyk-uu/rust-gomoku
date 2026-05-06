@@ -93,7 +93,7 @@ printf 'START 15\nBEGIN\nEND\n' | cargo run --quiet --bin gomocup_engine -- --de
 cargo run --release --bin gomoku_gui
 ```
 
-打开 `http://127.0.0.1:7878`。GUI 支持执黑/执白、悔棋、重新开局、Base/Fast 模式切换、异步思考、手数显示和状态面板；快捷键 `U` 悔棋，`R` 重新开局。Base/Fast 切换只在引擎未思考时允许，不重置当前棋局，只影响下一次引擎思考。
+打开 `http://127.0.0.1:18080`。GUI 支持执黑/执白、悔棋、重新开局、Base/Fast 模式切换、异步思考、手数显示和状态面板；快捷键 `U` 悔棋，`R` 重新开局。Base/Fast 切换只在引擎未思考时允许，不重置当前棋局，只影响下一次引擎思考。
 
 Gomocup engine：
 
