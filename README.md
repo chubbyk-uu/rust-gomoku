@@ -1,38 +1,40 @@
 # rust_gomoku
 
-`rust_gomoku` 是 Python reference 项目 `pygomoku` classic 主线的 Rust 重构。当前主线目标是守住 classic 行为，同时继续降低平均耗时和长尾耗时。
+`rust_gomoku` is a Rust rewrite of the classic mainline of the Python reference project `pygomoku`. The current focus is to preserve classic behavior while continuing to reduce average and long-tail search latency.
 
-## 当前状态
+A Chinese version of this document is available at [README-cn.md](README-cn.md).
 
-已完成：
+## Current Status
 
-- 15x15 自由规则五子棋状态机、zobrist、配置、pattern、eval cache、movegen、ordering、TT、alpha-beta root search。
-- root VCF、root-only VCT 触发/验证/trace。
-- Gomocup stdin/stdout 引擎入口和本地 Web GUI。
-- Rust/reference 差分、Rust/reference 对战、base/fast 对战和同局面 benchmark 脚手架。
-- 非 root 候选排序成本优化：保持原排序 key 不变，减少 `getmi` 和候选复制开销。
-- fast profile 默认开启第三版 history/killer ordering：只在静态排序同组内调整安静着法顺序，base 不受影响。
-- 仓库内保留 `opponent/zhou` 作为轻量对手；完整 Python reference 不随仓库提交。
+Completed:
 
-可选诊断/实验：
+- 15x15 free-rule Gomoku state machine, zobrist, config, pattern, eval cache, movegen, ordering, TT, and alpha-beta root search.
+- Root VCF, root-only VCT trigger/verify/trace.
+- Gomocup stdin/stdout engine entry point and a local Web GUI.
+- Rust/reference diff harness, Rust/reference matches, base/fast matches, and same-position benchmark scaffolding.
+- Non-root candidate ordering cost optimization: keeps the original ordering key while reducing `getmi` and candidate copy overhead.
+- Fast profile enables third-generation history/killer ordering by default: only reorders quiet moves within the same static-ordering group; base is unaffected.
+- `opponent/zhou` is kept in the repo as a lightweight opponent; the full Python reference is not committed.
 
-- `overlap_vct_alphabeta`：VCF miss 后重叠 VCT 与 alphabeta 的实验开关。
-- `root_profile`：root candidate 计时诊断。
-- TT generation 观测：Gomocup trace 可输出跨手 TT best-move hint 新旧比例，不影响 TT cutoff、replacement 或排序策略。
+Optional diagnostics / experiments:
 
-GUI 入口为了降低手动对局体感等待，默认单独开启 `overlap_vct_alphabeta`；Gomocup、diff、case probe 和库默认仍保持关闭。
-历史性能实验和止损结论记录在 `docs/perf-log.md`，README 不重复维护失败方案清单。
+- `overlap_vct_alphabeta`: experimental switch to overlap VCT with alpha-beta after a VCF miss.
+- `root_profile`: per-root-candidate timing diagnostics.
+- TT generation observation: Gomocup trace can report the new/old ratio of cross-move TT best-move hints. It does not affect TT cutoff, replacement, or ordering policy.
 
-## 默认参数
+To shorten the perceived wait during manual GUI play, the GUI entry enables `overlap_vct_alphabeta` by default; Gomocup, diff, case probe, and the library still keep it off.
+Historical performance experiments and stop-loss conclusions are recorded in `docs/perf-log.md`; the README does not maintain a list of failed approaches.
 
-主要默认值集中在 `src/config.rs`。
+## Default Parameters
 
-| 参数 | 默认值 |
+The main defaults live in `src/config.rs`.
+
+| Parameter | Default |
 |---|---:|
-| 固定搜索深度 | `8` |
-| 固定 root width | `40` |
-| 时间控制最大深度 | `25` |
-| 时间控制最大 width | `40` |
+| Fixed search depth | `8` |
+| Fixed root width | `40` |
+| Time-control max depth | `25` |
+| Time-control max width | `40` |
 | `root_vcf_depth` | `8` |
 | `opponent_vcf_depth` | `7` |
 | `vct_verify_opponent_vcf_depth` | `4` |
@@ -40,40 +42,40 @@ GUI 入口为了降低手动对局体感等待，默认单独开启 `overlap_vct
 | `root_vct_depth` | `6` |
 | `vct_strict_and_memo_key` | `true` |
 | TT bucket bits | `20` |
-| `compute_vcf` / `compute_vct` | 开启 |
-| `overlap_vct_alphabeta` | 关闭，GUI 入口单独开启 |
-| `fast_history_ordering` | base 关闭，fast 开启 |
-| `nonroot_vcf` | 关闭 |
-| `static_board` | 开启 |
+| `compute_vcf` / `compute_vct` | enabled |
+| `overlap_vct_alphabeta` | off; GUI entry turns it on |
+| `fast_history_ordering` | off in base, on in fast |
+| `nonroot_vcf` | off |
+| `static_board` | on |
 | `dynamic_board_margin` | `4` |
 
-与 Python reference 严格差分或复现实验时，通常显式使用 `depth=6,width=20,root_vct_depth=4`。
+For strict diffs against the Python reference or reproducing reference experiments, `depth=6,width=20,root_vct_depth=4` is typically passed explicitly.
 
-默认 profile 是 `base`，用于守住 classic 语义和 reference 差分。`--profile fast` 当前会默认开启 `fast_history_ordering`；如需对照可用 `--no-fast-history-ordering` 关闭。
+The default profile is `base`, used to preserve classic semantics and reference diffs. `--profile fast` currently enables `fast_history_ordering` by default; pass `--no-fast-history-ordering` to disable it for comparison.
 
-## 坐标约定
+## Coordinate Convention
 
-外部坐标统一为 `(x, y) = (列, 行)`，与 Gomocup、GUI 和 case JSON 保持一致。内部棋盘矩阵按 Rust 数组习惯存为 `grid[row][col]`，`Move` 编码为 `row * BOARD_SIZE + col`。代码里优先使用 `xy_to_move` / `move_to_xy`；在矩阵语境下可使用别名 `rc_to_move` / `move_to_rc` 避免误读。
+External coordinates are uniformly `(x, y) = (column, row)`, matching Gomocup, the GUI, and case JSON files. Internally, the board matrix follows Rust array conventions as `grid[row][col]`, and `Move` is encoded as `row * BOARD_SIZE + col`. Prefer `xy_to_move` / `move_to_xy` in code; in matrix contexts the aliases `rc_to_move` / `move_to_rc` can be used to avoid confusion.
 
-## Reference 路径
+## Reference Path
 
-完整 Python reference 默认放在本机外部目录：
+The full Python reference is expected to live in an external local directory by default:
 
 ```bash
 ~/python_ws/pygomoku
 ```
 
-也可以显式指定：
+You can also point to it explicitly:
 
 ```bash
 export PYGOMOKU_REF_ROOT=~/python_ws/pygomoku
 ```
 
-脚本查找顺序是 `--ref-root`、`PYGOMOKU_REF_ROOT`、`~/python_ws/pygomoku`。
+Scripts resolve the reference in this order: `--ref-root`, `PYGOMOKU_REF_ROOT`, then `~/python_ws/pygomoku`.
 
-## 常用命令
+## Common Commands
 
-构建和测试：
+Build and test:
 
 ```bash
 cargo build --release
@@ -81,21 +83,21 @@ cargo test --quiet
 python3 scripts/run_diff.py --jobs 10
 ```
 
-Gomocup smoke：
+Gomocup smoke:
 
 ```bash
 printf 'START 15\nBEGIN\nEND\n' | cargo run --quiet --bin gomocup_engine -- --depth 2 --width 8
 ```
 
-启动 GUI：
+Launch the GUI:
 
 ```bash
 cargo run --release --bin gomoku_gui
 ```
 
-打开 `http://127.0.0.1:18080`。GUI 支持执黑/执白、悔棋、重新开局、Base/Fast 模式切换、异步思考、手数显示和状态面板；快捷键 `U` 悔棋，`R` 重新开局。Base/Fast 切换只在引擎未思考时允许，不重置当前棋局，只影响下一次引擎思考。
+Then open `http://127.0.0.1:18080`. The GUI supports playing black/white, undo, restart, Base/Fast mode switching, async thinking, move number display, and a status panel; shortcuts: `U` to undo, `R` to restart. The Base/Fast switch is only allowed when the engine is idle, does not reset the current game, and only affects the next engine think.
 
-Gomocup engine：
+Gomocup engine:
 
 ```bash
 cargo run --release --bin gomocup_engine
@@ -105,7 +107,7 @@ target/release/gomocup_engine --tt-bits 22
 target/release/gomocup_engine --profile fast
 ```
 
-常用 `INFO`：
+Common `INFO` commands:
 
 - `INFO timeout_turn N`
 - `INFO time_left N`
@@ -127,16 +129,16 @@ target/release/gomocup_engine --profile fast
 - `INFO dynamic_board_margin N`
 - `INFO root_profile 0|1`
 
-## 差分和对战
+## Diffs and Matches
 
-单 case 差分：
+Single-case diff:
 
 ```bash
 cargo run --quiet --bin diff_probe -- --case cases/diff/root_center_11.json
 cargo run --quiet --bin diff_probe -- --case cases/diff/root_center_11_d6_w5.json --root-profile
 ```
 
-Rust 默认参数对 Python reference 9 开局双边 18 局：
+Rust default parameters vs. the Python reference, 9 openings, both sides, 18 games:
 
 ```bash
 cargo build --release --bin gomocup_engine
@@ -146,7 +148,7 @@ python3 scripts/run_engine_match.py \
   --output /tmp/rust_vs_reference_9_openings.json
 ```
 
-通用 engine 对战：
+Generic engine match:
 
 ```bash
 python3 scripts/run_gomocup_match.py \
@@ -158,7 +160,7 @@ python3 scripts/run_gomocup_match.py \
   --output /tmp/base_fast_smoke_quick.json
 ```
 
-同局面一手 benchmark：
+Same-position single-move benchmark:
 
 ```bash
 cargo build --release --bin case_probe
@@ -168,25 +170,25 @@ python3 scripts/bench_match_cases.py \
   --output /tmp/base_fast_standard_bench.json
 ```
 
-`run_gomocup_match.py` 用于真实对战和棋力评估；`bench_match_cases.py` 用于同一批前缀局面的一手搜索对照。判断优化是否真的提速，应先看同局面 benchmark，再看对战胜率和长尾耗时。
+`run_gomocup_match.py` is used for real matches and strength evaluation; `bench_match_cases.py` is used for single-move searches on the same batch of prefix positions. To judge whether an optimization is genuinely faster, look at the same-position benchmark first, then at match win rate and long-tail latency.
 
-如需观察真实跨手 TT，可给 `run_gomocup_match.py` 加 `--reuse-engine-state`。默认对战脚本每手 `RESTART`，更适合公平复现；`--reuse-engine-state` 会保留 engine/searcher 状态，并把每手 `MESSAGE tt_generation current=... old=...` 汇总到 JSON 的 `tt_generation` 字段。
+To observe real cross-move TT behavior, pass `--reuse-engine-state` to `run_gomocup_match.py`. By default the match script issues `RESTART` per move, which is fairer for reproducibility; `--reuse-engine-state` retains engine/searcher state and aggregates each move's `MESSAGE tt_generation current=... old=...` into the `tt_generation` field of the output JSON.
 
-## 目录
+## Directory Layout
 
 ```text
-src/                 Rust engine、Gomocup、GUI、diff/case probe
-cases/diff/          root 差分 case
-cases/match/         对战和 benchmark 前缀局面
-data/static/         从 reference 提取的静态矩阵
-opponent/zhou/       zhou 基线对手
-scripts/             差分、对战、benchmark、case 抽取脚本
-tests/               Rust 自动测试
+src/                 Rust engine, Gomocup, GUI, diff/case probe
+cases/diff/          root diff cases
+cases/match/         match and benchmark prefix positions
+data/static/         static matrices extracted from the reference
+opponent/zhou/       zhou baseline opponent
+scripts/             diff, match, benchmark, and case extraction scripts
+tests/               Rust automated tests
 ```
 
-## 当前重点
+## Current Focus
 
-1. 继续扩大 reference/Rust 差分覆盖。
-2. 针对真实慢手优化 VCT miss 和 alphabeta 长尾，优先寻找能稳定压低 p95/max 的方案。
-3. 继续扩大 fast profile 的 fast vs base 对战覆盖，确认默认开启的 history/killer ordering 在更大样本下胜率不低于 base。
-4. 所有性能实验都要同时报告正确性、耗时、nodes、move/score/trace 是否变化。
+1. Continue expanding reference/Rust diff coverage.
+2. Target real slow moves to optimize VCT miss and alpha-beta long tail, prioritizing approaches that reliably lower p95/max latency.
+3. Continue expanding fast vs. base match coverage for the fast profile to confirm that the default-on history/killer ordering does not lose win rate against base at larger sample sizes.
+4. All performance experiments must report correctness, latency, nodes, and any changes to move/score/trace together.
