@@ -456,8 +456,11 @@ Add broader validation before touching search:
 - One-dimensional exhaustive checks:
   - Enumerate windows of length 9 and 11 with values `{empty, black, white}`.
   - Place candidate black at each empty point.
-  - Compare exact-five, overline, four, and apparent-three classifications
-    against a simple slow reference implementation.
+  - Compare exact-five, overline, and four-shape count against a simple slow
+    reference implementation.
+  - Do not treat double-three as a one-dimensional property; recursive
+    true-open-three validation stays covered by hand cases and dense oracle
+    stress.
 - Random-board oracle fuzz:
   - Generate thousands of legal-looking positions.
   - For every empty candidate, compare local forbidden classification to
@@ -476,6 +479,18 @@ Exit criteria:
 - Slow reference and optimized detector agree.
 - Runtime is acceptable for movegen use, or the next phase includes a clear
   caching plan.
+
+Current one-dimensional exhaustive check:
+
+- Implemented in `src/rules/forbidden.rs` tests.
+- Width 9 enumerates `3^8 = 6561` line states; width 11 enumerates
+  `3^10 = 59049` line states.
+- The test fixes the candidate at the center, projects the line onto the board,
+  and compares production `has_exact_five`, `has_overline`, and
+  `count_four_shapes_through` against an independent slow reference that
+  directly counts the center run and all five-cell windows through the
+  candidate.
+- Current result: zero mismatches.
 
 Current random oracle smoke:
 

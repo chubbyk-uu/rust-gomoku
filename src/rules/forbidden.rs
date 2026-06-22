@@ -417,6 +417,7 @@ mod tests {
     use crate::board::xy_to_move;
     use crate::constants::WHITE;
     use serde::Deserialize;
+    use std::collections::BTreeSet;
 
     #[derive(Deserialize)]
     struct Fixture {
@@ -464,6 +465,129 @@ mod tests {
             board.grid_rows_mut()[stone.y][stone.x] = stone.side;
         }
         board
+    }
+
+    fn line_grid(line: &[Side; BOARD_SIZE]) -> [[Side; BOARD_SIZE]; BOARD_SIZE] {
+        let mut grid = [[EMPTY; BOARD_SIZE]; BOARD_SIZE];
+        grid[7].copy_from_slice(line);
+        grid
+    }
+
+    fn enumerated_line(width: usize, mut code: usize) -> [Side; BOARD_SIZE] {
+        assert!(width % 2 == 1);
+        let center = BOARD_SIZE / 2;
+        let half_width = width / 2;
+        let mut line = [EMPTY; BOARD_SIZE];
+        line[center] = BLACK;
+
+        for position in (center - half_width)..=(center + half_width) {
+            if position == center {
+                continue;
+            }
+            line[position] = match code % 3 {
+                0 => EMPTY,
+                1 => BLACK,
+                _ => WHITE,
+            };
+            code /= 3;
+        }
+        line
+    }
+
+    fn slow_center_run_len(line: &[Side; BOARD_SIZE]) -> usize {
+        let center = BOARD_SIZE / 2;
+        let mut start = center;
+        while start > 0 && line[start - 1] == BLACK {
+            start -= 1;
+        }
+        let mut end = center;
+        while end + 1 < BOARD_SIZE && line[end + 1] == BLACK {
+            end += 1;
+        }
+        end - start + 1
+    }
+
+    fn slow_has_exact_five(line: &[Side; BOARD_SIZE]) -> bool {
+        slow_center_run_len(line) == 5
+    }
+
+    fn slow_has_overline(line: &[Side; BOARD_SIZE]) -> bool {
+        slow_center_run_len(line) >= 6
+    }
+
+    fn slow_four_shape_count(line: &[Side; BOARD_SIZE]) -> usize {
+        let center = BOARD_SIZE / 2;
+        let mut shapes = BTreeSet::new();
+
+        for start in 0..=(BOARD_SIZE - 5) {
+            let end = start + 5;
+            if !(start <= center && center < end) {
+                continue;
+            }
+
+            let mut black_count = 0;
+            let mut empty = None;
+            let mut black_shape = [usize::MAX; 4];
+            let mut valid_window = true;
+            for (shape_index, &side) in line[start..end].iter().enumerate() {
+                let position = start + shape_index;
+                match side {
+                    BLACK => {
+                        if black_count < 4 {
+                            black_shape[black_count] = position;
+                        }
+                        black_count += 1;
+                    }
+                    EMPTY => {
+                        if empty.replace(position).is_some() {
+                            valid_window = false;
+                            break;
+                        }
+                    }
+                    _ => {
+                        valid_window = false;
+                        break;
+                    }
+                }
+            }
+
+            if !valid_window || black_count != 4 || empty.is_none() {
+                continue;
+            }
+
+            let left_is_open = start == 0 || line[start - 1] != BLACK;
+            let right_is_open = end == BOARD_SIZE || line[end] != BLACK;
+            if left_is_open && right_is_open {
+                shapes.insert(black_shape);
+            }
+        }
+
+        shapes.len()
+    }
+
+    fn assert_line_exhaustion_matches_slow_reference(width: usize) {
+        let center = BOARD_SIZE / 2;
+        let cases = 3usize.pow((width - 1) as u32);
+        for code in 0..cases {
+            let line = enumerated_line(width, code);
+            let mut grid = line_grid(&line);
+
+            assert_eq!(
+                has_exact_five(&grid, center, 7),
+                slow_has_exact_five(&line),
+                "width={width} code={code} line={line:?} exact-five mismatch"
+            );
+            assert_eq!(
+                has_overline(&grid, center, 7),
+                slow_has_overline(&line),
+                "width={width} code={code} line={line:?} overline mismatch"
+            );
+            assert_eq!(
+                count_four_shapes_through(&mut grid, center, 7, (1, 0)),
+                slow_four_shape_count(&line),
+                "width={width} code={code} line={line:?} four-count mismatch"
+            );
+        }
     }
 
     #[test]
@@ -517,5 +641,15 @@ mod tests {
             classify_forbidden_stones(&[], (7, 7), 2, RuleSet::Renju),
             Err(BoardError::InvalidSide(2))
         );
+    }
+
+    #[test]
+    fn line_exhaustion_width_9_matches_slow_reference() {
+        assert_line_exhaustion_matches_slow_reference(9);
+    }
+
+    #[test]
+    fn line_exhaustion_width_11_matches_slow_reference() {
+        assert_line_exhaustion_matches_slow_reference(11);
     }
 }
