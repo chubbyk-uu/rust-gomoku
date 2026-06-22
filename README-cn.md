@@ -190,3 +190,7 @@ tests/               Rust 自动测试
 2. 针对真实慢手优化 VCT miss 和 alphabeta 长尾，优先寻找能稳定压低 p95/max 的方案。
 3. 继续扩大 fast profile 的 fast vs base 对战覆盖，确认默认开启的 history/killer ordering 在更大样本下胜率不低于 base。
 4. 所有性能实验都要同时报告正确性、耗时、nodes、move/score/trace 是否变化。
+
+## 许可证
+
+本项目使用 GNU General Public License v3.0 或后续版本授权。详见 [LICENSE](LICENSE)。

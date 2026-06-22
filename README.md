@@ -192,3 +192,7 @@ tests/               Rust automated tests
 2. Target real slow moves to optimize VCT miss and alpha-beta long tail, prioritizing approaches that reliably lower p95/max latency.
 3. Continue expanding fast vs. base match coverage for the fast profile to confirm that the default-on history/killer ordering does not lose win rate against base at larger sample sizes.
 4. All performance experiments must report correctness, latency, nodes, and any changes to move/score/trace together.
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 or later. See [LICENSE](LICENSE).
