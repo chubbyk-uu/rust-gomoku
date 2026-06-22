@@ -490,7 +490,15 @@ Current one-dimensional exhaustive check:
   `count_four_shapes_through` against an independent slow reference that
   directly counts the center run and all five-cell windows through the
   candidate.
-- Current result: zero mismatches.
+- Each enumerated line is laid along all four directions `(1,0)`, `(0,1)`,
+  `(1,1)`, `(1,-1)`, so the vertical/diagonal coordinate transforms
+  (`step`/`offset`/`contiguous_segment`) are exhausted too, not just the
+  horizontal row. The slow reference is purely 1-D, so its expected value is
+  shared across the four directions. Total checked: `(6561 + 59049) * 4 = 262440`
+  direction/line combinations.
+- Current result: zero mismatches. This makes the single-direction exact-five,
+  overline, and four-shape (including dedup) logic a complete proof rather than
+  sampling, independent of any external oracle.
 
 Current random oracle smoke:
 

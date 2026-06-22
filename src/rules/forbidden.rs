@@ -467,9 +467,29 @@ mod tests {
         board
     }
 
-    fn line_grid(line: &[Side; BOARD_SIZE]) -> [[Side; BOARD_SIZE]; BOARD_SIZE] {
+    const EXHAUSTION_DIRS: [(isize, isize); 4] = [(1, 0), (0, 1), (1, 1), (1, -1)];
+
+    // Lay the enumerated 1-D line along `dir` through the board centre, so the
+    // same exhaustion also exercises the vertical/diagonal coordinate transforms
+    // (step/offset/contiguous_segment), not just the horizontal row.
+    fn line_grid_along(
+        line: &[Side; BOARD_SIZE],
+        dir: (isize, isize),
+    ) -> [[Side; BOARD_SIZE]; BOARD_SIZE] {
+        let center = (BOARD_SIZE / 2) as isize;
+        let (dx, dy) = dir;
         let mut grid = [[EMPTY; BOARD_SIZE]; BOARD_SIZE];
-        grid[7].copy_from_slice(line);
+        for (position, &side) in line.iter().enumerate() {
+            if side == EMPTY {
+                continue;
+            }
+            let offset = position as isize - center;
+            let x = center + offset * dx;
+            let y = center + offset * dy;
+            // Non-empty cells only exist inside the enumerated window, which
+            // stays in-bounds for all four directions.
+            grid[y as usize][x as usize] = side;
+        }
         grid
     }
 
@@ -570,23 +590,31 @@ mod tests {
         let cases = 3usize.pow((width - 1) as u32);
         for code in 0..cases {
             let line = enumerated_line(width, code);
-            let mut grid = line_grid(&line);
+            // The slow reference is purely 1-D, so the expected values are the
+            // same for every direction the line is laid along.
+            let expected_exact_five = slow_has_exact_five(&line);
+            let expected_overline = slow_has_overline(&line);
+            let expected_four = slow_four_shape_count(&line);
 
-            assert_eq!(
-                has_exact_five(&grid, center, 7),
-                slow_has_exact_five(&line),
-                "width={width} code={code} line={line:?} exact-five mismatch"
-            );
-            assert_eq!(
-                has_overline(&grid, center, 7),
-                slow_has_overline(&line),
-                "width={width} code={code} line={line:?} overline mismatch"
-            );
-            assert_eq!(
-                count_four_shapes_through(&mut grid, center, 7, (1, 0)),
-                slow_four_shape_count(&line),
-                "width={width} code={code} line={line:?} four-count mismatch"
-            );
+            for dir in EXHAUSTION_DIRS {
+                let mut grid = line_grid_along(&line, dir);
+
+                assert_eq!(
+                    has_exact_five(&grid, center, center),
+                    expected_exact_five,
+                    "width={width} code={code} dir={dir:?} line={line:?} exact-five mismatch"
+                );
+                assert_eq!(
+                    has_overline(&grid, center, center),
+                    expected_overline,
+                    "width={width} code={code} dir={dir:?} line={line:?} overline mismatch"
+                );
+                assert_eq!(
+                    count_four_shapes_through(&mut grid, center, center, dir),
+                    expected_four,
+                    "width={width} code={code} dir={dir:?} line={line:?} four-count mismatch"
+                );
+            }
         }
     }
 
