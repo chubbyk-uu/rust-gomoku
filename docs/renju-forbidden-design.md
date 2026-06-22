@@ -250,12 +250,8 @@ Initial public API:
 ```text
 RuleSet
 ForbiddenKind
-classify_black_move(board, move) -> ForbiddenKind
-is_forbidden_black_move(board, move) -> bool
-would_black_exact_five(board, move) -> bool
-would_black_overline(board, move) -> bool
-black_four_count_after(board, move) -> usize
-black_true_open_three_count_after(board, move) -> usize
+classify_forbidden_move(board, move, side, rule) -> Result<ForbiddenKind, BoardError>
+classify_forbidden_stones(stones, candidate, side, rule) -> Result<ForbiddenKind, BoardError>
 ```
 
 Important constraints:
@@ -323,6 +319,101 @@ Exit criteria:
 - At least one case covers the fake open-three example that motivated this
   work.
 
+Current Phase 2 status:
+
+- Added `src/rules/forbidden.rs` and `src/rules/mod.rs`.
+- Added `src/bin/renju_rule_probe.rs` so Python oracle scripts can call the
+  Rust detector without wiring it into movegen/search.
+- `scripts/renju_oracle_compare.py` now compares the local Rust detector,
+  Rapfi, and `renju_forbid`; `--quiet` suppresses successful per-case output
+  for random batches.
+- The hand cases pass the local detector and Rapfi forbidden/none checks.
+  `renju_forbid` has zero unexplained typed mismatches; one coexisting-reason
+  case is accepted as a reporting-convention difference and recorded in
+  `cases/renju/oracle_mismatches.jsonl`.
+- Added same-line double-four cases (`same_line_df_*`), where both fours share
+  one line. This is a distinct code path from cross double-four (one four in each
+  of two directions); same-line requires counting multiple four-shapes within a
+  single direction. Four motifs are covered, each on all four axes
+  (`_h`/`_v`/`_dd`/`_du` = horizontal, vertical, main and anti diagonal), 16
+  cases total, all confirmed against Rapfi and `renju_forbid`:
+  - `solid` — `BBB_X_BBB`: two straight fours, gaps adjacent to the candidate.
+  - `broken` — `BB_BX_BB`: two broken fours, completion gaps two cells away.
+  - `broken_mirror` — `BB_XB_BB`: mirror of `broken`, candidate on the other
+    side of its triple.
+  - `split` — `B_BXB_B`: candidate flanked by black on both sides.
+  In every motif the empty completion cells keep each completion an exact five
+  rather than an overline, so these are genuine double-fours. The detector
+  already handled all of them (it counts multiple four-shapes within a single
+  direction); these cases lock that behavior in. The `_du` cases also give the
+  first coverage of the anti-diagonal `(1, -1)` direction in the suite.
+- Added overline and double-three shape coverage on all four axes:
+  - `overline_end6_*` (five extended to six at one end), `overline_mid6_*`
+    (gap fill to six), `overline_seven_mid_*` (gap fill to seven), each on
+    `h`/`v`/`dd`/`du`.
+  - `double_three_straight_{hd,ha,vd,va}` fills in the four axis-pair
+    combinations that were previously uncovered (the suite already had
+    horizontal+vertical and the two-diagonal cross); plus
+    `double_three_jump_*` for broken open-three combinations.
+  - Negative coverage on `v`/`dd`/`du`: `single_straight_three_*`,
+    `single_jump_three_*`, `single_four_*`, and `fake_three_blocked_*` all
+    classify as `none`, guarding against false-positive forbidden reports.
+- Added recursive fake-open-three coverage for the `is_legal_black_gain` path,
+  which is the hardest part of double-three detection:
+  - `recursive_fake_three_both_gains_forbidden`: a vertical true three plus a
+    visual horizontal three whose *both* extension squares are double-four
+    forbidden, so the horizontal line is not a true open-three and the candidate
+    is `none`.
+  - `recursive_control_only_left/right_gain_forbidden`: same skeleton with only
+    one extension trapped, leaving the other legal, so the result flips back to
+    `double_three`. These controls prove the recursion is load-bearing rather
+    than incidental.
+- Full hand-case suite is now 72 cases with zero detector/Rapfi mismatches,
+  zero unexplained `renju_forbid` mismatches, and one accepted typed
+  reporting-convention difference.
+- Local ad-hoc dense stress: 600 positions built from a cross double-three
+  skeleton plus random nearby black/white interference (detector distribution
+  `double_three:277, none:276, double_four:47`) all agree across the detector,
+  Rapfi, and `renju_forbid`. A separate 1000-position dense random batch
+  (`--min-plies 30 --max-plies 70`) also had zero detector/`renju_forbid`
+  mismatches. These dense batches exercise the recursion far more often than the
+  earlier sparse random smoke, but the targeted 600-position generator/output is
+  not yet committed and should not be treated as a durable acceptance gate until
+  it is reproducible from the repository.
+- Not yet covered by a dedicated hand case: the non-monotonic recursion, where a
+  gain square looks forbidden but is actually legal because its own forbidding
+  shape depends on an illegal (overline) continuation. The detector's recursive
+  structure handles it in principle and the dense batches give indirect
+  confidence; a constructed case is left as follow-up.
+
+#### Classification Convention: Coexisting Forbidden Reasons
+
+RIF 9.2 lists overline, double-four and double-three as *parallel* forbidden
+reasons. A single move can satisfy more than one at once (for example a move that
+makes a seven-in-a-row and also two true threes). For such a move every tool
+agrees it is forbidden; only the reported *type* can differ.
+
+The detector returns a single `ForbiddenKind`, chosen as a primary reason with
+the priority `exact_five (legal win) > overline > double_four > double_three`
+(see `classify_placed_black`). This is a reporting convention, not a claim that
+the lower-priority reasons are absent. It is sufficient for move generation and
+search, which only need the forbidden/legal boolean; the type is used for tests
+and diagnostics.
+
+Consequence for oracle comparison: when reasons coexist, a type-blind oracle
+(Rapfi) can only confirm forbidden/legal, and a typed oracle (`renju_forbid`)
+may report a different reason than the detector. The case
+`overline_and_double_three_coexist` is exactly this: detector reports `overline`,
+`renju_forbid` reports `double_three`, both correct on legality. It is recorded
+in `cases/renju/oracle_mismatches.jsonl` as a convention difference, not a bug.
+The dense-batch comparisons therefore validate the forbidden/legal boundary
+strongly (Rapfi 1600/1600 and `renju_forbid` 1599/1600 agree), while exact-type
+agreement is subject to this convention.
+
+A future option, if a multi-reason output is ever needed, is to return all
+satisfied reasons plus a `primary_reason`; this is not required for the movegen
+and search integration.
+
 ### Phase 3: Fuzz And Exhaustive Local Pattern Checks
 
 Add broader validation before touching search:
@@ -357,6 +448,8 @@ Current random oracle smoke:
   `python3 scripts/renju_random_cases.py --count 1000 --seed N --fill-renju-forbid --verify-rapfi --output /tmp/renju_random_seed_N.jsonl`
 - Seeds `1`, `2`, and `3` completed with zero Rapfi/`renju_forbid`
   forbidden/none mismatches.
+- The Phase 2 Rust detector also matches the typed expected results for these
+  three 1000-case random batches with zero mismatches.
 - Distribution:
   - seed 1: `none=996`, `double_three=3`, `double_four=1`, `overline=0`
   - seed 2: `none=989`, `double_three=8`, `double_four=1`, `overline=2`

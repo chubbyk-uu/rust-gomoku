@@ -31,6 +31,9 @@ DEFAULT_RAPFI_BIN = Path(
     "/home/jerry/downloads/oracle_ws/rapfi/Rapfi/build/gcc-oracle/pbrain-rapfi"
 )
 DEFAULT_RENJU_FORBID_ROOT = Path("/home/jerry/downloads/oracle_ws/renju_forbid")
+DEFAULT_KNOWN_MISMATCHES = (
+    Path(__file__).resolve().parents[1] / "cases" / "renju" / "oracle_mismatches.jsonl"
+)
 
 
 @dataclass(frozen=True)
@@ -130,6 +133,25 @@ def load_fixtures(path: Path) -> list[Fixture]:
             continue
         fixtures.append(parse_fixture(json.loads(stripped), line_number))
     return fixtures
+
+
+def load_known_kind_differences(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+
+    out = set()
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        raw = json.loads(stripped)
+        if not isinstance(raw, dict):
+            raise ValueError(f"{path}:{line_number}: known mismatch must be an object")
+        name = str(raw.get("name") or "")
+        kind = str(raw.get("kind") or "")
+        if name and "classification convention difference" in kind:
+            out.add(name)
+    return out
 
 
 def sgf_coord(point: Point) -> str:
@@ -268,7 +290,9 @@ def rapfi_forbidden_points(
     return parse_rapfi_forbid_line(forbid_lines[0])
 
 
-def compare_rapfi(fixtures: list[Fixture], *, rapfi_bin: Path, timeout_seconds: float) -> int:
+def compare_rapfi(
+    fixtures: list[Fixture], *, rapfi_bin: Path, timeout_seconds: float, quiet: bool
+) -> int:
     mismatches = 0
     print("rapfi_compare=begin")
     for fixture in fixtures:
@@ -282,11 +306,66 @@ def compare_rapfi(fixtures: list[Fixture], *, rapfi_bin: Path, timeout_seconds: 
             mismatches += 1
         actual_text = "forbidden" if actual else "none"
         expected_text = "forbidden" if expected else "none"
-        print(
-            f"rapfi {status} {fixture.name}: expected={expected_text} actual={actual_text} "
-            f"forbid_count={len(points)}"
-        )
+        if not quiet or status == "mismatch":
+            print(
+                f"rapfi {status} {fixture.name}: expected={expected_text} actual={actual_text} "
+                f"forbid_count={len(points)}"
+            )
     print(f"rapfi_compare=end mismatches={mismatches}")
+    return mismatches
+
+
+def run_local_detector(case_file: Path, *, timeout_seconds: float) -> dict[str, str]:
+    proc = subprocess.run(
+        [
+            "cargo",
+            "run",
+            "--quiet",
+            "--bin",
+            "renju_rule_probe",
+            "--",
+            "--case-file",
+            str(case_file),
+        ],
+        cwd=repo_root(),
+        text=True,
+        capture_output=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(
+            proc.returncode, ["cargo", "run", "--bin", "renju_rule_probe"], proc.stdout, proc.stderr
+        )
+    results = {}
+    for line in proc.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        name, actual = stripped.split(maxsplit=1)
+        results[name] = actual
+    return results
+
+
+def compare_local_detector(
+    fixtures: list[Fixture], *, case_file: Path, timeout_seconds: float, quiet: bool
+) -> int:
+    mismatches = 0
+    print("local_detector_compare=begin")
+    actual_by_name = run_local_detector(case_file, timeout_seconds=timeout_seconds)
+    for fixture in fixtures:
+        actual = actual_by_name.get(fixture.name)
+        if actual is None:
+            raise ValueError(f"local detector did not return fixture {fixture.name}")
+        status = "ok" if actual == fixture.expected else "mismatch"
+        if status == "mismatch":
+            mismatches += 1
+        if not quiet or status == "mismatch":
+            print(
+                f"local_detector {status} {fixture.name}: "
+                f"expected={fixture.expected} actual={actual}"
+            )
+    print(f"local_detector_compare=end mismatches={mismatches}")
     return mismatches
 
 
@@ -352,21 +431,47 @@ def run_renju_forbid(
     return results
 
 
-def compare_renju_forbid(fixtures: list[Fixture], *, root: Path, timeout_seconds: float) -> int:
+def compare_renju_forbid(
+    fixtures: list[Fixture],
+    *,
+    root: Path,
+    timeout_seconds: float,
+    quiet: bool,
+    known_kind_differences: set[str],
+) -> int:
     mismatches = 0
+    accepted = 0
     print("renju_forbid_compare=begin")
     actual_results = run_renju_forbid(fixtures, root=root, timeout_seconds=timeout_seconds)
     for fixture, actual in zip(fixtures, actual_results):
         status = "ok" if actual == fixture.expected else "mismatch"
+        if (
+            status == "mismatch"
+            and fixture.name in known_kind_differences
+            and expected_forbidden(fixture)
+            and actual != "none"
+        ):
+            status = "accepted_kind_difference"
+            accepted += 1
         if status == "mismatch":
             mismatches += 1
-        print(f"renju_forbid {status} {fixture.name}: expected={fixture.expected} actual={actual}")
-    print(f"renju_forbid_compare=end mismatches={mismatches}")
+        if not quiet or status == "mismatch":
+            print(f"renju_forbid {status} {fixture.name}: expected={fixture.expected} actual={actual}")
+    print(f"renju_forbid_compare=end mismatches={mismatches} accepted_kind_differences={accepted}")
     return mismatches
 
 
-def print_summary(fixtures: list[Fixture], *, show_sgf: bool) -> None:
+def print_summary(fixtures: list[Fixture], *, show_sgf: bool, quiet: bool) -> None:
     print(f"fixtures={len(fixtures)}")
+    if quiet and not show_sgf:
+        counts = {expected: 0 for expected in sorted(VALID_EXPECTED)}
+        for fixture in fixtures:
+            counts[fixture.expected] += 1
+        print(
+            "expected_counts="
+            + ",".join(f"{expected}:{counts[expected]}" for expected in sorted(counts))
+        )
+        return
     for fixture in fixtures:
         win_suffix = " expected_win=true" if fixture.expected_win else ""
         print(
@@ -385,6 +490,9 @@ def parse_args() -> argparse.Namespace:
         default=repo_root() / "cases" / "renju" / "forbidden_hand_cases.jsonl",
     )
     parser.add_argument("--show-sgf", action="store_true")
+    parser.add_argument("--quiet", action="store_true", help="only print summaries and mismatches")
+    parser.add_argument("--skip-local", action="store_true")
+    parser.add_argument("--local-timeout", type=float, default=30.0)
     parser.add_argument(
         "--rapfi-bin",
         type=Path,
@@ -405,35 +513,52 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="fail if Rapfi or Go/renju_forbid prerequisites are not configured",
     )
+    parser.add_argument(
+        "--known-mismatches",
+        type=Path,
+        default=DEFAULT_KNOWN_MISMATCHES,
+        help="JSONL file for accepted oracle reporting-convention differences",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     fixtures = load_fixtures(args.case_file)
-    print_summary(fixtures, show_sgf=args.show_sgf)
+    print_summary(fixtures, show_sgf=args.show_sgf, quiet=args.quiet)
 
     rapfi_bin = resolve_rapfi_bin(args.rapfi_bin)
     renju_forbid_root = resolve_renju_forbid_root(args.renju_forbid_root)
+    known_kind_differences = load_known_kind_differences(args.known_mismatches)
     rapfi_ok, rapfi_detail = rapfi_available(rapfi_bin)
     renju_forbid_ok, renju_forbid_detail = renju_forbid_available(renju_forbid_root)
     print(f"rapfi_available={rapfi_ok} detail={rapfi_detail}")
     print(f"renju_forbid_available={renju_forbid_ok} detail={renju_forbid_detail}")
-    print("local_detector=not_implemented")
+    print(f"known_kind_differences={len(known_kind_differences)} detail={args.known_mismatches}")
 
     if args.require_oracles and not (rapfi_ok and renju_forbid_ok):
         return 2
     mismatches = 0
+    if not args.skip_local:
+        mismatches += compare_local_detector(
+            fixtures, case_file=args.case_file, timeout_seconds=args.local_timeout, quiet=args.quiet
+        )
+    else:
+        print("local_detector_compare=skipped")
     if rapfi_ok and not args.skip_rapfi:
         assert rapfi_bin is not None
         mismatches += compare_rapfi(
-            fixtures, rapfi_bin=rapfi_bin, timeout_seconds=args.oracle_timeout
+            fixtures, rapfi_bin=rapfi_bin, timeout_seconds=args.oracle_timeout, quiet=args.quiet
         )
     else:
         print("rapfi_compare=skipped")
     if renju_forbid_ok and not args.skip_renju_forbid:
         mismatches += compare_renju_forbid(
-            fixtures, root=renju_forbid_root, timeout_seconds=args.oracle_timeout
+            fixtures,
+            root=renju_forbid_root,
+            timeout_seconds=args.oracle_timeout,
+            quiet=args.quiet,
+            known_kind_differences=known_kind_differences,
         )
     else:
         print("renju_forbid_compare=skipped")
@@ -445,6 +570,13 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except subprocess.CalledProcessError as exc:
+        print(f"error: command failed with exit code {exc.returncode}: {exc.cmd}", file=sys.stderr)
+        if exc.stdout:
+            print(f"stdout:\n{exc.stdout}", file=sys.stderr)
+        if exc.stderr:
+            print(f"stderr:\n{exc.stderr}", file=sys.stderr)
+        raise SystemExit(1)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1)
