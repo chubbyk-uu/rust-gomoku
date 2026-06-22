@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -291,15 +292,30 @@ def rapfi_forbidden_points(
 
 
 def compare_rapfi(
-    fixtures: list[Fixture], *, rapfi_bin: Path, timeout_seconds: float, quiet: bool
-) -> int:
+    fixtures: list[Fixture], *, rapfi_bin: Path, timeout_seconds: float, quiet: bool, jobs: int
+) -> tuple[int, dict[str, bool]]:
     mismatches = 0
+    forbidden_by_name = {}
     print("rapfi_compare=begin")
-    for fixture in fixtures:
+
+    def probe(fixture: Fixture) -> tuple[Fixture, set[tuple[int, int]]]:
         points = rapfi_forbidden_points(
             fixture, rapfi_bin=rapfi_bin, timeout_seconds=timeout_seconds
         )
+        return fixture, points
+
+    # Each fixture is an independent Rapfi subprocess, so a thread pool overlaps
+    # the per-process startup/search latency. map() preserves fixture order, so
+    # output stays deterministic regardless of completion order.
+    if jobs > 1 and len(fixtures) > 1:
+        with ThreadPoolExecutor(max_workers=jobs) as executor:
+            results = list(executor.map(probe, fixtures))
+    else:
+        results = [probe(fixture) for fixture in fixtures]
+
+    for fixture, points in results:
         actual = (fixture.candidate.x, fixture.candidate.y) in points
+        forbidden_by_name[fixture.name] = actual
         expected = expected_forbidden(fixture)
         status = "ok" if actual == expected else "mismatch"
         if status == "mismatch":
@@ -312,7 +328,7 @@ def compare_rapfi(
                 f"forbid_count={len(points)}"
             )
     print(f"rapfi_compare=end mismatches={mismatches}")
-    return mismatches
+    return mismatches, forbidden_by_name
 
 
 def run_local_detector(case_file: Path, *, timeout_seconds: float) -> dict[str, str]:
@@ -438,26 +454,44 @@ def compare_renju_forbid(
     timeout_seconds: float,
     quiet: bool,
     known_kind_differences: set[str],
+    rapfi_forbidden_by_name: dict[str, bool] | None,
 ) -> int:
     mismatches = 0
-    accepted = 0
+    accepted_known = 0
+    accepted_coexisting_overline_double_three = 0
     print("renju_forbid_compare=begin")
     actual_results = run_renju_forbid(fixtures, root=root, timeout_seconds=timeout_seconds)
     for fixture, actual in zip(fixtures, actual_results):
         status = "ok" if actual == fixture.expected else "mismatch"
+        rapfi_forbidden = (
+            None if rapfi_forbidden_by_name is None else rapfi_forbidden_by_name.get(fixture.name)
+        )
+        if (
+            status == "mismatch"
+            and fixture.expected == "overline"
+            and actual == "double_three"
+            and rapfi_forbidden is True
+        ):
+            status = "accepted_coexisting_overline_double_three"
+            accepted_coexisting_overline_double_three += 1
         if (
             status == "mismatch"
             and fixture.name in known_kind_differences
             and expected_forbidden(fixture)
             and actual != "none"
         ):
-            status = "accepted_kind_difference"
-            accepted += 1
+            status = "accepted_known_kind_difference"
+            accepted_known += 1
         if status == "mismatch":
             mismatches += 1
         if not quiet or status == "mismatch":
             print(f"renju_forbid {status} {fixture.name}: expected={fixture.expected} actual={actual}")
-    print(f"renju_forbid_compare=end mismatches={mismatches} accepted_kind_differences={accepted}")
+    print(
+        "renju_forbid_compare=end "
+        f"mismatches={mismatches} "
+        f"accepted_coexisting_overline_double_three={accepted_coexisting_overline_double_three} "
+        f"accepted_known_kind_differences={accepted_known}"
+    )
     return mismatches
 
 
@@ -501,6 +535,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--skip-rapfi", action="store_true")
     parser.add_argument(
+        "--jobs",
+        type=int,
+        default=min(8, os.cpu_count() or 1),
+        help="parallel Rapfi subprocesses (default: min(8, cpu count))",
+    )
+    parser.add_argument(
         "--renju-forbid-root",
         type=Path,
         default=None,
@@ -539,6 +579,7 @@ def main() -> int:
     if args.require_oracles and not (rapfi_ok and renju_forbid_ok):
         return 2
     mismatches = 0
+    rapfi_forbidden_by_name = None
     if not args.skip_local:
         mismatches += compare_local_detector(
             fixtures, case_file=args.case_file, timeout_seconds=args.local_timeout, quiet=args.quiet
@@ -547,9 +588,11 @@ def main() -> int:
         print("local_detector_compare=skipped")
     if rapfi_ok and not args.skip_rapfi:
         assert rapfi_bin is not None
-        mismatches += compare_rapfi(
-            fixtures, rapfi_bin=rapfi_bin, timeout_seconds=args.oracle_timeout, quiet=args.quiet
+        rapfi_mismatches, rapfi_forbidden_by_name = compare_rapfi(
+            fixtures, rapfi_bin=rapfi_bin, timeout_seconds=args.oracle_timeout,
+            quiet=args.quiet, jobs=args.jobs,
         )
+        mismatches += rapfi_mismatches
     else:
         print("rapfi_compare=skipped")
     if renju_forbid_ok and not args.skip_renju_forbid:
@@ -559,6 +602,7 @@ def main() -> int:
             timeout_seconds=args.oracle_timeout,
             quiet=args.quiet,
             known_kind_differences=known_kind_differences,
+            rapfi_forbidden_by_name=rapfi_forbidden_by_name,
         )
     else:
         print("renju_forbid_compare=skipped")

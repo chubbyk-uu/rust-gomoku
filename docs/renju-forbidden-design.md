@@ -371,15 +371,38 @@ Current Phase 2 status:
 - Full hand-case suite is now 72 cases with zero detector/Rapfi mismatches,
   zero unexplained `renju_forbid` mismatches, and one accepted typed
   reporting-convention difference.
-- Local ad-hoc dense stress: 600 positions built from a cross double-three
-  skeleton plus random nearby black/white interference (detector distribution
-  `double_three:277, none:276, double_four:47`) all agree across the detector,
-  Rapfi, and `renju_forbid`. A separate 1000-position dense random batch
-  (`--min-plies 30 --max-plies 70`) also had zero detector/`renju_forbid`
-  mismatches. These dense batches exercise the recursion far more often than the
-  earlier sparse random smoke, but the targeted 600-position generator/output is
-  not yet committed and should not be treated as a durable acceptance gate until
-  it is reproducible from the repository.
+- Reproducible dense stress: `scripts/renju_dense_stress.py` builds positions
+  from fixed forbidden-shape skeletons (`cross_three`, `ff_cross`, `ff_inline`,
+  `overline`, `ol_seven`) plus seeded random nearby black/white interference,
+  then labels each with the local detector. It is deterministic per `--seed`
+  (skeletons iterated in sorted order, fixed per-skeleton seed offsets), so the
+  same command reproduces byte-identical output. Run:
+
+  ```bash
+  python3 scripts/renju_dense_stress.py --skeleton all --count 400 --seed 20 \
+      --output /tmp/renju_dense_seed20.jsonl
+  python3 scripts/renju_oracle_compare.py --case-file /tmp/renju_dense_seed20.jsonl --quiet
+  ```
+
+  `renju_oracle_compare.py` runs the Rapfi oracle in parallel by default
+  (`--jobs`, default `min(8, cpu count)`); each fixture is an independent Rapfi
+  subprocess and `map()` keeps output deterministic. On a 2000-case batch this is
+  about 7x faster (≈2 min serial → ≈18 s at `--jobs 8`). `renju_forbid` and the
+  local detector already run as a single batched stdin pass.
+
+  These skeleton batches hit the double-three recursion far more often than the
+  earlier sparse random smoke, and `renju_random_cases.py --min-plies 30
+  --max-plies 70` gives a complementary deep-random batch. Across these batches
+  the detector matches Rapfi on the forbidden/legal boolean with zero mismatches
+  (e.g. 2000/2000 on `--seed 20`). The only typed differences are the
+  overline/double-three coexistence convention (see below): such positions recur
+  in overline-heavy batches, so this is a *category* of accepted difference, not
+  a fixed list. `renju_oracle_compare.py` auto-accepts `detector=overline` /
+  `renju_forbid=double_three` when Rapfi also confirms the point is forbidden,
+  and reports them as `accepted_coexisting_overline_double_three`. The reverse
+  direction is not auto-accepted: if the detector reports `double_three` while
+  `renju_forbid` reports `overline`, that may indicate the detector missed an
+  overline and should be triaged as a mismatch.
 - Not yet covered by a dedicated hand case: the non-monotonic recursion, where a
   gain square looks forbidden but is actually legal because its own forbidding
   shape depends on an illegal (overline) continuation. The detector's recursive
@@ -402,13 +425,25 @@ and diagnostics.
 
 Consequence for oracle comparison: when reasons coexist, a type-blind oracle
 (Rapfi) can only confirm forbidden/legal, and a typed oracle (`renju_forbid`)
-may report a different reason than the detector. The case
-`overline_and_double_three_coexist` is exactly this: detector reports `overline`,
-`renju_forbid` reports `double_three`, both correct on legality. It is recorded
-in `cases/renju/oracle_mismatches.jsonl` as a convention difference, not a bug.
-The dense-batch comparisons therefore validate the forbidden/legal boundary
-strongly (Rapfi 1600/1600 and `renju_forbid` 1599/1600 agree), while exact-type
-agreement is subject to this convention.
+may report a different reason than the detector. The hand case
+`overline_and_double_three_coexist` is one example: detector reports `overline`,
+`renju_forbid` reports `double_three`, both correct on legality. Dense
+overline-heavy batches produce more examples such as `overline_61` and
+`overline_318`, so this is handled as a general comparison convention instead
+of a growing per-case allowlist.
+
+`renju_oracle_compare.py` accepts this category only when all of the following
+are true:
+
+- the detector-labelled expected kind is `overline`;
+- `renju_forbid` reports `double_three`;
+- Rapfi confirms the candidate is forbidden.
+
+The script still reads `cases/renju/oracle_mismatches.jsonl` as a durable record
+of manually analyzed examples, but new dense-batch coexistence positions no
+longer need to be added one by one. Exact-type agreement remains subject to this
+single-reason reporting convention; forbidden/legal agreement remains the
+primary oracle boundary for movegen and search integration.
 
 A future option, if a multi-reason output is ever needed, is to return all
 satisfied reasons plus a `primary_reason`; this is not required for the movegen
