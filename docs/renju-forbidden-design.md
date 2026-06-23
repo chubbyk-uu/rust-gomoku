@@ -1001,6 +1001,58 @@ Phase 9 progress:
   normal unit regression. It covers the original non-local stale-suppression
   failure where a later move made a previously forbidden black point legal.
 
+### SlowRenju Alignment Plan
+
+Near-term goal: finish the Renju implementation against SlowRenju before
+borrowing stronger or more complex ideas from Rapfi. This project is already a
+Rust port in the SlowRenju/pygomoku lineage, so the first target is semantic and
+strength parity with that family: forbidden detection should behave like
+SlowRenju, and Renju-mode playing strength should not drop materially from the
+SlowRenju-style baseline.
+
+Execution order:
+
+1. Build an explicit SlowRenju mapping table.
+   - Map SlowRenju forbidden/rule, `ValueWide`, value table, move generation,
+     VCF/VC2/VCT, and protocol-facing rule handling to the Rust modules.
+   - Record every intentional difference, especially places where Rust keeps a
+     simpler implementation for now.
+2. Finish forbidden-rule parity.
+   - Keep validating overline, double-four, and recursive double-three against
+     SlowRenju-style semantics plus Rapfi/renju_forbid oracle checks.
+   - Treat the current stateless `trd3`-style refresh as the baseline for
+     recursive double-three eval invalidation.
+   - Opening rules remain out of scope unless requested separately.
+3. Finish SlowRenju-style static eval parity.
+   - Reconfirm the Rust value tables match the SlowRenju/pygomoku tables.
+   - Compare Rust Renju eval semantics with SlowRenju's black forbidden-point
+     suppression and white use of black forbidden defences.
+   - Add focused tests for any missing ValueW branch before changing weights.
+4. Finish search and tactical parity.
+   - Recheck movegen, VCF, VCT, fallback, and root legality so black never
+     searches or selects forbidden moves under Renju.
+   - Add tactical fixtures where white wins because black's only defence is
+     forbidden.
+   - Keep freestyle behavior and root diff stable.
+5. Measure Renju performance after each change.
+   - Keep the existing legality and movegen perf probes.
+   - Add a dedicated `value_wide_compute_for_rule` perf probe if eval refresh
+     cost becomes visible in search profiles.
+   - Only consider Rapfi-style line tables after SlowRenju-style caching has a
+     measured bottleneck that justifies the extra complexity.
+6. Measure Renju strength.
+   - Run fixed-position suites to catch obvious tactical/eval regressions.
+   - Run Renju self-play or engine-vs-engine smoke matches with identical time
+     controls and report win rate, draw rate, avg/p95 move time, illegal-move
+     count, and timeout count.
+   - Compare Renju mode against the SlowRenju-style target before adopting
+     Rapfi ideas.
+7. Rapfi follow-up, after SlowRenju parity is accepted.
+   - Review Rapfi only for targeted upgrades: faster forbidden line tables,
+     stronger candidate ordering, or tactical search improvements.
+   - Keep each Rapfi-inspired idea behind a measured correctness/performance
+     gate before mixing it into the default Renju path.
+
 ## Fixture Format Proposal
 
 Use JSONL so cases are easy to append:
