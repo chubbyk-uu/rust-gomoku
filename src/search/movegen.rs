@@ -458,6 +458,132 @@ fn best_forcing_candidate(candidates: &[Candidate], preserve_scan_order: bool) -
 mod tests {
     use super::*;
 
+    // The Phase 1/2 forbidden fixtures classify a single black candidate. Here
+    // we reuse them as a board+movegen integration regression: the rule-aware
+    // legality gate that movegen/search rely on must agree with each fixture's
+    // expected classification, and Renju movegen must never emit a forbidden
+    // black candidate that freestyle would keep.
+    #[test]
+    fn forbidden_fixtures_drive_rule_aware_legality_and_movegen() {
+        use crate::config::load_default_config;
+        use crate::constants::{BLACK, WHITE};
+        use crate::eval::recompute_all;
+        use crate::rules::RuleSet;
+        use std::collections::HashSet;
+
+        #[derive(serde::Deserialize)]
+        struct Stone {
+            x: usize,
+            y: usize,
+            side: i8,
+        }
+        #[derive(serde::Deserialize)]
+        struct Point {
+            x: usize,
+            y: usize,
+        }
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            name: String,
+            moves: Vec<Stone>,
+            candidate: Point,
+            expected: String,
+        }
+
+        let raw = include_str!("../../cases/renju/forbidden_hand_cases.jsonl");
+        let mut freestyle_config = load_default_config();
+        freestyle_config.rule_set = RuleSet::Freestyle;
+        let mut renju_config = load_default_config();
+        renju_config.rule_set = RuleSet::Renju;
+
+        let mut checked = 0usize;
+        let mut movegen_filtered = 0usize;
+        for line in raw.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let case: Fixture = serde_json::from_str(line)
+                .unwrap_or_else(|err| panic!("fixture parse failed: {err}"));
+
+            let mut board = Board::new();
+            for stone in &case.moves {
+                board.grid_rows_mut()[stone.y][stone.x] = stone.side;
+            }
+            let candidate = xy_to_move(case.candidate.x, case.candidate.y).unwrap();
+            assert_eq!(
+                board.at(case.candidate.x, case.candidate.y),
+                Ok(EMPTY),
+                "{}: candidate must be empty",
+                case.name
+            );
+
+            let forbidden = case.expected != "none";
+
+            // The legality gate must match the fixture for black under Renju,
+            // and never forbid in freestyle or for white.
+            assert_eq!(
+                board.is_legal_move_for_rule(candidate, BLACK, RuleSet::Renju),
+                !forbidden,
+                "{}: renju black legality disagrees with expected `{}`",
+                case.name,
+                case.expected
+            );
+            assert!(
+                board.is_legal_move_for_rule(candidate, BLACK, RuleSet::Freestyle),
+                "{}: freestyle must never forbid",
+                case.name
+            );
+            assert!(
+                board.is_legal_move_for_rule(candidate, WHITE, RuleSet::Renju),
+                "{}: white has no forbidden moves",
+                case.name
+            );
+
+            // Movegen: when freestyle would emit the candidate (it is covered by
+            // a neighbouring stone), Renju movegen must drop it iff forbidden.
+            let mut caches = EvalCaches::new();
+            recompute_all(&mut board, &mut caches);
+            let allowed: HashSet<Move> = [candidate].into_iter().collect();
+            let emits = |config: &EngineConfig| {
+                generate_candidates(
+                    &board,
+                    &caches,
+                    BLACK,
+                    config,
+                    None,
+                    Some(&allowed),
+                    None,
+                    false,
+                )
+                .candidates
+                .iter()
+                .any(|c| c.move_ == candidate)
+            };
+            if emits(&freestyle_config) {
+                let renju_emits = emits(&renju_config);
+                assert_eq!(
+                    renju_emits, !forbidden,
+                    "{}: renju movegen filtering disagrees with expected `{}`",
+                    case.name, case.expected
+                );
+                if forbidden && !renju_emits {
+                    movegen_filtered += 1;
+                }
+            }
+
+            checked += 1;
+        }
+        assert!(
+            checked >= 60,
+            "expected to check the full fixture set, got {checked}"
+        );
+        assert!(
+            movegen_filtered >= 10,
+            "movegen filtering branch barely exercised ({movegen_filtered}); test may be vacuous"
+        );
+    }
+
     #[test]
     fn coverage_tracker_matches_covered_moves_after_play_and_undo() {
         let mut board = Board::new();
