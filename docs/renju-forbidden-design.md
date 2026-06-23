@@ -603,11 +603,11 @@ Known Phase 4 performance cost:
 
 - Freestyle movegen and fallback keep the old raw `is_legal_move` path.
 - Renju black movegen calls the recursive forbidden detector for candidate
-  filtering. This is intentionally conservative for correctness, but it can be
-  expensive in deeper search. The expected optimization path is a rule-aware
-  legality cache or incremental forbidden-point table after terminal and
-  tactical semantics are stable; do not weaken true-open-three recursion to
-  gain speed.
+  filtering. Search-tree placement uses `play_assuming_rule_legal`, so it does
+  not repeat the forbidden check for candidates already filtered by movegen; it
+  only applies rule-aware terminal semantics. Further optimization, if needed,
+  should use a rule-aware legality cache or incremental forbidden-point table;
+  do not weaken true-open-three recursion to gain speed.
 
 ### Phase 5: Terminal Semantics And Protocol Surface
 
@@ -656,6 +656,10 @@ Current Phase 5 status:
   semantics and move legality use the same configured rule. Existing replay and
   default `play` behavior remain freestyle to preserve current reference
   alignment tests.
+- Search-tree internals use `play_assuming_rule_legal` after candidate
+  generation has already filtered forbidden moves. This avoids a second
+  recursive forbidden check per Renju black candidate while still applying
+  black-exact-five terminal semantics.
 - Added board-level tests for black exact-five win, black overline rejection,
   white overline win, and freestyle black overline win.
 

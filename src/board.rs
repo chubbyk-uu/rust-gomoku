@@ -155,7 +155,7 @@ impl Board {
     }
 
     pub fn play(&mut self, move_: Move, side: Option<Side>) -> Result<PlayedMove, BoardError> {
-        self.play_with_rule(move_, side, RuleSet::Freestyle)
+        self.play_with_rule(move_, side, RuleSet::Freestyle, true)
     }
 
     pub fn play_for_rule(
@@ -164,7 +164,16 @@ impl Board {
         side: Option<Side>,
         rule: RuleSet,
     ) -> Result<PlayedMove, BoardError> {
-        self.play_with_rule(move_, side, rule)
+        self.play_with_rule(move_, side, rule, true)
+    }
+
+    pub(crate) fn play_assuming_rule_legal(
+        &mut self,
+        move_: Move,
+        side: Option<Side>,
+        rule: RuleSet,
+    ) -> Result<PlayedMove, BoardError> {
+        self.play_with_rule(move_, side, rule, false)
     }
 
     fn play_with_rule(
@@ -172,6 +181,7 @@ impl Board {
         move_: Move,
         side: Option<Side>,
         rule: RuleSet,
+        check_forbidden: bool,
     ) -> Result<PlayedMove, BoardError> {
         let side = side.unwrap_or(self.side_to_move);
         if !is_valid_side(side) {
@@ -186,7 +196,8 @@ impl Board {
         if !self.is_legal_move(move_) {
             return Err(BoardError::IllegalMove(move_));
         }
-        if rule == RuleSet::Renju
+        if check_forbidden
+            && rule == RuleSet::Renju
             && side == BLACK
             && classify_forbidden_move(self, move_, side, rule)
                 .is_ok_and(|kind| kind.is_forbidden())
@@ -362,5 +373,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(board.winner(), BLACK);
+    }
+
+    #[test]
+    fn assumed_rule_legal_play_skips_forbidden_check_but_keeps_renju_winner_semantics() {
+        let mut board = Board::new();
+        place_line(&mut board, 7, 3..8, BLACK);
+
+        board
+            .play_assuming_rule_legal(xy_to_move(8, 7).unwrap(), None, RuleSet::Renju)
+            .unwrap();
+
+        assert_eq!(board.at(8, 7), Ok(BLACK));
+        assert_eq!(board.winner(), EMPTY);
     }
 }

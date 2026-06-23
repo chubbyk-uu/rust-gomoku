@@ -388,7 +388,7 @@ impl RootSearcher {
         let mut trial = board.clone();
         if trial.force_side_to_move(side).is_err()
             || trial
-                .play_for_rule(move_, Some(side), self.config.rule_set)
+                .play_assuming_rule_legal(move_, Some(side), self.config.rule_set)
                 .is_err()
         {
             return (false, Some("illegal"));
@@ -516,7 +516,7 @@ impl RootSearcher {
         for move_ in candidates {
             let mut trial = board.clone();
             trial
-                .play_for_rule(move_, Some(side), self.config.rule_set)
+                .play_assuming_rule_legal(move_, Some(side), self.config.rule_set)
                 .expect("candidate move stays legal on trial board");
             if !self
                 .vcf
