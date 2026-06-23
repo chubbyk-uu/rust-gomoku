@@ -402,11 +402,12 @@ impl RootSearcher {
         if self.config.runtime.compute_vcf
             && self
                 .vcf
-                .search_with_multi_reply(
+                .search_with_multi_reply_for_rule(
                     &trial,
                     -side,
                     self.config.runtime.vct_verify_opponent_vcf_depth,
                     self.config.runtime.vcf_multi_reply,
+                    self.config.rule_set,
                 )
                 .found
         {
@@ -482,17 +483,15 @@ impl RootSearcher {
         side: Side,
         allowed_moves: Option<HashSet<Move>>,
     ) -> Option<HashSet<Move>> {
-        if self.config.rule_set != RuleSet::Freestyle {
-            return allowed_moves;
-        }
         if !self.config.runtime.compute_vcf {
             return allowed_moves;
         }
-        let opponent_vcf = self.vcf.search_with_multi_reply(
+        let opponent_vcf = self.vcf.search_with_multi_reply_for_rule(
             board,
             -side,
             self.config.runtime.opponent_vcf_depth,
             self.config.runtime.vcf_multi_reply,
+            self.config.rule_set,
         );
         if !opponent_vcf.found {
             return allowed_moves;
@@ -520,11 +519,12 @@ impl RootSearcher {
                 .expect("candidate move stays legal on trial board");
             if !self
                 .vcf
-                .search_with_multi_reply(
+                .search_with_multi_reply_for_rule(
                     &trial,
                     -side,
                     self.config.runtime.opponent_vcf_depth,
                     self.config.runtime.vcf_multi_reply,
+                    self.config.rule_set,
                 )
                 .found
             {
@@ -808,15 +808,17 @@ impl RootSearcher {
         let side = board.side_to_move();
         let mut trace = RootTrace::default();
         self.last_trace = Some(trace.clone());
-        let tactical_enabled = self.config.rule_set == RuleSet::Freestyle;
+        let vcf_enabled = self.config.runtime.compute_vcf;
+        let vct_enabled = self.config.rule_set == RuleSet::Freestyle;
 
-        if tactical_enabled && self.config.runtime.compute_vcf {
+        if vcf_enabled {
             trace.used_vcf = true;
-            let vcf_result = self.vcf.search_with_multi_reply(
+            let vcf_result = self.vcf.search_with_multi_reply_for_rule(
                 board,
                 side,
                 self.config.runtime.root_vcf_depth,
                 self.config.runtime.vcf_multi_reply,
+                self.config.rule_set,
             );
             if vcf_result.found {
                 trace.vcf_found = true;
@@ -833,9 +835,7 @@ impl RootSearcher {
             }
         }
 
-        if tactical_enabled
-            && self.config.runtime.compute_vct
-            && self.config.runtime.root_vct_depth > 0
+        if vct_enabled && self.config.runtime.compute_vct && self.config.runtime.root_vct_depth > 0
         {
             trace.used_vct = true;
             if has_vct_trigger(board, side) {

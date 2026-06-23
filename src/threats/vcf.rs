@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use crate::board::Board;
+use crate::rules::RuleSet;
 use crate::threats::threat_board::ThreatBoardView;
 use crate::types::{Move, Side};
 
@@ -41,9 +42,19 @@ impl VCFSearcher {
     }
 
     pub fn search(&mut self, board: &Board, side: Side, depth: i32) -> VCFResult {
+        self.search_for_rule(board, side, depth, RuleSet::Freestyle)
+    }
+
+    pub fn search_for_rule(
+        &mut self,
+        board: &Board,
+        side: Side,
+        depth: i32,
+        rule: RuleSet,
+    ) -> VCFResult {
         let effective_depth = Self::normalize_begin_depth(depth);
         self.search_begin(
-            &mut ThreatBoardView::from_board(board.clone()),
+            &mut ThreatBoardView::from_board_with_rule(board.clone(), rule),
             side,
             effective_depth,
         )
@@ -56,9 +67,20 @@ impl VCFSearcher {
         depth: i32,
         multi_reply: bool,
     ) -> VCFResult {
+        self.search_with_multi_reply_for_rule(board, side, depth, multi_reply, RuleSet::Freestyle)
+    }
+
+    pub fn search_with_multi_reply_for_rule(
+        &mut self,
+        board: &Board,
+        side: Side,
+        depth: i32,
+        multi_reply: bool,
+        rule: RuleSet,
+    ) -> VCFResult {
         let previous = self.multi_reply;
         self.multi_reply = multi_reply;
-        let result = self.search(board, side, depth);
+        let result = self.search_for_rule(board, side, depth, rule);
         self.multi_reply = previous;
         result
     }
@@ -275,7 +297,7 @@ impl VCFSearcher {
             };
         }
         let (x, y) = crate::board::move_to_xy(attacker_move).expect("move stays valid");
-        let replies = view.broken_four_legal_replies(x, y);
+        let replies = view.broken_four_legal_replies_for_side(x, y, -attacker);
         if replies.is_empty() {
             return VCFResult {
                 move_: None,

@@ -1,6 +1,6 @@
 use rust_gomoku::{
-    broken_four_reply, forcing_threat_moves, move_to_xy, threat_moves, winning_threat_moves,
-    xy_to_move, Board, ThreatBoardView, VCFSearcher,
+    broken_four_reply, classify_forbidden_move, forcing_threat_moves, move_to_xy, threat_moves,
+    winning_threat_moves, xy_to_move, Board, ForbiddenKind, RuleSet, ThreatBoardView, VCFSearcher,
 };
 
 #[test]
@@ -79,6 +79,136 @@ fn vcf_search_finds_immediate_forcing_threat() {
         move_to_xy(result.move_.expect("move should exist")).unwrap(),
         (2, 7) | (6, 7)
     ));
+}
+
+#[test]
+fn renju_vcf_rejects_overline_attacker_win() {
+    let mut board = Board::new();
+    for (x, y, side) in [
+        (3, 7, 1),
+        (0, 0, -1),
+        (4, 7, 1),
+        (1, 0, -1),
+        (5, 7, 1),
+        (2, 7, -1),
+        (6, 7, 1),
+        (0, 1, -1),
+        (8, 7, 1),
+    ] {
+        board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
+    }
+
+    let freestyle = VCFSearcher::default().search(&board, 1, 2);
+    assert!(freestyle.found);
+    assert_eq!(
+        move_to_xy(freestyle.move_.expect("freestyle move should exist")).unwrap(),
+        (7, 7)
+    );
+
+    let renju = VCFSearcher::default().search_for_rule(&board, 1, 2, RuleSet::Renju);
+    assert!(!renju.found);
+}
+
+#[test]
+fn renju_vcf_does_not_return_double_four_attacker_move() {
+    let mut board = Board::new();
+    for (x, y, side) in [
+        (5, 7, 1),
+        (0, 0, -1),
+        (6, 7, 1),
+        (2, 0, -1),
+        (8, 7, 1),
+        (4, 0, -1),
+        (7, 5, 1),
+        (6, 0, -1),
+        (7, 6, 1),
+        (8, 0, -1),
+        (7, 8, 1),
+    ] {
+        board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
+    }
+    let forbidden = xy_to_move(7, 7).unwrap();
+    assert_eq!(
+        classify_forbidden_move(&board, forbidden, 1, RuleSet::Renju).unwrap(),
+        ForbiddenKind::DoubleFour
+    );
+
+    let freestyle = VCFSearcher::default().search(&board, 1, 2);
+    assert!(freestyle.found);
+    assert_eq!(freestyle.move_, Some(forbidden));
+
+    let renju = VCFSearcher::default().search_for_rule(&board, 1, 2, RuleSet::Renju);
+    assert_ne!(renju.move_, Some(forbidden));
+}
+
+#[test]
+fn renju_vcf_does_not_return_double_three_attacker_move() {
+    let mut board = Board::new();
+    for (x, y, side) in [
+        (4, 7, 1),
+        (0, 0, -1),
+        (6, 7, 1),
+        (2, 0, -1),
+        (8, 7, 1),
+        (4, 0, -1),
+        (7, 6, 1),
+        (6, 0, -1),
+        (7, 8, 1),
+        (8, 0, -1),
+        (6, 6, 1),
+        (10, 0, -1),
+        (8, 8, 1),
+    ] {
+        board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
+    }
+    let forbidden = xy_to_move(7, 7).unwrap();
+    assert_eq!(
+        classify_forbidden_move(&board, forbidden, 1, RuleSet::Renju).unwrap(),
+        ForbiddenKind::DoubleThree
+    );
+
+    let freestyle = VCFSearcher::default().search(&board, 1, 2);
+    assert!(freestyle.found);
+    assert_eq!(freestyle.move_, Some(forbidden));
+
+    let renju = VCFSearcher::default().search_for_rule(&board, 1, 2, RuleSet::Renju);
+    assert_ne!(renju.move_, Some(forbidden));
+}
+
+#[test]
+fn renju_vcf_white_wins_when_black_only_reply_is_forbidden() {
+    let mut board = Board::new();
+    for (x, y, side) in [
+        (6, 6, 1),
+        (5, 7, -1),
+        (8, 8, 1),
+        (6, 7, -1),
+        (6, 8, 1),
+        (8, 7, -1),
+        (8, 6, 1),
+    ] {
+        board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
+    }
+    let attack = xy_to_move(9, 7).unwrap();
+    let forbidden_reply = xy_to_move(7, 7).unwrap();
+    assert_eq!(board.side_to_move(), -1);
+    assert_eq!(
+        classify_forbidden_move(&board, forbidden_reply, 1, RuleSet::Renju).unwrap(),
+        ForbiddenKind::DoubleThree
+    );
+
+    let mut freestyle_view = ThreatBoardView::from_board(board.clone());
+    freestyle_view.play(attack, -1);
+    let freestyle_replies = freestyle_view.broken_four_legal_replies_for_side(9, 7, 1);
+    assert_eq!(freestyle_replies.as_slice(), &[forbidden_reply]);
+
+    let mut renju_view = ThreatBoardView::from_board_with_rule(board.clone(), RuleSet::Renju);
+    renju_view.play(attack, -1);
+    let renju_replies = renju_view.broken_four_legal_replies_for_side(9, 7, 1);
+    assert!(renju_replies.is_empty());
+
+    let renju = VCFSearcher::default().search_for_rule(&board, -1, 2, RuleSet::Renju);
+    assert!(renju.found);
 }
 
 #[test]

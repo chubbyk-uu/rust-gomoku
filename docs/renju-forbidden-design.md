@@ -713,6 +713,40 @@ Exit criteria:
 - VCF/VCT do not produce illegal black Renju moves in fixture and fuzz tests.
 - Any remaining known limitations are documented and default-disabled.
 
+Current Phase 6 status:
+
+- VCF has a rule-aware entry point:
+  - `VCFSearcher::search_for_rule`
+  - `VCFSearcher::search_with_multi_reply_for_rule`
+- `ThreatBoardView` can now carry a `RuleSet`. In Renju mode it filters threat
+  moves and broken-four replies through rule-aware legality before VCF consumes
+  them.
+- Root and non-root VCF calls pass `config.rule_set`; root VCF is enabled again
+  in Renju mode. VCT remains freestyle-only until its own rule-aware defense and
+  attack generation is implemented.
+- Added a VCF fixture where black's apparent direct completion is an overline:
+  freestyle VCF finds the move, Renju VCF rejects it.
+- Added VCF fixtures where black's apparent tactical attacking move is a
+  double-four or double-three forbidden move. Freestyle VCF may return the
+  move; Renju VCF must not return the forbidden point.
+- Added a positive white VCF fixture: white creates a broken four whose only
+  black reply is a double-three forbidden move. Freestyle reply generation sees
+  the block; Renju reply generation filters it out and VCF treats white's line
+  as winning.
+- Added a root regression for the overline shape so root VCF cannot return the
+  forbidden point.
+
+Current Phase 6 VCF validation:
+
+```bash
+cargo test --test vcf_alignment --quiet
+cargo test --test root_alignment --quiet
+cargo test --quiet
+cargo build --bin gomoku_gui --bin gomocup_engine --quiet
+python3 scripts/renju_oracle_compare.py --quiet
+git diff --check
+```
+
 ## Fixture Format Proposal
 
 Use JSONL so cases are easy to append:

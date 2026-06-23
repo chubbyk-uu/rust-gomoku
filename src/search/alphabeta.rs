@@ -409,11 +409,12 @@ impl AlphaBetaSearcher {
             if nonroot_vcf_depth > 0
                 && self
                     .vcf
-                    .search_with_multi_reply(
+                    .search_with_multi_reply_for_rule(
                         board,
                         -side,
                         nonroot_vcf_depth,
                         self.config.runtime.vcf_multi_reply,
+                        self.config.rule_set,
                     )
                     .found
             {
@@ -425,11 +426,12 @@ impl AlphaBetaSearcher {
                         .expect("ordered move stays legal on trial board");
                     if !self
                         .vcf
-                        .search_with_multi_reply(
+                        .search_with_multi_reply_for_rule(
                             &trial,
                             -side,
                             nonroot_vcf_depth,
                             self.config.runtime.vcf_multi_reply,
+                            self.config.rule_set,
                         )
                         .found
                     {

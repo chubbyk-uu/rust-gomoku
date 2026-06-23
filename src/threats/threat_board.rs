@@ -2,6 +2,7 @@
 
 use crate::board::{move_to_xy, xy_to_move, Board};
 use crate::constants::{BLACK, BOARD_SIZE, EMPTY, WHITE};
+use crate::rules::RuleSet;
 use crate::threats::types::{AttackMove, ThreatLevel};
 use crate::types::{Move, Side};
 
@@ -405,6 +406,8 @@ fn decode_line_raw_move(
 fn push_legal_line_replies(
     replies: &mut BrokenFourReplies,
     board: &Board,
+    side: Side,
+    rule: RuleSet,
     x: usize,
     y: usize,
     direction_index: usize,
@@ -417,7 +420,7 @@ fn push_legal_line_replies(
     let raw_count = if encoded >= (1 << 16) { 2 } else { 1 };
     for &raw in &raws[..raw_count] {
         if let Some(move_) = decode_line_raw_move(board, x, y, direction_index, raw) {
-            if board.is_legal_move(move_) {
+            if board.is_legal_move_for_rule(move_, side, rule) {
                 replies.push_unique(move_);
             }
         }
@@ -431,11 +434,16 @@ pub struct ThreatBoardView {
     pub x2: Vec<Vec<i32>>,
     pub x3: Vec<Vec<i32>>,
     pub x4: Vec<Vec<i32>>,
+    rule_set: RuleSet,
     previous_sides: Vec<Side>,
 }
 
 impl ThreatBoardView {
     pub fn from_board(board: Board) -> Self {
+        Self::from_board_with_rule(board, RuleSet::Freestyle)
+    }
+
+    pub fn from_board_with_rule(board: Board, rule_set: RuleSet) -> Self {
         let size = board.size();
         let grid = board.grid_rows();
         let x1 = (0..size)
@@ -467,6 +475,7 @@ impl ThreatBoardView {
             x2,
             x3,
             x4,
+            rule_set,
             previous_sides: Vec::new(),
         }
     }
@@ -511,7 +520,7 @@ impl ThreatBoardView {
             .force_side_to_move(side)
             .expect("threat board only plays valid sides");
         self.board
-            .play(move_, Some(side))
+            .play_assuming_rule_legal(move_, Some(side), self.rule_set)
             .expect("threat board play should stay legal");
         let (x, y) = move_to_xy(move_).expect("move stays in range");
         self.set_point(x, y, side);
@@ -548,7 +557,13 @@ impl ThreatBoardView {
                         && yy < size as isize
                         && grid[yy as usize][xx as usize] == side
                     {
-                        candidates.push(xy_to_move(x, y).expect("threat move stays valid"));
+                        let move_ = xy_to_move(x, y).expect("threat move stays valid");
+                        if self
+                            .board
+                            .is_legal_move_for_rule(move_, side, self.rule_set)
+                        {
+                            candidates.push(move_);
+                        }
                         break;
                     }
                 }
@@ -667,13 +682,31 @@ impl ThreatBoardView {
     }
 
     pub fn broken_four_legal_replies(&self, x: usize, y: usize) -> BrokenFourReplies {
+        self.broken_four_legal_replies_for_side(x, y, BLACK)
+    }
+
+    pub fn broken_four_legal_replies_for_side(
+        &self,
+        x: usize,
+        y: usize,
+        side: Side,
+    ) -> BrokenFourReplies {
         let (l1, l2, l3, l4, p1, p2, p3, p4) = self.lines_for(x, y);
         let counts = [l1.b4p(p1), l2.b4p(p2), l3.b4p(p3), l4.b4p(p4)];
         let mut replies = BrokenFourReplies::new();
 
         for (index, encoded) in counts.iter().enumerate() {
             if *encoded >= (1 << 16) {
-                push_legal_line_replies(&mut replies, &self.board, x, y, index + 1, *encoded);
+                push_legal_line_replies(
+                    &mut replies,
+                    &self.board,
+                    side,
+                    self.rule_set,
+                    x,
+                    y,
+                    index + 1,
+                    *encoded,
+                );
             }
         }
 
@@ -705,7 +738,16 @@ impl ThreatBoardView {
         };
         for &direction in direction_order {
             let encoded = counts[direction - 1];
-            push_legal_line_replies(&mut replies, &self.board, x, y, direction, encoded);
+            push_legal_line_replies(
+                &mut replies,
+                &self.board,
+                side,
+                self.rule_set,
+                x,
+                y,
+                direction,
+                encoded,
+            );
         }
         replies
     }
@@ -758,6 +800,9 @@ impl ThreatBoardView {
     }
 
     pub fn broken_four_point_for_side(&self, side: Side) -> (Option<Move>, bool) {
+        if self.rule_set != RuleSet::Freestyle {
+            return self.broken_four_legal_point_for_side(side);
+        }
         let grid = self.board.grid_rows();
         let size = self.board.size();
         let mut first_reply = None;
@@ -777,6 +822,32 @@ impl ThreatBoardView {
                     first_reply = reply;
                 } else if reply != first_reply {
                     return (reply, true);
+                }
+            }
+        }
+        (first_reply, false)
+    }
+
+    pub fn broken_four_legal_point_for_side(&self, side: Side) -> (Option<Move>, bool) {
+        let grid = self.board.grid_rows();
+        let size = self.board.size();
+        let mut first_reply = None;
+        for x in 0..size {
+            for y in 0..size {
+                if grid[y][x] != side {
+                    continue;
+                }
+                let replies = self.broken_four_legal_replies_for_side(x, y, side);
+                let Some(reply) = replies.first() else {
+                    continue;
+                };
+                if replies.len() > 1 {
+                    return (Some(reply), true);
+                }
+                if first_reply.is_none() {
+                    first_reply = Some(reply);
+                } else if first_reply != Some(reply) {
+                    return (Some(reply), true);
                 }
             }
         }
