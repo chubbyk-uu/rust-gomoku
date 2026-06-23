@@ -10,7 +10,7 @@ use std::time::Instant;
 use crate::board::{move_to_xy, Board};
 use crate::config::{EngineConfig, EngineProfile};
 use crate::constants::{BOARD_AREA, HASHF_ALPHA, HASHF_BETA, HASHF_EXACT, INF, WIN};
-use crate::eval::{evaluate_board, value_wide_compute, EvalCaches};
+use crate::eval::{evaluate_board, value_wide_compute_for_rule, EvalCaches};
 use crate::search::movegen::{generate_candidates_with_coverage, Candidate, CoverageTracker};
 use crate::search::ordering::{
     is_quiet_ordering_candidate, order_candidates_fast_history_owned, order_candidates_owned,
@@ -482,7 +482,7 @@ impl AlphaBetaSearcher {
                 .play_assuming_rule_legal(candidate.move_, Some(side), self.config.rule_set)
                 .expect("ordered candidate stays legal");
             coverage.add_move(candidate.move_);
-            value_wide_compute(board, caches, (mx, my));
+            value_wide_compute_for_rule(board, caches, (mx, my), self.config.rule_set);
 
             running_downf += index as i32;
             let mut local_downf = running_downf;

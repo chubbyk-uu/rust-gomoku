@@ -9,6 +9,226 @@ use crate::constants::{BLACK, BOARD_SIZE, EMPTY};
 use crate::types::{is_valid_side, Move, Side};
 
 const DIRECTIONS: [(isize, isize); 4] = [(1, 0), (0, 1), (1, 1), (1, -1)];
+const NO_EXTRA_BLACK: usize = usize::MAX;
+
+#[derive(Clone, Copy)]
+struct DirectionalLine {
+    cells: [Side; BOARD_SIZE],
+    xs: [usize; BOARD_SIZE],
+    ys: [usize; BOARD_SIZE],
+    len: usize,
+    anchor: usize,
+}
+
+impl DirectionalLine {
+    fn from_grid(
+        grid: &[[Side; BOARD_SIZE]; BOARD_SIZE],
+        x: usize,
+        y: usize,
+        (dx, dy): (isize, isize),
+    ) -> Self {
+        let mut start_x = x;
+        let mut start_y = y;
+        while let Some((nx, ny)) = step(start_x, start_y, -dx, -dy) {
+            start_x = nx;
+            start_y = ny;
+        }
+
+        let mut cells = [EMPTY; BOARD_SIZE];
+        let mut xs = [0; BOARD_SIZE];
+        let mut ys = [0; BOARD_SIZE];
+        let mut len = 0;
+        let mut anchor = 0;
+        let mut cx = start_x;
+        let mut cy = start_y;
+        loop {
+            cells[len] = grid[cy][cx];
+            xs[len] = cx;
+            ys[len] = cy;
+            if cx == x && cy == y {
+                anchor = len;
+            }
+            len += 1;
+            let Some((nx, ny)) = step(cx, cy, dx, dy) else {
+                break;
+            };
+            cx = nx;
+            cy = ny;
+        }
+
+        Self {
+            cells,
+            xs,
+            ys,
+            len,
+            anchor,
+        }
+    }
+
+    #[inline(always)]
+    fn cell_with_extra(&self, index: usize, extra1: usize, extra2: usize) -> Side {
+        if index == extra1 || index == extra2 {
+            BLACK
+        } else {
+            self.cells[index]
+        }
+    }
+
+    fn black_run_bounds_with_extra(
+        &self,
+        index: usize,
+        extra1: usize,
+        extra2: usize,
+    ) -> Option<(usize, usize)> {
+        if index >= self.len || self.cell_with_extra(index, extra1, extra2) != BLACK {
+            return None;
+        }
+        let mut start = index;
+        while start > 0 && self.cell_with_extra(start - 1, extra1, extra2) == BLACK {
+            start -= 1;
+        }
+        let mut end = index;
+        while end + 1 < self.len && self.cell_with_extra(end + 1, extra1, extra2) == BLACK {
+            end += 1;
+        }
+        Some((start, end))
+    }
+
+    fn has_exact_five(&self) -> bool {
+        self.black_run_bounds_with_extra(self.anchor, NO_EXTRA_BLACK, NO_EXTRA_BLACK)
+            .is_some_and(|(start, end)| end - start + 1 == 5)
+    }
+
+    fn has_overline(&self) -> bool {
+        self.black_run_bounds_with_extra(self.anchor, NO_EXTRA_BLACK, NO_EXTRA_BLACK)
+            .is_some_and(|(start, end)| end - start + 1 >= 6)
+    }
+
+    fn count_four_shapes_through(&self) -> usize {
+        if self.len < 5 {
+            return 0;
+        }
+        let start_min = self.anchor.saturating_sub(4);
+        let start_max = usize::min(self.anchor, self.len.saturating_sub(5));
+        let mut shapes = [[usize::MAX; 4]; 5];
+        let mut shape_count = 0;
+
+        for start in start_min..=start_max {
+            let end = start + 5;
+            let mut empty = None;
+            let mut black_count = 0;
+            let mut black_shape = [usize::MAX; 4];
+            let mut valid_window = true;
+
+            for position in start..end {
+                match self.cells[position] {
+                    BLACK => {
+                        if black_count < 4 {
+                            black_shape[black_count] = position;
+                        }
+                        black_count += 1;
+                    }
+                    EMPTY => {
+                        if empty.replace(position).is_some() {
+                            valid_window = false;
+                            break;
+                        }
+                    }
+                    _ => {
+                        valid_window = false;
+                        break;
+                    }
+                }
+            }
+
+            if !valid_window || black_count != 4 || empty.is_none() {
+                continue;
+            }
+            let left_open = start == 0 || self.cells[start - 1] != BLACK;
+            let right_open = end == self.len || self.cells[end] != BLACK;
+            if !left_open || !right_open {
+                continue;
+            }
+            if !shapes[..shape_count].contains(&black_shape) {
+                shapes[shape_count] = black_shape;
+                shape_count += 1;
+            }
+        }
+
+        shape_count
+    }
+
+    fn open_three_gain_indices(&self) -> ([usize; 2], usize) {
+        let mut gains = [NO_EXTRA_BLACK; 2];
+        let mut len = 0;
+
+        let mut index = self.anchor;
+        for _ in 0..4 {
+            if index == 0 {
+                break;
+            }
+            index -= 1;
+            match self.cells[index] {
+                EMPTY => {
+                    gains[len] = index;
+                    len += 1;
+                    break;
+                }
+                BLACK => {}
+                _ => break,
+            }
+        }
+
+        index = self.anchor;
+        for _ in 0..4 {
+            if index + 1 >= self.len {
+                break;
+            }
+            index += 1;
+            match self.cells[index] {
+                EMPTY => {
+                    gains[len] = index;
+                    len += 1;
+                    break;
+                }
+                BLACK => {}
+                _ => break,
+            }
+        }
+
+        (gains, len)
+    }
+
+    fn has_open_four_through_gain(&self, gain: usize) -> bool {
+        let mut winning_extensions = 0;
+        let start = self.anchor.saturating_sub(5);
+        let end = usize::min(self.len, self.anchor + 6);
+
+        for extension in start..end {
+            if extension == self.anchor || extension == gain || self.cells[extension] != EMPTY {
+                continue;
+            }
+            let Some((run_start, run_end)) =
+                self.black_run_bounds_with_extra(extension, gain, extension)
+            else {
+                continue;
+            };
+            if run_end - run_start + 1 == 5
+                && run_start <= self.anchor
+                && self.anchor <= run_end
+                && run_start <= gain
+                && gain <= run_end
+            {
+                winning_extensions += 1;
+                if winning_extensions >= 2 {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuleSet {
@@ -151,13 +371,13 @@ fn is_legal_black_gain(grid: &mut [[Side; BOARD_SIZE]; BOARD_SIZE], x: usize, y:
 fn has_exact_five(grid: &[[Side; BOARD_SIZE]; BOARD_SIZE], x: usize, y: usize) -> bool {
     DIRECTIONS
         .into_iter()
-        .any(|dir| exact_five_segment(grid, x, y, dir).is_some())
+        .any(|dir| DirectionalLine::from_grid(grid, x, y, dir).has_exact_five())
 }
 
 fn has_overline(grid: &[[Side; BOARD_SIZE]; BOARD_SIZE], x: usize, y: usize) -> bool {
     DIRECTIONS
         .into_iter()
-        .any(|dir| contiguous_segment(grid, x, y, dir).len() >= 6)
+        .any(|dir| DirectionalLine::from_grid(grid, x, y, dir).has_overline())
 }
 
 fn count_four_directions(grid: &mut [[Side; BOARD_SIZE]; BOARD_SIZE], x: usize, y: usize) -> usize {
@@ -193,57 +413,7 @@ fn count_four_shapes_through(
     y: usize,
     dir: (isize, isize),
 ) -> usize {
-    let coords = line_coords(x, y, dir);
-    if coords.len() < 5 {
-        return 0;
-    }
-    let Some(anchor_index) = coords.iter().position(|&point| point == (x, y)) else {
-        return 0;
-    };
-    let start_min = anchor_index.saturating_sub(4);
-    let start_max = usize::min(anchor_index, coords.len().saturating_sub(5));
-    let mut shapes: Vec<[(usize, usize); 4]> = Vec::new();
-
-    for start in start_min..=start_max {
-        let window = &coords[start..start + 5];
-        let mut empty = None;
-        let mut black_count = 0;
-        let mut black_shape = [(usize::MAX, usize::MAX); 4];
-        let mut valid_window = true;
-        for &(wx, wy) in window {
-            match grid[wy][wx] {
-                BLACK => {
-                    if black_count < 4 {
-                        black_shape[black_count] = (wx, wy);
-                    }
-                    black_count += 1;
-                }
-                EMPTY => {
-                    if empty.replace((wx, wy)).is_some() {
-                        valid_window = false;
-                        break;
-                    }
-                }
-                _ => {
-                    valid_window = false;
-                    break;
-                }
-            }
-        }
-        if !valid_window || black_count != 4 || empty.is_none() || !window.contains(&(x, y)) {
-            continue;
-        }
-        let (ex, ey) = empty.expect("empty was checked above");
-        grid[ey][ex] = BLACK;
-        let makes_exact_five = exact_five_segment(grid, ex, ey, dir)
-            .is_some_and(|segment| segment.as_slice() == window);
-        grid[ey][ex] = EMPTY;
-        if makes_exact_five && !shapes.contains(&black_shape) {
-            shapes.push(black_shape);
-        }
-    }
-
-    shapes.len()
+    DirectionalLine::from_grid(grid, x, y, dir).count_four_shapes_through()
 }
 
 fn is_true_open_three_direction(
@@ -256,171 +426,16 @@ fn is_true_open_three_direction(
         return false;
     }
 
-    for (gx, gy) in open_three_gain_candidates(grid, x, y, dir) {
-        grid[gy][gx] = BLACK;
-        let makes_open_four = has_open_four_through_gain(grid, x, y, gx, gy, dir);
-        grid[gy][gx] = EMPTY;
-        if makes_open_four && is_legal_black_gain(grid, gx, gy) {
+    let line = DirectionalLine::from_grid(grid, x, y, dir);
+    let (gains, gain_count) = line.open_three_gain_indices();
+    for &gain in &gains[..gain_count] {
+        let gx = line.xs[gain];
+        let gy = line.ys[gain];
+        if line.has_open_four_through_gain(gain) && is_legal_black_gain(grid, gx, gy) {
             return true;
         }
     }
     false
-}
-
-fn has_open_four_through_gain(
-    grid: &mut [[Side; BOARD_SIZE]; BOARD_SIZE],
-    candidate_x: usize,
-    candidate_y: usize,
-    gain_x: usize,
-    gain_y: usize,
-    dir: (isize, isize),
-) -> bool {
-    let mut winning_extensions = 0;
-    for (wx, wy) in nearby_line_coords(candidate_x, candidate_y, dir, 5) {
-        if grid[wy][wx] != EMPTY {
-            continue;
-        }
-        grid[wy][wx] = BLACK;
-        let is_extension = exact_five_segment(grid, wx, wy, dir).is_some_and(|segment| {
-            segment.contains(&(candidate_x, candidate_y)) && segment.contains(&(gain_x, gain_y))
-        });
-        grid[wy][wx] = EMPTY;
-        if is_extension {
-            winning_extensions += 1;
-            if winning_extensions >= 2 {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn open_three_gain_candidates(
-    grid: &[[Side; BOARD_SIZE]; BOARD_SIZE],
-    x: usize,
-    y: usize,
-    (dx, dy): (isize, isize),
-) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    for (sx, sy) in [(dx, dy), (-dx, -dy)] {
-        let mut cx = x;
-        let mut cy = y;
-        for _ in 0..4 {
-            let Some((nx, ny)) = step(cx, cy, sx, sy) else {
-                break;
-            };
-            match grid[ny][nx] {
-                EMPTY => {
-                    out.push((nx, ny));
-                    break;
-                }
-                BLACK => {
-                    cx = nx;
-                    cy = ny;
-                }
-                _ => break,
-            }
-        }
-    }
-    out
-}
-
-fn exact_five_segment(
-    grid: &[[Side; BOARD_SIZE]; BOARD_SIZE],
-    x: usize,
-    y: usize,
-    dir: (isize, isize),
-) -> Option<Vec<(usize, usize)>> {
-    let segment = contiguous_segment(grid, x, y, dir);
-    (segment.len() == 5).then_some(segment)
-}
-
-fn contiguous_segment(
-    grid: &[[Side; BOARD_SIZE]; BOARD_SIZE],
-    x: usize,
-    y: usize,
-    (dx, dy): (isize, isize),
-) -> Vec<(usize, usize)> {
-    if grid[y][x] != BLACK {
-        return Vec::new();
-    }
-
-    let mut start_x = x;
-    let mut start_y = y;
-    while let Some((nx, ny)) = step(start_x, start_y, -dx, -dy) {
-        if grid[ny][nx] != BLACK {
-            break;
-        }
-        start_x = nx;
-        start_y = ny;
-    }
-
-    let mut out = Vec::new();
-    let mut cx = start_x;
-    let mut cy = start_y;
-    loop {
-        out.push((cx, cy));
-        let Some((nx, ny)) = step(cx, cy, dx, dy) else {
-            break;
-        };
-        if grid[ny][nx] != BLACK {
-            break;
-        }
-        cx = nx;
-        cy = ny;
-    }
-    out
-}
-
-fn nearby_line_coords(
-    x: usize,
-    y: usize,
-    (dx, dy): (isize, isize),
-    radius: usize,
-) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    for distance in (1..=radius).rev() {
-        if let Some(point) = offset(x, y, -dx, -dy, distance) {
-            out.push(point);
-        }
-    }
-    for distance in 1..=radius {
-        if let Some(point) = offset(x, y, dx, dy, distance) {
-            out.push(point);
-        }
-    }
-    out
-}
-
-fn line_coords(x: usize, y: usize, (dx, dy): (isize, isize)) -> Vec<(usize, usize)> {
-    let mut start_x = x;
-    let mut start_y = y;
-    while let Some((nx, ny)) = step(start_x, start_y, -dx, -dy) {
-        start_x = nx;
-        start_y = ny;
-    }
-
-    let mut out = Vec::new();
-    let mut cx = start_x;
-    let mut cy = start_y;
-    loop {
-        out.push((cx, cy));
-        let Some((nx, ny)) = step(cx, cy, dx, dy) else {
-            break;
-        };
-        cx = nx;
-        cy = ny;
-    }
-    out
-}
-
-fn offset(x: usize, y: usize, dx: isize, dy: isize, distance: usize) -> Option<(usize, usize)> {
-    let nx = x as isize + dx * distance as isize;
-    let ny = y as isize + dy * distance as isize;
-    if nx < 0 || ny < 0 || nx >= BOARD_SIZE as isize || ny >= BOARD_SIZE as isize {
-        return None;
-    }
-    Some((nx as usize, ny as usize))
 }
 
 fn step(x: usize, y: usize, dx: isize, dy: isize) -> Option<(usize, usize)> {

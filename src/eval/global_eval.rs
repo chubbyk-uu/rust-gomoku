@@ -6,7 +6,7 @@ use crate::constants::{
     BLACK, BOARD_SIZE, DSHAPE_SIZE, EMPTY, LAST5, NEXT4, NEXT43, NEXT5, WHITE, WIN,
 };
 use crate::eval::caches::EvalCaches;
-use crate::eval::local::value_wide_compute;
+use crate::eval::local::value_wide_compute_for_rule;
 use crate::patterns::line::Line;
 use crate::patterns::{DIAGONAL_DOWN, DIAGONAL_UP, HORIZONTAL, VERTICAL};
 
@@ -256,7 +256,7 @@ pub fn evaluate_last5_branch(
     let snapshot = caches.snapshot();
     board.grid_rows_mut()[y][x] = -side;
     let result = {
-        value_wide_compute(board, caches, (x, y));
+        value_wide_compute_for_rule(board, caches, (x, y), config.rule_set);
         -evaluate_board(board, caches, -side, 1 - opo, config)
     };
     board.grid_rows_mut()[y][x] = 0;
@@ -370,7 +370,7 @@ mod tests {
     use super::*;
     use crate::board::xy_to_move;
     use crate::config::load_default_config;
-    use crate::eval::local::recompute_all;
+    use crate::eval::local::{recompute_all, value_wide_compute};
 
     #[test]
     fn cached_matches_scan_after_direct_grid_mutation_and_snapshot_restore() {

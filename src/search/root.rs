@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crate::board::{move_to_xy, xy_to_move, Board};
 use crate::config::EngineConfig;
 use crate::constants::{INF, WIN};
-use crate::eval::{recompute_all, EvalCaches};
+use crate::eval::{recompute_all_for_rule, EvalCaches};
 use crate::rules::RuleSet;
 use crate::search::{
     AlphaBetaSearcher, RootCandidateProfile, SearchOptions, SearchStats, TranspositionTable,
@@ -551,7 +551,7 @@ impl RootSearcher {
         cancel: Option<Arc<AtomicBool>>,
     ) -> SearchResult {
         let mut caches = EvalCaches::new();
-        recompute_all(board, &mut caches);
+        recompute_all_for_rule(board, &mut caches, self.config.rule_set);
 
         self.alphabeta.config = self.config.clone();
         self.alphabeta.advance_tt_generation();
@@ -909,7 +909,7 @@ mod tests {
         board.force_side_to_move(BLACK).unwrap();
 
         let mut caches = EvalCaches::new();
-        recompute_all(&mut board, &mut caches);
+        recompute_all_for_rule(&mut board, &mut caches, RuleSet::Renju);
         let mut rng = new_classic_fallback_rng();
         assert!(fallback_ai_move(&board, &caches, BLACK, RuleSet::Renju, &mut rng).is_err());
 

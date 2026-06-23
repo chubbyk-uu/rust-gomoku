@@ -7,7 +7,8 @@ use crate::board::{move_to_xy, xy_to_move, Board};
 use crate::config::EngineConfig;
 use crate::constants::{BOARD_AREA, BOARD_SIZE, EMPTY, WIN};
 use crate::eval::{attack_level, move_value, EvalCaches};
-use crate::patterns::{Line, DIAGONAL_DOWN, DIAGONAL_UP, HORIZONTAL, VERTICAL};
+use crate::patterns::{Line, ShapeLabel, DIAGONAL_DOWN, DIAGONAL_UP, HORIZONTAL, VERTICAL};
+use crate::rules::RuleSet;
 use crate::types::Move;
 
 const COVER_DIRS: [(isize, isize); 32] = [
@@ -359,9 +360,7 @@ fn generate_candidates_from_moves(
 
     let mut candidates = Vec::with_capacity(moves.len());
     for &move_ in moves {
-        if config.rule_set != crate::rules::RuleSet::Freestyle
-            && !board.is_legal_move_for_rule(move_, side, config.rule_set)
-        {
+        if !is_rule_legal_for_movegen(board, caches, move_, side, config.rule_set) {
             continue;
         }
         if let Some(allowed) = root_allowed_moves {
@@ -438,6 +437,61 @@ fn generate_candidates_from_moves(
     }
 }
 
+fn is_rule_legal_for_movegen(
+    board: &Board,
+    caches: &EvalCaches,
+    move_: Move,
+    side: i8,
+    rule: RuleSet,
+) -> bool {
+    if rule == RuleSet::Freestyle {
+        return board.is_legal_move(move_);
+    }
+    if side != crate::constants::BLACK {
+        return board.is_legal_move_for_rule(move_, side, rule);
+    }
+    if !board.is_legal_move(move_) {
+        return false;
+    }
+    if caches.rule_set != rule || !caches.initialized {
+        return board.is_legal_move_for_rule(move_, side, rule);
+    }
+
+    let (x, y) = move_to_xy(move_).expect("candidate move is valid");
+    if !renju_black_candidate_needs_full_detector(caches, x, y) {
+        return true;
+    }
+    board.is_legal_move_for_rule(move_, side, rule)
+}
+
+fn renju_black_candidate_needs_full_detector(caches: &EvalCaches, x: usize, y: usize) -> bool {
+    let mut open_threes = 0;
+    let mut fours = 0;
+    let mut overlines = 0;
+    let mut exact_fives = 0;
+
+    for &shape in &caches.shape_cache[0][x][y] {
+        let label = (shape >> 16) & 0xF;
+        let aux = shape & 0xF;
+        if label == ShapeLabel::L3 as i32 || label == ShapeLabel::L3B as i32 {
+            open_threes += 1;
+        } else if label == ShapeLabel::L4S as i32 {
+            fours += aux;
+        } else if label == ShapeLabel::L5 as i32 {
+            exact_fives += 1;
+        } else if label == ShapeLabel::L4 as i32 {
+            fours += 1;
+        } else if label == ShapeLabel::L6 as i32 {
+            overlines += 1;
+        }
+    }
+
+    if exact_fives > 0 {
+        return false;
+    }
+    overlines > 0 || fours >= 2 || open_threes >= 2
+}
+
 fn best_forcing_candidate(candidates: &[Candidate], preserve_scan_order: bool) -> Candidate {
     if preserve_scan_order {
         return candidates[0];
@@ -467,7 +521,7 @@ mod tests {
     fn forbidden_fixtures_drive_rule_aware_legality_and_movegen() {
         use crate::config::load_default_config;
         use crate::constants::{BLACK, WHITE};
-        use crate::eval::recompute_all;
+        use crate::eval::recompute_all_for_rule;
         use crate::rules::RuleSet;
         use std::collections::HashSet;
 
@@ -542,12 +596,13 @@ mod tests {
 
             // Movegen: when freestyle would emit the candidate (it is covered by
             // a neighbouring stone), Renju movegen must drop it iff forbidden.
-            let mut caches = EvalCaches::new();
-            recompute_all(&mut board, &mut caches);
             let allowed: HashSet<Move> = [candidate].into_iter().collect();
             let emits = |config: &EngineConfig| {
+                let mut board_for_cache = board.clone();
+                let mut caches = EvalCaches::new();
+                recompute_all_for_rule(&mut board_for_cache, &mut caches, config.rule_set);
                 generate_candidates(
-                    &board,
+                    &board_for_cache,
                     &caches,
                     BLACK,
                     config,

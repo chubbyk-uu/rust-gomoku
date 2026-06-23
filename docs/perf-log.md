@@ -14,6 +14,44 @@ Current active target:
 
 - Final-depth late root candidates. Future analysis should explain why they are expensive, not re-confirm that they are expensive.
 
+## 2026-06-23 Renju Forbidden Movegen Cache Gate
+
+Commands:
+
+- `cargo test --release --test renju_perf -- --ignored --nocapture`
+- Correctness gate also included `cargo test --quiet`,
+  `cargo build --bin gomoku_gui --bin gomocup_engine --quiet`,
+  `python3 scripts/renju_oracle_compare.py --quiet`, and a 2000-case dense
+  stress oracle compare at seed 32.
+
+Sample:
+
+- Dense contested midgame from `tests/renju_perf.rs`.
+- `perf_legality_gate` measures direct `Board::is_legal_move_for_rule`.
+- `perf_movegen_node` measures `generate_candidates` with a rule-matched eval
+  cache.
+
+Findings:
+
+- Direct Renju legality remained expensive by design: about 736 ns/call versus
+  about 2 ns/call for freestyle. External legality and protocol/GUI gates still
+  use the full detector.
+- Renju movegen with the SlowRenju-style shape-cache gate measured about
+  1463 ns/node versus about 1267 ns/node for freestyle on this forcing sample.
+- Earlier measurements on the same probe were about 1900 ns/direct legality and
+  about 228 us/Renju movegen node before forbidden optimizations; after the
+  one-dimensional detector scan it was about 732 ns/direct legality and
+  about 77 us/Renju movegen node. The cache gate removes almost all remaining
+  movegen-only forbidden overhead for non-suspicious candidates.
+
+Decision:
+
+- Keep the rule-aware eval cache plus SlowRenju-style movegen prefilter.
+- Do not route external move validation through this cache gate; keep the full
+  detector there.
+- If future Rapfi-style line tables are explored, compare against this cache
+  gate baseline rather than the original full-detector-per-candidate baseline.
+
 ## 2026-04-28 Root Profile Slow-Case Sample
 
 Commands:

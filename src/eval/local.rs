@@ -7,6 +7,7 @@ use crate::eval::caches::EvalCaches;
 use crate::patterns::buckets::bucket_for_lines;
 use crate::patterns::line::shape_raw_from_board_point_hypothetical;
 use crate::patterns::shapes::{ShapeLabel, DIAGONAL_DOWN, DIAGONAL_UP, HORIZONTAL, VERTICAL};
+use crate::rules::RuleSet;
 use crate::types::Move;
 
 const FOUR_DIRECTIONS: [i32; 4] = [HORIZONTAL, VERTICAL, DIAGONAL_DOWN, DIAGONAL_UP];
@@ -16,12 +17,31 @@ pub fn local_backend_name() -> &'static str {
 }
 
 pub fn compute_direction_shape(board: &Board, x: usize, y: usize, direction: i32, side: i8) -> i32 {
+    compute_direction_shape_for_rule(board, x, y, direction, side, RuleSet::Freestyle)
+}
+
+pub fn compute_direction_shape_for_rule(
+    board: &Board,
+    x: usize,
+    y: usize,
+    direction: i32,
+    side: i8,
+    rule: RuleSet,
+) -> i32 {
     if board.grid_rows()[y][x] != EMPTY {
         return 0;
     }
 
-    shape_raw_from_board_point_hypothetical(board.grid_rows(), x, y, direction, side, true)
-        .expect("direction checked by caller")
+    let freestyle_shape = rule == RuleSet::Freestyle || side != BLACK;
+    shape_raw_from_board_point_hypothetical(
+        board.grid_rows(),
+        x,
+        y,
+        direction,
+        side,
+        freestyle_shape,
+    )
+    .expect("direction checked by caller")
 }
 
 pub fn compute_bucket_and_attack(direction_shapes: (i32, i32, i32, i32)) -> (i32, i32) {
@@ -77,7 +97,18 @@ pub fn compute_bucket_and_attack(direction_shapes: (i32, i32, i32, i32)) -> (i32
 }
 
 pub fn recompute_point_caches(board: &mut Board, caches: &mut EvalCaches, x: usize, y: usize) {
+    recompute_point_caches_for_rule(board, caches, x, y, RuleSet::Freestyle)
+}
+
+pub fn recompute_point_caches_for_rule(
+    board: &mut Board,
+    caches: &mut EvalCaches,
+    x: usize,
+    y: usize,
+    rule: RuleSet,
+) {
     let occupied = board.grid_rows()[y][x] != EMPTY;
+    caches.rule_set = rule;
 
     if occupied {
         for player in 0..2 {
@@ -110,7 +141,7 @@ pub fn recompute_point_caches(board: &mut Board, caches: &mut EvalCaches, x: usi
     for (side, player) in [(BLACK, 0_usize), (WHITE, 1_usize)] {
         let mut shapes = [0_i32; 4];
         for direction in FOUR_DIRECTIONS {
-            let shape = compute_direction_shape(board, x, y, direction, side);
+            let shape = compute_direction_shape_for_rule(board, x, y, direction, side, rule);
             let direction_index = direction as usize;
             let old = caches.shape_cache[player][x][y][direction_index];
             if old != shape {
@@ -137,10 +168,15 @@ pub fn recompute_point_caches(board: &mut Board, caches: &mut EvalCaches, x: usi
 }
 
 pub fn recompute_all(board: &mut Board, caches: &mut EvalCaches) {
+    recompute_all_for_rule(board, caches, RuleSet::Freestyle)
+}
+
+pub fn recompute_all_for_rule(board: &mut Board, caches: &mut EvalCaches, rule: RuleSet) {
+    caches.rule_set = rule;
     let size = board.size();
     for x in 0..size {
         for y in 0..size {
-            recompute_point_caches(board, caches, x, y);
+            recompute_point_caches_for_rule(board, caches, x, y, rule);
         }
     }
     rebuild_global_eval_state(board, caches);
@@ -148,11 +184,21 @@ pub fn recompute_all(board: &mut Board, caches: &mut EvalCaches) {
 }
 
 pub fn value_wide_compute(board: &mut Board, caches: &mut EvalCaches, changed: (usize, usize)) {
+    value_wide_compute_for_rule(board, caches, changed, RuleSet::Freestyle)
+}
+
+pub fn value_wide_compute_for_rule(
+    board: &mut Board,
+    caches: &mut EvalCaches,
+    changed: (usize, usize),
+    rule: RuleSet,
+) {
     let size = board.size();
-    if !caches.initialized {
-        recompute_all(board, caches);
+    if !caches.initialized || caches.rule_set != rule {
+        recompute_all_for_rule(board, caches, rule);
         return;
     }
+    caches.rule_set = rule;
 
     let (cx, cy) = changed;
     let horizontal_flag = 1_u8;
@@ -166,7 +212,17 @@ pub fn value_wide_compute(board: &mut Board, caches: &mut EvalCaches, changed: (
     {
         let grid = board.grid_rows();
         mark_dirty_cell(&mut comp, &mut dirty, &mut dirty_len, cx, cy, 15);
-        mark_cell_neighbors(&mut comp, &mut dirty, &mut dirty_len, grid, cx, cy, size);
+        let radius = if rule == RuleSet::Renju { 5 } else { 4 };
+        mark_cell_neighbors(
+            &mut comp,
+            &mut dirty,
+            &mut dirty_len,
+            grid,
+            cx,
+            cy,
+            size,
+            radius,
+        );
     }
 
     let old_cell = caches.board_shadow[cx][cy];
@@ -185,25 +241,25 @@ pub fn value_wide_compute(board: &mut Board, caches: &mut EvalCaches, changed: (
             if flags & horizontal_flag != 0 {
                 merge_changed_player(
                     &mut changed_player,
-                    update_direction_cache(board, caches, x, y, HORIZONTAL),
+                    update_direction_cache(board, caches, x, y, HORIZONTAL, rule),
                 );
             }
             if flags & vertical_flag != 0 {
                 merge_changed_player(
                     &mut changed_player,
-                    update_direction_cache(board, caches, x, y, VERTICAL),
+                    update_direction_cache(board, caches, x, y, VERTICAL, rule),
                 );
             }
             if flags & diag_down_flag != 0 {
                 merge_changed_player(
                     &mut changed_player,
-                    update_direction_cache(board, caches, x, y, DIAGONAL_DOWN),
+                    update_direction_cache(board, caches, x, y, DIAGONAL_DOWN, rule),
                 );
             }
             if flags & diag_up_flag != 0 {
                 merge_changed_player(
                     &mut changed_player,
-                    update_direction_cache(board, caches, x, y, DIAGONAL_UP),
+                    update_direction_cache(board, caches, x, y, DIAGONAL_UP, rule),
                 );
             }
             for (player, changed) in changed_player.into_iter().enumerate() {
@@ -242,8 +298,8 @@ fn mark_cell_neighbors(
     x: usize,
     y: usize,
     size: usize,
+    radius: isize,
 ) {
-    const AR: isize = 4;
     const H: u8 = 1;
     const V: u8 = 2;
     const DD: u8 = 4;
@@ -251,7 +307,7 @@ fn mark_cell_neighbors(
 
     let fixed = x;
     let mut seen = 0_i8;
-    for yy in (y + 1)..usize::min(size, y + AR as usize + 1) {
+    for yy in (y + 1)..usize::min(size, y + radius as usize + 1) {
         let value = grid[yy][fixed];
         if seen == 0 {
             seen = value;
@@ -261,7 +317,7 @@ fn mark_cell_neighbors(
         mark_dirty_cell(comp, dirty, dirty_len, fixed, yy, H);
     }
     seen = 0;
-    for yy in (0..y).rev().take(AR as usize) {
+    for yy in (0..y).rev().take(radius as usize) {
         let value = grid[yy][fixed];
         if seen == 0 {
             seen = value;
@@ -273,7 +329,7 @@ fn mark_cell_neighbors(
 
     let fixed = y;
     seen = 0;
-    for xx in (x + 1)..usize::min(size, x + AR as usize + 1) {
+    for xx in (x + 1)..usize::min(size, x + radius as usize + 1) {
         let value = grid[fixed][xx];
         if seen == 0 {
             seen = value;
@@ -283,7 +339,7 @@ fn mark_cell_neighbors(
         mark_dirty_cell(comp, dirty, dirty_len, xx, fixed, V);
     }
     seen = 0;
-    for xx in (0..x).rev().take(AR as usize) {
+    for xx in (0..x).rev().take(radius as usize) {
         let value = grid[fixed][xx];
         if seen == 0 {
             seen = value;
@@ -296,7 +352,7 @@ fn mark_cell_neighbors(
     let mut seen = 0_i8;
     let mut xx = x as isize - 1;
     let mut yy = y as isize + 1;
-    while xx >= 0 && yy < size as isize && xx >= x as isize - AR && yy <= y as isize + AR {
+    while xx >= 0 && yy < size as isize && xx >= x as isize - radius && yy <= y as isize + radius {
         let value = grid[yy as usize][xx as usize];
         if seen == 0 {
             seen = value;
@@ -310,7 +366,7 @@ fn mark_cell_neighbors(
     seen = 0;
     xx = x as isize + 1;
     yy = y as isize - 1;
-    while xx < size as isize && yy >= 0 && xx <= x as isize + AR && yy >= y as isize - AR {
+    while xx < size as isize && yy >= 0 && xx <= x as isize + radius && yy >= y as isize - radius {
         let value = grid[yy as usize][xx as usize];
         if seen == 0 {
             seen = value;
@@ -325,7 +381,10 @@ fn mark_cell_neighbors(
     seen = 0;
     xx = x as isize + 1;
     yy = y as isize + 1;
-    while xx < size as isize && yy < size as isize && xx <= x as isize + AR && yy <= y as isize + AR
+    while xx < size as isize
+        && yy < size as isize
+        && xx <= x as isize + radius
+        && yy <= y as isize + radius
     {
         let value = grid[yy as usize][xx as usize];
         if seen == 0 {
@@ -340,7 +399,7 @@ fn mark_cell_neighbors(
     seen = 0;
     xx = x as isize - 1;
     yy = y as isize - 1;
-    while xx >= 0 && yy >= 0 && xx >= x as isize - AR && yy >= y as isize - AR {
+    while xx >= 0 && yy >= 0 && xx >= x as isize - radius && yy >= y as isize - radius {
         let value = grid[yy as usize][xx as usize];
         if seen == 0 {
             seen = value;
@@ -494,10 +553,11 @@ fn update_direction_cache(
     x: usize,
     y: usize,
     direction: i32,
+    rule: RuleSet,
 ) -> [bool; 2] {
     let mut changed = [false; 2];
     for (side, player) in [(BLACK, 0_usize), (WHITE, 1_usize)] {
-        let new_shape = compute_direction_shape(board, x, y, direction, side);
+        let new_shape = compute_direction_shape_for_rule(board, x, y, direction, side, rule);
         let direction_index = direction as usize;
         let old = caches.shape_cache[player][x][y][direction_index];
         if old != new_shape {

@@ -1,6 +1,7 @@
 //! Incremental evaluation caches.
 
 use crate::constants::{BOARD_AREA, BOARD_SIZE, DSHAPE_SIZE};
+use crate::rules::RuleSet;
 use crate::types::Move;
 
 pub fn caches_backend_name() -> &'static str {
@@ -16,6 +17,7 @@ pub type OccupiedMoves = [Move; BOARD_AREA];
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvalSnapshot {
     pub initialized: bool,
+    pub rule_set: RuleSet,
     pub board_shadow: BoardShadow,
     pub empty_bucket_counts: EmptyBucketCounts,
     pub occupied_moves: OccupiedMoves,
@@ -27,6 +29,7 @@ pub struct EvalSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvalCaches {
     pub initialized: bool,
+    pub rule_set: RuleSet,
     pub board_shadow: BoardShadow,
     pub shape_cache: ShapeCache,
     pub value_cache: ValueCache,
@@ -49,6 +52,7 @@ impl EvalCaches {
     pub fn new() -> Self {
         Self {
             initialized: false,
+            rule_set: RuleSet::Freestyle,
             board_shadow: new_board_matrix(),
             shape_cache: new_shape_cache(),
             value_cache: new_value_cache(),
@@ -84,6 +88,7 @@ impl EvalCaches {
         self.active_snapshot_count += 1;
         EvalSnapshot {
             initialized: self.initialized,
+            rule_set: self.rule_set,
             board_shadow: self.board_shadow,
             empty_bucket_counts: self.empty_bucket_counts,
             occupied_moves: self.occupied_moves,
@@ -95,6 +100,7 @@ impl EvalCaches {
 
     pub fn restore_snapshot(&mut self, snapshot: &EvalSnapshot) {
         self.initialized = snapshot.initialized;
+        self.rule_set = snapshot.rule_set;
         self.board_shadow = snapshot.board_shadow;
         self.empty_bucket_counts = snapshot.empty_bucket_counts;
         self.occupied_moves = snapshot.occupied_moves;
@@ -130,6 +136,7 @@ impl EvalCaches {
 
     pub fn restore_from(&mut self, other: &Self) {
         self.initialized = other.initialized;
+        self.rule_set = other.rule_set;
         self.board_shadow = other.board_shadow;
         self.shape_cache = other.shape_cache;
         self.value_cache = other.value_cache;

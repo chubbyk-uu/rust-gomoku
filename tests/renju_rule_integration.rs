@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use rust_gomoku::{
-    generate_candidates, load_default_config, recompute_all, xy_to_move, Board, EvalCaches,
-    RuleSet, BLACK, WHITE,
+    generate_candidates, load_default_config, recompute_all_for_rule, xy_to_move, Board,
+    EvalCaches, RuleSet, BLACK, WHITE,
 };
 
 fn double_three_board_black_to_move() -> Board {
@@ -39,14 +39,13 @@ fn movegen_filters_renju_black_forbidden_moves() {
     let mut board = double_three_board_black_to_move();
     let forbidden = xy_to_move(7, 7).unwrap();
     let allowed: HashSet<_> = [forbidden].into_iter().collect();
-    let mut caches = EvalCaches::new();
-    recompute_all(&mut board, &mut caches);
-
     let mut freestyle = load_default_config();
     freestyle.rule_set = RuleSet::Freestyle;
+    let mut freestyle_caches = EvalCaches::new();
+    recompute_all_for_rule(&mut board, &mut freestyle_caches, RuleSet::Freestyle);
     let freestyle_result = generate_candidates(
         &board,
-        &caches,
+        &freestyle_caches,
         BLACK,
         &freestyle,
         None,
@@ -64,9 +63,11 @@ fn movegen_filters_renju_black_forbidden_moves() {
 
     let mut renju = load_default_config();
     renju.rule_set = RuleSet::Renju;
+    let mut renju_caches = EvalCaches::new();
+    recompute_all_for_rule(&mut board, &mut renju_caches, RuleSet::Renju);
     let renju_result = generate_candidates(
         &board,
-        &caches,
+        &renju_caches,
         BLACK,
         &renju,
         None,

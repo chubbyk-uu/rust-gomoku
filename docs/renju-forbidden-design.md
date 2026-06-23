@@ -775,6 +775,164 @@ python3 scripts/renju_oracle_compare.py --quiet
 git diff --check
 ```
 
+### Phase 7: SlowRenju-Style Forbidden Performance
+
+Goal: reduce Renju movegen overhead without changing legality semantics. The
+first implementation should follow SlowRenju's `shapeM`/`valueM` approach
+rather than inventing a separate geometric prefilter.
+
+Current evidence in this repository:
+
+- `EvalCaches` already stores per-side, per-point, per-direction `shape_cache`
+  plus `value_cache` and `attack_cache`.
+- `src/eval/local.rs::compute_direction_shape` currently computes shapes with
+  `freestyle=true`, so the cache is still classic/freestyle shaped even when
+  `EngineConfig.rule_set == RuleSet::Renju`.
+- `generate_candidates` currently filters Renju black candidates through
+  `Board::is_legal_move_for_rule`, which calls the full forbidden detector for
+  every covered black candidate.
+- `tests/renju_perf.rs` provides ignored release probes for:
+  - one `is_legal_move_for_rule` call;
+  - one interior-node `generate_candidates` call.
+
+Implementation order:
+
+1. Add rule identity to eval caches.
+   - Store the `RuleSet` used to build `EvalCaches`.
+   - Recompute caches when the requested rule differs from the cached rule.
+   - Preserve the current freestyle cache contents and behavior when
+     `RuleSet::Freestyle` is used.
+2. Make shape computation rule-aware.
+   - Thread `RuleSet` into `compute_direction_shape`,
+     `recompute_point_caches`, `recompute_all`, `value_wide_compute`, and the
+     helper paths that update one direction.
+   - For `RuleSet::Renju` and black, use the non-freestyle/forbidden-aware row
+     of the existing SlowRenju-style shape table.
+   - For `RuleSet::Freestyle`, keep the old `freestyle=true` path.
+   - For white in Renju, keep no-forbidden semantics; white has no forbidden
+     moves.
+3. Add a SlowRenju-style candidate prefilter for Renju black movegen.
+   - Inspect the four cached black directional shapes for the candidate.
+   - If any direction is `L5`, the candidate is an exact-five candidate and is
+     not forbidden by exact-five priority.
+   - If the cached shapes show possible `L6`, two-or-more four threats, or
+     two-or-more open-three threats, call the full detector to confirm.
+   - Otherwise treat the move as legal without calling the recursive detector.
+   - The prefilter must be conservative: false positives are acceptable because
+     they fall back to the full detector; false negatives are not acceptable.
+4. Keep strict legality at external boundaries.
+   - `Board::is_legal_move_for_rule`, `play_for_rule`, Gomocup input, and GUI
+     input should continue to use the full detector.
+   - The cache prefilter is only for movegen/search hot paths where candidates
+     are already filtered again by tests and tactical validation.
+5. Re-measure and record results.
+   - Run the ignored release perf test before and after the prefilter.
+   - Record `ns/call` and `ns/node` in `docs/perf-log.md` if the change is kept.
+
+Tests and validation:
+
+```bash
+cargo fmt --check
+cargo test --quiet
+cargo build --bin gomoku_gui --bin gomocup_engine --quiet
+python3 scripts/renju_oracle_compare.py --quiet
+python3 scripts/renju_dense_stress.py --skeleton all --count 400 --seed <seed> \
+    --output /tmp/renju_dense_prefilter.jsonl
+python3 scripts/renju_oracle_compare.py \
+    --case-file /tmp/renju_dense_prefilter.jsonl --quiet
+cargo test --release --test renju_perf -- --ignored --nocapture
+git diff --check
+```
+
+Exit criteria:
+
+- Freestyle movegen and eval behavior stay unchanged.
+- Renju movegen still never emits forbidden black moves in fixture and dense
+  oracle validation.
+- The perf probes show a clear reduction in Renju movegen `ns/node`.
+- Any remaining detector calls in movegen are limited to SlowRenju-style
+  suspicious points.
+
+### Phase 8: Renju Static Evaluation
+
+Goal: make quiet-position evaluation understand Renju forbidden points while
+preserving all freestyle evaluation behavior.
+
+The bundled bucket weights already follow the SlowRenju/pygomoku `para[]`
+layout (`last_eval`, `next_eval`, `attack_value`, `defend_value`). Phase 8
+should not copy another unrelated weight table. It should reuse the existing
+weights and port SlowRenju's rule-gated evaluation semantics.
+
+Implementation order:
+
+1. Keep eval tables shared, but make eval cache contents rule-aware.
+   - Freestyle keeps current buckets and attack levels.
+   - Renju black uses the rule-aware shape cache from Phase 7.
+2. Apply SlowRenju-style black forbidden-point suppression.
+   - If a black empty point is an exact-five candidate (`L5`), keep its winning
+     value.
+   - If a black empty point is confirmed forbidden by overline, double-four, or
+     true double-three, set its `value_cache` and `attack_cache` contribution to
+     the safe/zero value used by the existing bucket system.
+   - Use the full detector only for suspicious double-three cases that cannot
+     be proven from cached shapes alone.
+3. Keep white evaluation non-forbidden.
+   - White has no forbidden moves.
+   - White threats that become stronger because black's only defence is
+     forbidden should be handled as a separate sub-step after black forbidden
+     point suppression is stable.
+4. Add targeted eval tests.
+   - Freestyle cached eval and scan eval remain unchanged on existing tests.
+   - In Renju mode, a black forbidden four-four or overline point does not keep
+     high attack/value.
+   - A black exact-five point remains high value.
+   - White's equivalent point is not suppressed.
+
+Validation:
+
+```bash
+cargo test --quiet
+cargo test --test root_alignment --quiet
+python3 scripts/renju_oracle_compare.py --quiet
+cargo test --release --test renju_perf -- --ignored --nocapture
+git diff --check
+```
+
+Exit criteria:
+
+- Freestyle eval tests and fixed search alignment stay unchanged.
+- Renju eval no longer rewards black forbidden continuations as strong quiet
+  moves.
+- Any intentional Renju move/score changes are documented with fixture names.
+
+### Phase 9: Remaining Rule Surface And Regression Gates
+
+Goal: finish integration after performance and static eval are stable.
+
+Remaining work:
+
+- Add more white-positive tactical fixtures where black's only defence is
+  forbidden.
+- Add GUI and Gomocup smoke coverage for new-game rule selection and illegal
+  forbidden input.
+- Confirm one game cannot switch between freestyle and Renju after the first
+  move.
+- Re-run root/search alignment tests with Renju-specific fixtures after Phase 8
+  changes eval.
+- Keep opening rules such as RIF/Yamaguchi/Soosorv/Swap2 out of scope unless
+  explicitly requested later.
+
+Recommended release gate for the Renju feature:
+
+```bash
+cargo fmt --check
+cargo test --quiet
+cargo build --bin gomoku_gui --bin gomocup_engine --quiet
+python3 scripts/renju_oracle_compare.py --quiet
+cargo test --release --test renju_perf -- --ignored --nocapture
+git diff --check
+```
+
 ## Fixture Format Proposal
 
 Use JSONL so cases are easy to append:
@@ -827,5 +985,3 @@ Search integration should not begin until:
 - Whether forbidden move in Gomocup should be reported as illegal input,
   immediate loss, or internal engine-only filtering. This needs a protocol
   decision before Phase 5.
-- Whether to cache forbidden results in Renju movegen. Start simple and measure
-  after correctness is established.
