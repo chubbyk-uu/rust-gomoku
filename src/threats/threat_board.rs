@@ -896,6 +896,20 @@ impl ThreatBoardView {
         attacker: Side,
         move_: Move,
     ) -> Option<AttackMove> {
+        if self.rule_set == RuleSet::Freestyle {
+            self.classify_attack_at_freestyle(x, y, attacker, move_)
+        } else {
+            self.classify_attack_at_renju(x, y, attacker, move_)
+        }
+    }
+
+    fn classify_attack_at_freestyle(
+        &mut self,
+        x: usize,
+        y: usize,
+        attacker: Side,
+        move_: Move,
+    ) -> Option<AttackMove> {
         if self.board.winner() == attacker {
             return Some(AttackMove {
                 move_,
@@ -947,6 +961,139 @@ impl ThreatBoardView {
         None
     }
 
+    /// Rule-aware attack classification. The attacker stone is already on the
+    /// board at `(x, y)`. Threat levels are reconstructed from rule-legal winning
+    /// completions so that black threats relying on forbidden moves (overline
+    /// fours, fake open threes) are not counted, while forbidden defender blocks
+    /// are removed so the attacker can exploit them.
+    fn classify_attack_at_renju(
+        &mut self,
+        x: usize,
+        y: usize,
+        attacker: Side,
+        move_: Move,
+    ) -> Option<AttackMove> {
+        let defender = -attacker;
+        if self.board.winner() == attacker {
+            return Some(AttackMove {
+                move_,
+                level: ThreatLevel::WIN5,
+                defenses: Vec::new(),
+            });
+        }
+
+        let completions = self.legal_win_completions(x, y, attacker);
+        match completions.len() {
+            0 => {
+                let gains = self.a3_gain_squares(x, y);
+                let has_real_threat = gains
+                    .iter()
+                    .any(|&gain| self.gain_creates_open_four(gain, attacker));
+                if !has_real_threat {
+                    return None;
+                }
+                let defenses: Vec<_> = gains
+                    .into_iter()
+                    .filter(|&gain| {
+                        self.board
+                            .is_legal_move_for_rule(gain, defender, self.rule_set)
+                    })
+                    .collect();
+                Some(AttackMove {
+                    move_,
+                    level: ThreatLevel::A3,
+                    defenses,
+                })
+            }
+            1 => {
+                let completion = completions[0];
+                if self
+                    .board
+                    .is_legal_move_for_rule(completion, defender, self.rule_set)
+                {
+                    Some(AttackMove {
+                        move_,
+                        level: ThreatLevel::B4,
+                        defenses: vec![completion],
+                    })
+                } else {
+                    // The defender cannot legally block the only winning point.
+                    Some(AttackMove {
+                        move_,
+                        level: ThreatLevel::A4,
+                        defenses: Vec::new(),
+                    })
+                }
+            }
+            _ => Some(AttackMove {
+                move_,
+                level: ThreatLevel::A4,
+                defenses: Vec::new(),
+            }),
+        }
+    }
+
+    /// Empty points where `side` could play next to win immediately under the
+    /// active rule (exact five for black in Renju, five-or-more otherwise),
+    /// restricted to the lines passing through the just-played stone `(x, y)`.
+    fn legal_win_completions(&mut self, x: usize, y: usize, side: Side) -> Vec<Move> {
+        const AXES: [(isize, isize); 4] = [(1, 0), (0, 1), (1, 1), (1, -1)];
+        let size = self.board.size() as isize;
+        let mut wins = Vec::new();
+        for (dx, dy) in AXES {
+            for step in -4_isize..=4 {
+                if step == 0 {
+                    continue;
+                }
+                let cx = x as isize + dx * step;
+                let cy = y as isize + dy * step;
+                if cx < 0 || cy < 0 || cx >= size || cy >= size {
+                    continue;
+                }
+                let (cxu, cyu) = (cx as usize, cy as usize);
+                if self.board.grid_rows()[cyu][cxu] != EMPTY {
+                    continue;
+                }
+                let candidate = xy_to_move(cxu, cyu).expect("completion stays valid");
+                if wins.contains(&candidate) || !self.board.is_legal_move(candidate) {
+                    continue;
+                }
+                self.play(candidate, side);
+                let win = self.board.winner() == side;
+                self.undo();
+                if win {
+                    wins.push(candidate);
+                }
+            }
+        }
+        wins
+    }
+
+    /// True if `attacker` playing `gain` is rule-legal and yields an unstoppable
+    /// open four (two or more rule-legal winning completions) or an immediate
+    /// win. Used to verify that an open-three threat can really be escalated.
+    fn gain_creates_open_four(&mut self, gain: Move, attacker: Side) -> bool {
+        if !self
+            .board
+            .is_legal_move_for_rule(gain, attacker, self.rule_set)
+        {
+            return false;
+        }
+        self.play(gain, attacker);
+        let (gx, gy) = move_to_xy(gain).expect("gain stays valid");
+        let real = self.board.winner() == attacker
+            || self.legal_win_completions(gx, gy, attacker).len() >= 2;
+        self.undo();
+        real
+    }
+
+    /// Rule-aware legality of `move_` for `side`, used by the threat searcher to
+    /// drop forbidden defender replies without reaching into private fields.
+    pub fn is_rule_legal(&self, move_: Move, side: Side) -> bool {
+        self.board
+            .is_legal_move_for_rule(move_, side, self.rule_set)
+    }
+
     pub fn collect_attack_moves(&mut self, attacker: Side) -> Vec<AttackMove> {
         let moves = self.threat_moves(attacker);
         let mut attacks = Vec::new();
@@ -996,10 +1143,14 @@ impl ThreatBoardView {
 }
 
 pub fn has_vct_trigger(board: &Board, side: Side) -> bool {
-    let mut view = ThreatBoardView::from_board(board.clone());
+    has_vct_trigger_for_rule(board, side, RuleSet::Freestyle)
+}
+
+pub fn has_vct_trigger_for_rule(board: &Board, side: Side, rule: RuleSet) -> bool {
+    let mut view = ThreatBoardView::from_board_with_rule(board.clone(), rule);
     let moves = view.threat_moves(side);
     for move_ in moves {
-        if !board.is_legal_move(move_) {
+        if !view.is_rule_legal(move_, side) {
             continue;
         }
         view.play(move_, side);
@@ -1033,4 +1184,8 @@ pub fn winning_threat_moves(board: &Board, side: Side) -> Vec<Move> {
 
 pub fn forcing_threat_moves(board: &Board, side: Side) -> Vec<Move> {
     ThreatBoardView::from_board(board.clone()).forcing_threat_moves(side)
+}
+
+pub fn forcing_threat_moves_for_rule(board: &Board, side: Side, rule: RuleSet) -> Vec<Move> {
+    ThreatBoardView::from_board_with_rule(board.clone(), rule).forcing_threat_moves(side)
 }

@@ -54,10 +54,10 @@ pub use search::{
     SearchResult, SearchStats, TTBestMoveHint, TTEntry, TranspositionTable,
 };
 pub use threats::{
-    broken_four_reply, forcing_threat_moves, has_open_four, has_vct_trigger, threat_moves,
-    winning_threat_moves, AttackMove, ThreatBoardView, ThreatLevel, VCFResult, VCFSearcher,
-    VCTAndMemoCollisionSample, VCTDepthStats, VCTResult, VCTSearcher, VCTStats, VcfMemoEntry,
-    VctMemoEntry, NO_MOVE, VCFM,
+    broken_four_reply, forcing_threat_moves, forcing_threat_moves_for_rule, has_open_four,
+    has_vct_trigger, has_vct_trigger_for_rule, threat_moves, winning_threat_moves, AttackMove,
+    ThreatBoardView, ThreatLevel, VCFResult, VCFSearcher, VCTAndMemoCollisionSample, VCTDepthStats,
+    VCTResult, VCTSearcher, VCTStats, VcfMemoEntry, VctMemoEntry, NO_MOVE, VCFM,
 };
 pub use types::{Move, PlayedMove, Side};
 pub use zobrist::{ZobristError, ZobristTable, DEFAULT_ZOBRIST};

@@ -722,8 +722,20 @@ Current Phase 6 status:
   moves and broken-four replies through rule-aware legality before VCF consumes
   them.
 - Root and non-root VCF calls pass `config.rule_set`; root VCF is enabled again
-  in Renju mode. VCT remains freestyle-only until its own rule-aware defense and
-  attack generation is implemented.
+  in Renju mode.
+- VCT is now rule-aware as well:
+  - `VCTSearcher::search_for_rule` runs over a `ThreatBoardView` carrying the
+    `RuleSet`; root VCT is enabled in Renju mode (sequential and overlap paths),
+    gated by `has_vct_trigger_for_rule`.
+  - Attack classification is reconstructed from rule-legal winning completions
+    (`classify_attack_at_renju`): a black "four" whose only completion is an
+    overline is demoted (not a four), and an open three whose open-four
+    extensions are all illegal/overline is rejected as a fake threat.
+  - Defender legality is rule-aware everywhere (`is_rule_legal`): forbidden
+    black blocks are dropped from forced defenses and counter-threats, so a
+    white four/three whose only black block is forbidden becomes unstoppable.
+  - Freestyle stays byte-identical via the separate `classify_attack_at_freestyle`
+    path and the `from_board` default.
 - Added a VCF fixture where black's apparent direct completion is an overline:
   freestyle VCF finds the move, Renju VCF rejects it.
 - Added VCF fixtures where black's apparent tactical attacking move is a
@@ -735,11 +747,27 @@ Current Phase 6 status:
   as winning.
 - Added a root regression for the overline shape so root VCF cannot return the
   forbidden point.
+- Added VCT fixtures: classification demotes a black overline-four, rejects a
+  fake open three, and promotes a white four to unstoppable when black's block
+  is forbidden; end-to-end Renju VCT never returns a forbidden double-four move
+  and finds the white win when black cannot block; a root regression confirms
+  VCT is engaged in Renju and stays legal.
 
-Current Phase 6 VCF validation:
+Known Phase 6 limitations:
+
+- `has_vct_trigger_for_rule` still uses freestyle pattern counts as the gate,
+  so it may over-trigger for black (a forbidden-dependent shape can start a VCT
+  search that then correctly finds nothing). This is safe: the gate only decides
+  whether to run the now-sound VCT, never the result.
+- Renju attack classification simulates rule-aware completions, so Renju VCT is
+  slower than freestyle. Acceptable for opt-in Renju mode; revisit if profiling
+  shows it dominates.
+
+Current Phase 6 VCF/VCT validation:
 
 ```bash
 cargo test --test vcf_alignment --quiet
+cargo test --test vct_alignment --quiet
 cargo test --test root_alignment --quiet
 cargo test --quiet
 cargo build --bin gomoku_gui --bin gomocup_engine --quiet

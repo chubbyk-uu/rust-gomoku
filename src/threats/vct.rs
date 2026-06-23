@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::board::Board;
+use crate::rules::RuleSet;
 use crate::threats::threat_board::ThreatBoardView;
 use crate::threats::types::{AttackMove, ThreatLevel};
 use crate::types::{Move, Side};
@@ -171,6 +172,16 @@ pub struct VCTSearcher {
 
 impl VCTSearcher {
     pub fn search(&mut self, board: &Board, side: Side, depth: i32) -> VCTResult {
+        self.search_for_rule(board, side, depth, RuleSet::Freestyle)
+    }
+
+    pub fn search_for_rule(
+        &mut self,
+        board: &Board,
+        side: Side,
+        depth: i32,
+        rule: RuleSet,
+    ) -> VCTResult {
         self.stats = VCTStats {
             depth_limit: depth.max(0),
             ..VCTStats::default()
@@ -189,7 +200,7 @@ impl VCTSearcher {
                 solved: true,
             };
         }
-        let mut view = ThreatBoardView::from_board(board.clone());
+        let mut view = ThreatBoardView::from_board_with_rule(board.clone(), rule);
         self.memo.clear();
         self.and_memo_context_signatures.clear();
         self.and_memo_context_collision_keys.clear();
@@ -514,7 +525,7 @@ impl VCTSearcher {
         let mut solved = true;
         let mut searched = false;
         for d_move in defenses {
-            if !seen.insert(d_move) || !view.board.is_legal_move(d_move) {
+            if !seen.insert(d_move) || !view.is_rule_legal(d_move, -attacker) {
                 continue;
             }
             searched = true;
@@ -568,7 +579,7 @@ impl VCTSearcher {
         let mut counter_wins = Vec::new();
 
         for m in view.threat_moves(defender) {
-            if !view.board.is_legal_move(m) {
+            if !view.is_rule_legal(m, defender) {
                 continue;
             }
             view.play(m, defender);
@@ -593,7 +604,7 @@ impl VCTSearcher {
         let mut counter_a3 = Vec::new();
 
         for m in view.threat_moves(defender) {
-            if seen.contains(&m) || !view.board.is_legal_move(m) {
+            if seen.contains(&m) || !view.is_rule_legal(m, defender) {
                 continue;
             }
             view.play(m, defender);

@@ -16,7 +16,9 @@ use crate::rules::RuleSet;
 use crate::search::{
     AlphaBetaSearcher, RootCandidateProfile, SearchOptions, SearchStats, TranspositionTable,
 };
-use crate::threats::{forcing_threat_moves, has_vct_trigger, VCFSearcher, VCTSearcher, VCTStats};
+use crate::threats::{
+    forcing_threat_moves_for_rule, has_vct_trigger_for_rule, VCFSearcher, VCTSearcher, VCTStats,
+};
 use crate::types::{Move, Side};
 
 const CLASSIC_RAND_SEED: i32 = 1_232_356;
@@ -396,7 +398,7 @@ impl RootSearcher {
         if trial.winner() == side {
             return (true, None);
         }
-        if !forcing_threat_moves(&trial, -side).is_empty() {
+        if !forcing_threat_moves_for_rule(&trial, -side, self.config.rule_set).is_empty() {
             return (false, Some("opponent_forcing"));
         }
         if self.config.runtime.compute_vcf
@@ -736,9 +738,12 @@ impl RootSearcher {
         let vct_start = Instant::now();
         self.vct.memo_diagnostics_enabled = self.config.runtime.root_profile;
         self.vct.strict_and_memo_key = self.config.runtime.vct_strict_and_memo_key;
-        let vct_result = self
-            .vct
-            .search(board, side, self.config.runtime.root_vct_depth);
+        let vct_result = self.vct.search_for_rule(
+            board,
+            side,
+            self.config.runtime.root_vct_depth,
+            self.config.rule_set,
+        );
         trace.vct_ms = Some(elapsed_ms(vct_start));
         trace.vct_stats = Some(self.vct.stats.clone());
         trace.vct_found = vct_result.found;
@@ -809,7 +814,6 @@ impl RootSearcher {
         let mut trace = RootTrace::default();
         self.last_trace = Some(trace.clone());
         let vcf_enabled = self.config.runtime.compute_vcf;
-        let vct_enabled = self.config.rule_set == RuleSet::Freestyle;
 
         if vcf_enabled {
             trace.used_vcf = true;
@@ -835,10 +839,9 @@ impl RootSearcher {
             }
         }
 
-        if vct_enabled && self.config.runtime.compute_vct && self.config.runtime.root_vct_depth > 0
-        {
+        if self.config.runtime.compute_vct && self.config.runtime.root_vct_depth > 0 {
             trace.used_vct = true;
-            if has_vct_trigger(board, side) {
+            if has_vct_trigger_for_rule(board, side, self.config.rule_set) {
                 trace.vct_triggered = true;
                 if self.can_overlap_vct_alphabeta(&limits) {
                     return self.search_vct_and_alphabeta_overlap(board, side, limits, trace);
@@ -847,9 +850,12 @@ impl RootSearcher {
                 let vct_start = Instant::now();
                 self.vct.memo_diagnostics_enabled = self.config.runtime.root_profile;
                 self.vct.strict_and_memo_key = self.config.runtime.vct_strict_and_memo_key;
-                let vct_result = self
-                    .vct
-                    .search(board, side, self.config.runtime.root_vct_depth);
+                let vct_result = self.vct.search_for_rule(
+                    board,
+                    side,
+                    self.config.runtime.root_vct_depth,
+                    self.config.rule_set,
+                );
                 trace.vct_ms = Some(elapsed_ms(vct_start));
                 trace.vct_stats = Some(self.vct.stats.clone());
                 trace.vct_found = vct_result.found;

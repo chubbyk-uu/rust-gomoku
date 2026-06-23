@@ -84,6 +84,50 @@ fn renju_root_vcf_rejects_overline_completion() {
 }
 
 #[test]
+fn renju_root_vct_engages_and_avoids_forbidden_double_four() {
+    let mut board = Board::new();
+    for (x, y, side) in [
+        (5, 7, 1),
+        (0, 0, -1),
+        (6, 7, 1),
+        (2, 0, -1),
+        (8, 7, 1),
+        (4, 0, -1),
+        (7, 5, 1),
+        (6, 0, -1),
+        (7, 6, 1),
+        (8, 0, -1),
+        (7, 8, 1),
+        (10, 0, -1),
+    ] {
+        board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
+    }
+    assert_eq!(board.side_to_move(), 1);
+
+    let mut config = load_default_config();
+    config.rule_set = RuleSet::Renju;
+    config.runtime.compute_vct = true;
+    config.runtime.overlap_vct_alphabeta = false;
+    let mut searcher = RootSearcher::new(config);
+    let forbidden = xy_to_move(7, 7).unwrap();
+    let result = searcher.search(
+        &mut board,
+        Some(SearchLimits {
+            max_depth: 2,
+            root_width: 24,
+            ..SearchLimits::default()
+        }),
+    );
+    let trace = searcher.last_trace.as_ref().expect("trace is recorded");
+
+    // VCF cannot win (the only completion is forbidden), so VCT is engaged.
+    assert!(!trace.vcf_found);
+    assert!(trace.used_vct);
+    assert_ne!(result.move_, forbidden);
+    assert!(board.is_legal_move_for_rule(result.move_, 1, RuleSet::Renju));
+}
+
+#[test]
 fn root_search_returns_legal_move_under_node_limit() {
     let mut board = Board::new();
     board.play(xy_to_move(7, 7).unwrap(), None).unwrap();
