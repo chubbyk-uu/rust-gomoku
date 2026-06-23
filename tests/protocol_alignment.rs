@@ -324,9 +324,31 @@ fn protocol_info_rule_updates_only_before_game_start() {
     assert_eq!(proto.config.rule_set, RuleSet::Renju);
 
     proto.handle_line("START 15");
-    proto.handle_line("BEGIN");
     proto.handle_line("INFO rule 0");
-    assert_eq!(proto.config.rule_set, RuleSet::Renju);
+    assert_eq!(proto.config.rule_set, RuleSet::Freestyle);
+
+    proto.handle_line("BEGIN");
+    proto.handle_line("INFO rule 4");
+    assert_eq!(proto.config.rule_set, RuleSet::Freestyle);
+}
+
+#[test]
+fn protocol_info_rule_accepts_standard_start_then_rule_flow() {
+    let mut protocol = proto();
+    protocol.handle_line("START 15");
+    protocol.handle_line("INFO rule 4");
+    assert_eq!(protocol.config.rule_set, RuleSet::Renju);
+    protocol.handle_line("BEGIN");
+    assert_eq!(protocol.board.move_count(), 1);
+
+    protocol.handle_line("RESTART");
+    protocol.handle_line("INFO rule 0");
+    assert_eq!(protocol.config.rule_set, RuleSet::Freestyle);
+
+    let mut protocol = proto();
+    protocol.handle_line("INFO rule 4");
+    protocol.handle_line("START 15");
+    assert_eq!(protocol.config.rule_set, RuleSet::Renju);
 }
 
 #[test]

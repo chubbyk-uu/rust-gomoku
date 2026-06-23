@@ -7,7 +7,7 @@ use crate::eval::caches::EvalCaches;
 use crate::patterns::buckets::bucket_for_lines;
 use crate::patterns::line::shape_raw_from_board_point_hypothetical;
 use crate::patterns::shapes::{ShapeLabel, DIAGONAL_DOWN, DIAGONAL_UP, HORIZONTAL, VERTICAL};
-use crate::rules::RuleSet;
+use crate::rules::{classify_forbidden_move, RuleSet};
 use crate::types::Move;
 
 const FOUR_DIRECTIONS: [i32; 4] = [HORIZONTAL, VERTICAL, DIAGONAL_DOWN, DIAGONAL_UP];
@@ -45,7 +45,52 @@ pub fn compute_direction_shape_for_rule(
 }
 
 pub fn compute_bucket_and_attack(direction_shapes: (i32, i32, i32, i32)) -> (i32, i32) {
+    compute_bucket_and_attack_raw(direction_shapes)
+}
+
+fn compute_bucket_and_attack_for_rule(
+    board: &Board,
+    x: usize,
+    y: usize,
+    side: i8,
+    rule: RuleSet,
+    direction_shapes: (i32, i32, i32, i32),
+) -> (i32, i32) {
+    let counts = compute_bucket_attack_and_counts(direction_shapes);
+    if rule == RuleSet::Renju && side == BLACK && counts.exact_fives == 0 {
+        if counts.fours >= 2 || counts.overlines > 0 {
+            return (0, 0);
+        }
+        if counts.open_threes >= 2
+            && classify_forbidden_move(board, (y * BOARD_SIZE + x) as Move, side, rule)
+                .is_ok_and(|kind| kind.is_forbidden())
+        {
+            return (0, 0);
+        }
+    }
+    (counts.bucket, counts.attack)
+}
+
+fn compute_bucket_and_attack_raw(direction_shapes: (i32, i32, i32, i32)) -> (i32, i32) {
+    let counts = compute_bucket_attack_and_counts(direction_shapes);
+    (counts.bucket, counts.attack)
+}
+
+struct ShapeCounts {
+    bucket: i32,
+    attack: i32,
+    exact_fives: i32,
+    open_threes: i32,
+    fours: i32,
+    overlines: i32,
+}
+
+fn compute_bucket_attack_and_counts(direction_shapes: (i32, i32, i32, i32)) -> ShapeCounts {
     let mut attack = 0;
+    let mut exact_fives = 0;
+    let mut open_threes = 0;
+    let mut fours = 0;
+    let mut overlines = 0;
     let mut lines = [0_i32; 4];
 
     for (idx, shape) in [
@@ -62,16 +107,22 @@ pub fn compute_bucket_and_attack(direction_shapes: (i32, i32, i32, i32)) -> (i32
         lines[idx] = label % ShapeLabel::L6 as i32;
 
         if label == ShapeLabel::L3 as i32 || label == ShapeLabel::L3B as i32 {
+            open_threes += 1;
             attack = attack.max(3);
         } else if label == ShapeLabel::L4S as i32 {
+            fours += aux;
             attack = attack.max(4);
             if aux >= 2 {
                 lines[idx] = 8;
             }
         } else if label == ShapeLabel::L5 as i32 {
             attack = 6;
+            exact_fives += 1;
         } else if label == ShapeLabel::L4 as i32 {
+            fours += 1;
             attack = attack.max(5);
+        } else if label == ShapeLabel::L6 as i32 {
+            overlines += 1;
         }
     }
 
@@ -93,7 +144,14 @@ pub fn compute_bucket_and_attack(direction_shapes: (i32, i32, i32, i32)) -> (i32
     };
 
     let bucket = bucket_for_lines(top1, top2).expect("normalized line strengths are valid");
-    (bucket, attack)
+    ShapeCounts {
+        bucket,
+        attack,
+        exact_fives,
+        open_threes,
+        fours,
+        overlines,
+    }
 }
 
 pub fn recompute_point_caches(board: &mut Board, caches: &mut EvalCaches, x: usize, y: usize) {
@@ -153,8 +211,14 @@ pub fn recompute_point_caches_for_rule(
             shapes[direction_index] = shape;
         }
 
-        let (bucket, attack) =
-            compute_bucket_and_attack((shapes[0], shapes[1], shapes[2], shapes[3]));
+        let (bucket, attack) = compute_bucket_and_attack_for_rule(
+            board,
+            x,
+            y,
+            side,
+            rule,
+            (shapes[0], shapes[1], shapes[2], shapes[3]),
+        );
         let old_bucket = caches.value_cache[player][x][y];
         let old_attack = caches.attack_cache[player][x][y];
         if caches.active_snapshot_count > 0 && (old_bucket != bucket || old_attack != attack) {
@@ -264,7 +328,7 @@ pub fn value_wide_compute_for_rule(
             }
             for (player, changed) in changed_player.into_iter().enumerate() {
                 if changed {
-                    update_bucket_attack(board, caches, x, y, player);
+                    update_bucket_attack(board, caches, x, y, player, rule);
                 }
             }
         } else {
@@ -571,12 +635,27 @@ fn update_direction_cache(
     changed
 }
 
-fn update_bucket_attack(board: &Board, caches: &mut EvalCaches, x: usize, y: usize, player: usize) {
+fn update_bucket_attack(
+    board: &Board,
+    caches: &mut EvalCaches,
+    x: usize,
+    y: usize,
+    player: usize,
+    rule: RuleSet,
+) {
     if board.grid_rows()[y][x] != EMPTY {
         return;
     }
     let shapes = &caches.shape_cache[player][x][y];
-    let (bucket, attack) = compute_bucket_and_attack((shapes[0], shapes[1], shapes[2], shapes[3]));
+    let side = if player == 0 { BLACK } else { WHITE };
+    let (bucket, attack) = compute_bucket_and_attack_for_rule(
+        board,
+        x,
+        y,
+        side,
+        rule,
+        (shapes[0], shapes[1], shapes[2], shapes[3]),
+    );
     let old_bucket = caches.value_cache[player][x][y];
     let old_attack = caches.attack_cache[player][x][y];
     if caches.active_snapshot_count > 0 && (old_bucket != bucket || old_attack != attack) {
@@ -607,6 +686,207 @@ fn clear_occupied_point(caches: &mut EvalCaches, x: usize, y: usize) {
                     caches.shape_log.push((player, x, y, direction, old));
                 }
                 caches.shape_cache[player][x][y][direction] = 0;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn board_from_stones(stones: &[(usize, usize, i8)]) -> Board {
+        let mut board = Board::new();
+        for &(x, y, side) in stones {
+            board.grid_rows_mut()[y][x] = side;
+        }
+        board
+    }
+
+    fn recompute_point_for_rule(
+        stones: &[(usize, usize, i8)],
+        point: (usize, usize),
+        rule: RuleSet,
+    ) -> EvalCaches {
+        let mut board = board_from_stones(stones);
+        let mut caches = EvalCaches::new();
+        recompute_point_caches_for_rule(&mut board, &mut caches, point.0, point.1, rule);
+        caches
+    }
+
+    #[test]
+    fn renju_black_eval_suppresses_forbidden_points() {
+        let cases = [
+            (
+                "double_four",
+                &[
+                    (5, 7, BLACK),
+                    (6, 7, BLACK),
+                    (8, 7, BLACK),
+                    (7, 5, BLACK),
+                    (7, 6, BLACK),
+                    (7, 8, BLACK),
+                ][..],
+                (7, 7),
+            ),
+            (
+                "double_three",
+                &[(6, 7, BLACK), (8, 7, BLACK), (7, 6, BLACK), (7, 8, BLACK)][..],
+                (7, 7),
+            ),
+            (
+                "overline",
+                &[
+                    (4, 7, BLACK),
+                    (5, 7, BLACK),
+                    (6, 7, BLACK),
+                    (7, 7, BLACK),
+                    (8, 7, BLACK),
+                ][..],
+                (9, 7),
+            ),
+        ];
+
+        for (name, stones, (x, y)) in cases {
+            let freestyle = recompute_point_for_rule(stones, (x, y), RuleSet::Freestyle);
+            let renju = recompute_point_for_rule(stones, (x, y), RuleSet::Renju);
+            assert!(
+                freestyle.value_cache[0][x][y] > 0 || freestyle.attack_cache[0][x][y] > 0,
+                "{name}: freestyle should still value the tactical point"
+            );
+            assert_eq!(
+                (renju.value_cache[0][x][y], renju.attack_cache[0][x][y]),
+                (0, 0),
+                "{name}: Renju black forbidden point must be suppressed"
+            );
+        }
+    }
+
+    #[test]
+    fn renju_black_eval_keeps_exact_five_priority() {
+        let stones = [
+            (3, 7, BLACK),
+            (4, 7, BLACK),
+            (5, 7, BLACK),
+            (6, 7, BLACK),
+            (7, 2, BLACK),
+            (7, 3, BLACK),
+            (7, 4, BLACK),
+            (7, 5, BLACK),
+            (7, 6, BLACK),
+        ];
+        let renju = recompute_point_for_rule(&stones, (7, 7), RuleSet::Renju);
+        assert_eq!(renju.attack_cache[0][7][7], 6);
+        assert!(renju.value_cache[0][7][7] > 0);
+    }
+
+    #[test]
+    fn renju_eval_does_not_suppress_white_forbidden_like_shapes() {
+        let stones = [
+            (4, 7, WHITE),
+            (5, 7, WHITE),
+            (6, 7, WHITE),
+            (7, 7, WHITE),
+            (8, 7, WHITE),
+        ];
+        let freestyle = recompute_point_for_rule(&stones, (9, 7), RuleSet::Freestyle);
+        let renju = recompute_point_for_rule(&stones, (9, 7), RuleSet::Renju);
+        assert_eq!(renju.value_cache[1][9][7], freestyle.value_cache[1][9][7]);
+        assert_eq!(renju.attack_cache[1][9][7], freestyle.attack_cache[1][9][7]);
+        assert!(
+            renju.value_cache[1][9][7] > 0 || renju.attack_cache[1][9][7] > 0,
+            "white has no forbidden-point suppression"
+        );
+    }
+
+    #[test]
+    fn renju_incremental_eval_matches_full_recompute_with_suppression() {
+        let mut board =
+            board_from_stones(&[(6, 7, BLACK), (8, 7, BLACK), (7, 6, BLACK), (0, 0, WHITE)]);
+        let mut incremental = EvalCaches::new();
+        recompute_all_for_rule(&mut board, &mut incremental, RuleSet::Renju);
+
+        board.grid_rows_mut()[8][7] = BLACK;
+        value_wide_compute_for_rule(&mut board, &mut incremental, (7, 8), RuleSet::Renju);
+
+        let mut full = EvalCaches::new();
+        recompute_all_for_rule(&mut board, &mut full, RuleSet::Renju);
+        assert_eq!(incremental.shape_cache, full.shape_cache);
+        assert_eq!(incremental.value_cache, full.value_cache);
+        assert_eq!(incremental.attack_cache, full.attack_cache);
+        assert_eq!(
+            (
+                incremental.value_cache[0][7][7],
+                incremental.attack_cache[0][7][7]
+            ),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn renju_eval_suppression_matches_detector_on_hand_fixtures() {
+        assert_renju_eval_suppression_matches_detector(include_str!(
+            "../../cases/renju/forbidden_hand_cases.jsonl"
+        ));
+    }
+
+    #[test]
+    #[ignore = "set RENJU_EVAL_SUPPRESSION_CASE_FILE to a JSONL fixture file"]
+    fn renju_eval_suppression_matches_detector_on_env_case_file() {
+        let path = std::env::var("RENJU_EVAL_SUPPRESSION_CASE_FILE")
+            .expect("RENJU_EVAL_SUPPRESSION_CASE_FILE must point to a JSONL fixture file");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {path}: {err}"));
+        assert_renju_eval_suppression_matches_detector(&raw);
+    }
+
+    fn assert_renju_eval_suppression_matches_detector(raw: &str) {
+        #[derive(serde::Deserialize)]
+        struct Stone {
+            x: usize,
+            y: usize,
+            side: i8,
+        }
+        #[derive(serde::Deserialize)]
+        struct Point {
+            x: usize,
+            y: usize,
+        }
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            name: String,
+            moves: Vec<Stone>,
+            candidate: Point,
+        }
+
+        for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+            let case: Fixture = serde_json::from_str(line)
+                .unwrap_or_else(|err| panic!("fixture parse failed: {err}"));
+            let stones = case
+                .moves
+                .iter()
+                .map(|stone| (stone.x, stone.y, stone.side))
+                .collect::<Vec<_>>();
+            let board = board_from_stones(&stones);
+            let candidate = (case.candidate.x, case.candidate.y);
+            let move_ = crate::board::xy_to_move(candidate.0, candidate.1).unwrap();
+
+            let freestyle = recompute_point_for_rule(&stones, candidate, RuleSet::Freestyle);
+            let renju = recompute_point_for_rule(&stones, candidate, RuleSet::Renju);
+            let freestyle_has_value = freestyle.value_cache[0][candidate.0][candidate.1] > 0
+                || freestyle.attack_cache[0][candidate.0][candidate.1] > 0;
+            let renju_suppressed = renju.value_cache[0][candidate.0][candidate.1] == 0
+                && renju.attack_cache[0][candidate.0][candidate.1] == 0;
+
+            if freestyle_has_value && renju_suppressed {
+                let forbidden = classify_forbidden_move(&board, move_, BLACK, RuleSet::Renju)
+                    .expect("fixture candidate is valid")
+                    .is_forbidden();
+                assert!(
+                    forbidden,
+                    "{}: Renju eval suppressed a detector-legal black point",
+                    case.name
+                );
             }
         }
     }

@@ -370,7 +370,8 @@ mod tests {
     use super::*;
     use crate::board::xy_to_move;
     use crate::config::load_default_config;
-    use crate::eval::local::{recompute_all, value_wide_compute};
+    use crate::eval::local::{recompute_all, recompute_all_for_rule, value_wide_compute};
+    use crate::rules::RuleSet;
 
     #[test]
     fn cached_matches_scan_after_direct_grid_mutation_and_snapshot_restore() {
@@ -400,6 +401,32 @@ mod tests {
 
         board.grid_rows_mut()[6][6] = EMPTY;
         caches.restore_snapshot(&snapshot);
+        assert_scan_cached_equivalent(&board, &caches, BLACK, &config);
+        assert_scan_cached_equivalent(&board, &caches, WHITE, &config);
+    }
+
+    #[test]
+    fn renju_cached_eval_matches_scan_with_forbidden_suppression() {
+        let mut config = load_default_config();
+        config.rule_set = RuleSet::Renju;
+        let mut board = Board::new();
+        for (x, y, side) in [
+            (6, 7, BLACK),
+            (8, 7, BLACK),
+            (7, 6, BLACK),
+            (7, 8, BLACK),
+            (0, 0, WHITE),
+            (1, 0, WHITE),
+        ] {
+            board.grid_rows_mut()[y][x] = side;
+        }
+
+        let mut caches = EvalCaches::new();
+        recompute_all_for_rule(&mut board, &mut caches, RuleSet::Renju);
+        assert_eq!(
+            (caches.value_cache[0][7][7], caches.attack_cache[0][7][7]),
+            (0, 0)
+        );
         assert_scan_cached_equivalent(&board, &caches, BLACK, &config);
         assert_scan_cached_equivalent(&board, &caches, WHITE, &config);
     }

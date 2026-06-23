@@ -858,6 +858,9 @@ Exit criteria:
 Goal: make quiet-position evaluation understand Renju forbidden points while
 preserving all freestyle evaluation behavior.
 
+Status: implemented in `src/eval/local.rs` by applying SlowRenju-style
+black-point suppression when building rule-aware eval caches.
+
 The bundled bucket weights already follow the SlowRenju/pygomoku `para[]`
 layout (`last_eval`, `next_eval`, `attack_value`, `defend_value`). Phase 8
 should not copy another unrelated weight table. It should reuse the existing
@@ -905,6 +908,40 @@ Exit criteria:
   moves.
 - Any intentional Renju move/score changes are documented with fixture names.
 
+Implementation notes:
+
+- Freestyle keeps the existing bucket and attack computation.
+- Renju black first uses the rule-aware shape cache from Phase 7.
+- If black has an exact-five candidate, the point keeps its winning value.
+- If black has cached double-four or overline evidence and no exact five, the
+  point's black `value_cache` and `attack_cache` are set to zero.
+- If black has cached two-or-more open-three lines and no exact five, the full
+  forbidden detector confirms whether it is a true double-three before
+  suppression.
+- White keeps the freestyle/no-forbidden evaluation path under Renju.
+
+Validation run:
+
+```bash
+cargo test --quiet
+cargo build --bin gomoku_gui --bin gomocup_engine --quiet
+python3 scripts/renju_oracle_compare.py --quiet
+python3 scripts/renju_dense_stress.py --skeleton all --count 400 --seed 33 \
+    --output /tmp/renju_dense_phase8.jsonl
+python3 scripts/renju_oracle_compare.py \
+    --case-file /tmp/renju_dense_phase8.jsonl --quiet
+python3 scripts/run_diff.py --jobs 4
+cargo test --release --test renju_perf -- --ignored --nocapture
+```
+
+Result summary:
+
+- Freestyle root diff: 11/11 default cases passed.
+- Dense oracle stress: 2000/2000 local/Rapfi/renju_forbid comparisons had no
+  unexplained mismatches.
+- Perf after Phase 8: Renju movegen measured about 1503 ns/node on the existing
+  forcing-node probe; direct full detector measured about 726 ns/call.
+
 ### Phase 9: Remaining Rule Surface And Regression Gates
 
 Goal: finish integration after performance and static eval are stable.
@@ -913,6 +950,12 @@ Remaining work:
 
 - Add more white-positive tactical fixtures where black's only defence is
   forbidden.
+- Add a broader eval-suppression consistency gate: when rule-aware Renju eval
+  suppresses a black point that freestyle eval considered valuable, the full
+  forbidden detector should also classify that point as forbidden. Phase 8
+  covers the hand fixtures; Phase 9 should extend this to dense/random cases so
+  cached four/overline labels cannot silently over-suppress detector-legal
+  strong points.
 - Add GUI and Gomocup smoke coverage for new-game rule selection and illegal
   forbidden input.
 - Confirm one game cannot switch between freestyle and Renju after the first
@@ -929,9 +972,26 @@ cargo fmt --check
 cargo test --quiet
 cargo build --bin gomoku_gui --bin gomocup_engine --quiet
 python3 scripts/renju_oracle_compare.py --quiet
+python3 scripts/renju_dense_stress.py --skeleton all --count 400 --seed <seed> \
+    --output /tmp/renju_dense_phase9.jsonl
+python3 scripts/renju_eval_suppression_check.py \
+    --case-file /tmp/renju_dense_phase9.jsonl
 cargo test --release --test renju_perf -- --ignored --nocapture
 git diff --check
 ```
+
+Phase 9 progress:
+
+- Added `scripts/renju_eval_suppression_check.py`, which wraps an ignored Rust
+  test to validate arbitrary JSONL fixture files. The gate asserts that if
+  Renju eval suppresses a black point that freestyle eval considered valuable,
+  the full forbidden detector also classifies that point as forbidden.
+- The suppression gate passed the 72 hand fixtures and a 2000-case dense batch
+  generated with seed 34.
+- Gomocup `INFO rule` follows the standard Piskvork flow: it may arrive after
+  `START`, `RECTSTART`, or `RESTART` while the board is still empty. Rule
+  changes are ignored once the first move has been played, so switching modes
+  still requires starting/restarting to an empty board first.
 
 ## Fixture Format Proposal
 

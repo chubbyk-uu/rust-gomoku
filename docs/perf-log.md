@@ -52,6 +52,15 @@ Decision:
 - If future Rapfi-style line tables are explored, compare against this cache
   gate baseline rather than the original full-detector-per-candidate baseline.
 
+Follow-up:
+
+- Phase 8 added SlowRenju-style Renju black eval suppression for forbidden
+  quiet points.
+- On the same release probe after Phase 8, direct full detector measured about
+  726 ns/call, freestyle movegen about 1244 ns/node, and Renju movegen about
+  1503 ns/node.
+- The suppression did not materially change the Phase 7 movegen baseline.
+
 ## 2026-04-28 Root Profile Slow-Case Sample
 
 Commands:
