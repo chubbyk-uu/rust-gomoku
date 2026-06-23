@@ -992,6 +992,14 @@ Phase 9 progress:
   `START`, `RECTSTART`, or `RESTART` while the board is still empty. Rule
   changes are ignored once the first move has been played, so switching modes
   still requires starting/restarting to an empty board first.
+- Added a stateless SlowRenju `trd3`-style eval invalidation step for Renju:
+  after each incremental `value_wide_compute_for_rule`, scan the full board with
+  cheap shape-cache early-outs and rerun the full forbidden detector only for
+  black empty points that are apparent double-threes. This keeps recursive
+  double-three legality flips from leaving stale suppressed eval cache entries.
+- Promoted the seeded dense incremental-vs-full recompute stress test to a
+  normal unit regression. It covers the original non-local stale-suppression
+  failure where a later move made a previously forbidden black point legal.
 
 ## Fixture Format Proposal
 

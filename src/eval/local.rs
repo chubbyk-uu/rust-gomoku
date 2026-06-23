@@ -337,6 +337,10 @@ pub fn value_wide_compute_for_rule(
         add_empty_bucket_contribution(board, caches, x, y);
         caches.board_shadow[x][y] = cell;
     }
+
+    if rule == RuleSet::Renju {
+        refresh_renju_apparent_double_three_points(board, caches);
+    }
 }
 
 fn mark_dirty_cell(
@@ -656,15 +660,72 @@ fn update_bucket_attack(
         rule,
         (shapes[0], shapes[1], shapes[2], shapes[3]),
     );
+    set_bucket_attack(caches, x, y, player, bucket, attack);
+}
+
+fn set_bucket_attack(
+    caches: &mut EvalCaches,
+    x: usize,
+    y: usize,
+    player: usize,
+    bucket: i32,
+    attack: i32,
+) {
     let old_bucket = caches.value_cache[player][x][y];
     let old_attack = caches.attack_cache[player][x][y];
-    if caches.active_snapshot_count > 0 && (old_bucket != bucket || old_attack != attack) {
+    if old_bucket == bucket && old_attack == attack {
+        return;
+    }
+    if caches.active_snapshot_count > 0 {
         caches
             .value_log
             .push((player, x, y, old_bucket, old_attack));
     }
     caches.value_cache[player][x][y] = bucket;
     caches.attack_cache[player][x][y] = attack;
+}
+
+fn refresh_renju_apparent_double_three_points(board: &Board, caches: &mut EvalCaches) {
+    let size = board.size();
+    let player = 0_usize;
+
+    for x in 0..size {
+        for y in 0..size {
+            if board.grid_rows()[y][x] != EMPTY {
+                continue;
+            }
+
+            let shapes = &caches.shape_cache[player][x][y];
+            let direction_shapes = (shapes[0], shapes[1], shapes[2], shapes[3]);
+            let counts = compute_bucket_attack_and_counts(direction_shapes);
+            if counts.exact_fives > 0 || counts.open_threes < 2 {
+                continue;
+            }
+
+            let (bucket, attack) = compute_bucket_and_attack_for_rule(
+                board,
+                x,
+                y,
+                BLACK,
+                RuleSet::Renju,
+                direction_shapes,
+            );
+            let old_bucket = caches.value_cache[player][x][y];
+            let old_attack = caches.attack_cache[player][x][y];
+            if old_bucket == bucket && old_attack == attack {
+                continue;
+            }
+
+            let old_bucket_index = old_bucket as usize;
+            let new_bucket_index = bucket as usize;
+            debug_assert!(old_bucket_index < DSHAPE_SIZE);
+            debug_assert!(new_bucket_index < DSHAPE_SIZE);
+            debug_assert!(caches.empty_bucket_counts[player][old_bucket_index] > 0);
+            caches.empty_bucket_counts[player][old_bucket_index] -= 1;
+            caches.empty_bucket_counts[player][new_bucket_index] += 1;
+            set_bucket_attack(caches, x, y, player, bucket, attack);
+        }
+    }
 }
 
 fn clear_occupied_point(caches: &mut EvalCaches, x: usize, y: usize) {
@@ -829,12 +890,10 @@ mod tests {
     // many seeded move sequences in a dense cluster and asserts the incremental
     // `value_wide_compute_for_rule` caches stay identical to a full recompute,
     // so any missed non-local invalidation would surface as a mismatch.
-    // KNOWN FAILING until the SlowRenju `trd3` non-local invalidation is ported.
-    // It reproduces the bug (e.g. trial 24 with the seed below): an incrementally
-    // updated black point stays stale-suppressed (0) after a later move makes it
-    // legal again. Un-ignore once the fix lands so it guards against regressions.
+    // It reproduces the original bug (e.g. trial 24 with the seed below): an
+    // incrementally updated black point stayed stale-suppressed (0) after a
+    // later move made it legal again.
     #[test]
-    #[ignore = "documents the known non-local forbidden invalidation bug; un-ignore after the trd3 fix"]
     fn renju_incremental_eval_matches_full_recompute_over_random_sequences() {
         let mut state = 0x9e37_79b9_7f4a_7c15_u64;
         let mut next = || {
