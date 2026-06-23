@@ -644,6 +644,30 @@ Exit criteria:
 - Rule switching is explicit.
 - Freestyle default remains unchanged.
 
+Current Phase 5 status:
+
+- Added `Board::play_for_rule(move, side, rule)` while keeping `Board::play`
+  as the freestyle-compatible default.
+- Renju terminal semantics now live at the board play boundary:
+  - black wins only when the played move creates an exact five;
+  - black overline is rejected as an illegal Renju move before placement;
+  - white still wins with five-or-more, including overline.
+- Search, Gomocup, and GUI placement paths now call `play_for_rule`, so terminal
+  semantics and move legality use the same configured rule. Existing replay and
+  default `play` behavior remain freestyle to preserve current reference
+  alignment tests.
+- Added board-level tests for black exact-five win, black overline rejection,
+  white overline win, and freestyle black overline win.
+
+Current Phase 5 validation:
+
+```bash
+cargo test --quiet
+cargo build --bin gomoku_gui --bin gomocup_engine --quiet
+python3 scripts/renju_oracle_compare.py --quiet
+git diff --check
+```
+
 ### Phase 6: VCF/VCT Integration
 
 This is the high-risk phase. Do not start until phases 2 to 5 are stable.

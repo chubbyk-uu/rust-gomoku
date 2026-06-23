@@ -186,7 +186,9 @@ impl GomocupProtocol {
             return Err(());
         }
         self.board.force_side_to_move(side).map_err(|_| ())?;
-        self.board.play(move_, Some(side)).map_err(|_| ())?;
+        self.board
+            .play_for_rule(move_, Some(side), self.config.rule_set)
+            .map_err(|_| ())?;
         Ok(())
     }
 

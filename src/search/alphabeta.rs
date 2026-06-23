@@ -421,7 +421,7 @@ impl AlphaBetaSearcher {
                 for candidate in ordered {
                     let mut trial = board.clone();
                     trial
-                        .play(candidate.move_, Some(side))
+                        .play_for_rule(candidate.move_, Some(side), self.config.rule_set)
                         .expect("ordered move stays legal on trial board");
                     if !self
                         .vcf
@@ -477,7 +477,7 @@ impl AlphaBetaSearcher {
             let mut profile_full_window_elapsed_us = 0_u128;
             let mut profile_pvs_research = false;
             board
-                .play(candidate.move_, Some(side))
+                .play_for_rule(candidate.move_, Some(side), self.config.rule_set)
                 .expect("ordered candidate stays legal");
             coverage.add_move(candidate.move_);
             value_wide_compute(board, caches, (mx, my));

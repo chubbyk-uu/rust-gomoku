@@ -155,6 +155,24 @@ impl Board {
     }
 
     pub fn play(&mut self, move_: Move, side: Option<Side>) -> Result<PlayedMove, BoardError> {
+        self.play_with_rule(move_, side, RuleSet::Freestyle)
+    }
+
+    pub fn play_for_rule(
+        &mut self,
+        move_: Move,
+        side: Option<Side>,
+        rule: RuleSet,
+    ) -> Result<PlayedMove, BoardError> {
+        self.play_with_rule(move_, side, rule)
+    }
+
+    fn play_with_rule(
+        &mut self,
+        move_: Move,
+        side: Option<Side>,
+        rule: RuleSet,
+    ) -> Result<PlayedMove, BoardError> {
         let side = side.unwrap_or(self.side_to_move);
         if !is_valid_side(side) {
             return Err(BoardError::InvalidSide(side));
@@ -168,6 +186,13 @@ impl Board {
         if !self.is_legal_move(move_) {
             return Err(BoardError::IllegalMove(move_));
         }
+        if rule == RuleSet::Renju
+            && side == BLACK
+            && classify_forbidden_move(self, move_, side, rule)
+                .is_ok_and(|kind| kind.is_forbidden())
+        {
+            return Err(BoardError::IllegalMove(move_));
+        }
 
         let (col, row) = move_to_xy(move_)?;
         self.grid[row][col] = side;
@@ -175,7 +200,7 @@ impl Board {
         self.move_history.push(played);
         self.zobrist_key ^= self.zobrist_table.key_for_turn();
         self.zobrist_key ^= self.zobrist_table.key_for(move_, side)?;
-        if self.is_winning_move(col, row, side) {
+        if self.is_winning_move_for_rule(col, row, side, rule) {
             self.winner = side;
         }
         self.side_to_move = opposite_side(side);
@@ -245,6 +270,15 @@ impl Board {
             .any(|(dx, dy)| self.count_aligned(x, y, side, dx, dy) >= 5)
     }
 
+    fn is_winning_move_for_rule(&self, x: usize, y: usize, side: Side, rule: RuleSet) -> bool {
+        match (rule, side) {
+            (RuleSet::Renju, BLACK) => DIRECTIONS
+                .into_iter()
+                .any(|(dx, dy)| self.count_aligned(x, y, side, dx, dy) == 5),
+            _ => self.is_winning_move(x, y, side),
+        }
+    }
+
     fn count_aligned(&self, x: usize, y: usize, side: Side, dx: isize, dy: isize) -> usize {
         1 + self.count_one_side(x, y, side, dx, dy) + self.count_one_side(x, y, side, -dx, -dy)
     }
@@ -266,5 +300,67 @@ impl Board {
         }
 
         count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::WHITE;
+
+    fn place_line(board: &mut Board, y: usize, xs: impl IntoIterator<Item = usize>, side: Side) {
+        for x in xs {
+            board.grid_rows_mut()[y][x] = side;
+        }
+    }
+
+    #[test]
+    fn renju_black_exact_five_wins() {
+        let mut board = Board::new();
+        place_line(&mut board, 7, 3..7, BLACK);
+
+        board
+            .play_for_rule(xy_to_move(7, 7).unwrap(), None, RuleSet::Renju)
+            .unwrap();
+
+        assert_eq!(board.winner(), BLACK);
+    }
+
+    #[test]
+    fn renju_black_overline_is_illegal_not_win() {
+        let mut board = Board::new();
+        place_line(&mut board, 7, 3..8, BLACK);
+
+        let move_ = xy_to_move(8, 7).unwrap();
+        assert_eq!(
+            board.play_for_rule(move_, None, RuleSet::Renju),
+            Err(BoardError::IllegalMove(move_))
+        );
+        assert_eq!(board.at(8, 7), Ok(EMPTY));
+        assert_eq!(board.winner(), EMPTY);
+    }
+
+    #[test]
+    fn renju_white_overline_wins() {
+        let mut board = Board::with_side_to_move(WHITE).unwrap();
+        place_line(&mut board, 7, 3..8, WHITE);
+
+        board
+            .play_for_rule(xy_to_move(8, 7).unwrap(), None, RuleSet::Renju)
+            .unwrap();
+
+        assert_eq!(board.winner(), WHITE);
+    }
+
+    #[test]
+    fn freestyle_black_overline_still_wins() {
+        let mut board = Board::new();
+        place_line(&mut board, 7, 3..8, BLACK);
+
+        board
+            .play_for_rule(xy_to_move(8, 7).unwrap(), None, RuleSet::Freestyle)
+            .unwrap();
+
+        assert_eq!(board.winner(), BLACK);
     }
 }

@@ -379,7 +379,8 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameState>>) {
                             forbidden_name(kind)
                         ));
                     } else {
-                        match move_.and_then(|move_| game.board.play(move_, None)) {
+                        let rule = game.config.rule_set;
+                        match move_.and_then(|move_| game.board.play_for_rule(move_, None, rule)) {
                             Ok(_) => {
                                 game.last_mark = Some((x, y));
                                 if game.board.winner() == game.human_side {
@@ -538,7 +539,8 @@ fn maybe_start_engine(state: Arc<Mutex<GameState>>) {
                 game.error = Some("引擎返回禁手或非法落子。".to_string());
                 game.status = "引擎落子失败。".to_string();
             } else {
-                match game.board.play(result.move_, None) {
+                let rule = game.config.rule_set;
+                match game.board.play_for_rule(result.move_, None, rule) {
                     Ok(_) => {
                         game.last_mark = move_to_xy(result.move_).ok();
                         game.last_result = Some(result);
