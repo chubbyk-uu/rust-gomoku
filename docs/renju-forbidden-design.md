@@ -549,6 +549,66 @@ Exit criteria:
 - Freestyle behavior unchanged.
 - Renju movegen never emits a black forbidden move in tested fixtures.
 
+Current Phase 4 status:
+
+- Added `RuleSet` to `EngineConfig`, defaulting to `RuleSet::Freestyle`.
+- Added rule-aware board helpers while preserving the old freestyle-only
+  `is_legal_move` / `play` behavior:
+  - `forbidden_kind_for_rule(move, side, rule)`
+  - `is_legal_move_for_rule(move, side, rule)`
+- `generate_candidates` now filters moves through `is_legal_move_for_rule`, so
+  Renju black forbidden moves are not emitted by normal movegen. Freestyle and
+  white movegen remain unchanged by the forbidden detector.
+- Root fallback move selection and root-allowed filtering now use the rule-aware
+  legality helper.
+- If fallback cannot find any rule-legal move, root search now returns a
+  controlled losing result instead of panicking. Gomocup converts an invalid
+  engine result with no legal fallback into `ERROR No legal move.`.
+- Root VCF/VCT fast paths and the opponent VCF filter are intentionally disabled
+  when `config.rule_set == RuleSet::Renju`. This avoids returning tactical moves
+  proven by freestyle-only VCF/VCT logic before Phase 6 adds rule-aware tactical
+  search. Freestyle behavior keeps the existing VCF-before-VCT ordering.
+- Gomocup supports `INFO rule freestyle|free|0` and `INFO rule renju|4`, but only
+  while `board.move_count() == 0`. A rule change after the game has started is
+  ignored, so one game cannot switch between freestyle and Renju midstream.
+- The web GUI exposes `无禁手` / `有禁手` as a new-game option. Human black
+  forbidden moves in Renju mode are rejected with the detected reason instead
+  of being played as an immediate loss. This matches the existing interactive
+  UI style: illegal user input is blocked at the UI/protocol boundary.
+- The GUI validates engine moves with rule-aware legality before playing them;
+  if a Renju search path ever returns a forbidden black move, the UI reports an
+  engine move failure instead of placing it.
+
+Current Phase 4 validation:
+
+```bash
+cargo fmt --check
+cargo test --quiet
+cargo build --bin gomoku_gui --bin gomocup_engine --quiet
+python3 scripts/renju_oracle_compare.py --quiet
+python3 scripts/renju_dense_stress.py --skeleton all --count 400 --seed 20 \
+    --output /tmp/renju_dense_seed20_phase4.jsonl
+python3 scripts/renju_oracle_compare.py \
+    --case-file /tmp/renju_dense_seed20_phase4.jsonl --quiet
+git diff --check
+```
+
+The seed-20 dense batch generated 2000 cases with distribution
+`double_four=601`, `double_three=176`, `none=414`, `overline=809`; local
+detector, Rapfi, and `renju_forbid` had zero unexplained mismatches. The only
+typed differences were two accepted overline/double-three coexistence reporting
+differences.
+
+Known Phase 4 performance cost:
+
+- Freestyle movegen and fallback keep the old raw `is_legal_move` path.
+- Renju black movegen calls the recursive forbidden detector for candidate
+  filtering. This is intentionally conservative for correctness, but it can be
+  expensive in deeper search. The expected optimization path is a rule-aware
+  legality cache or incremental forbidden-point table after terminal and
+  tactical semantics are stable; do not weaken true-open-three recursion to
+  gain speed.
+
 ### Phase 5: Terminal Semantics And Protocol Surface
 
 Add rule mode to config/runtime surfaces:
@@ -557,6 +617,11 @@ Add rule mode to config/runtime surfaces:
 - Gomocup `INFO rule freestyle|renju`.
 - Probe outputs.
 - GUI option later, after engine correctness is established.
+
+The library config, Gomocup rule switch, and GUI new-game rule option were
+pulled into Phase 4 because they were needed to verify end-to-end movegen
+filtering. Phase 5 should focus on terminal/win semantics and any remaining
+protocol transcript coverage rather than re-adding those surfaces.
 
 Terminal tests:
 

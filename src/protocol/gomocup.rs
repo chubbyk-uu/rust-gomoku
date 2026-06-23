@@ -3,6 +3,7 @@
 use crate::board::{move_to_xy, xy_to_move, Board};
 use crate::config::{apply_engine_profile, load_default_config, EngineConfig, EngineProfile};
 use crate::constants::{BOARD_AREA, BOARD_SIZE};
+use crate::rules::RuleSet;
 use crate::search::{RootSearcher, SearchLimits, TranspositionTable};
 
 pub const ABOUT_TEXT: &str = "name=\"rust_gomoku\", version=\"0.1\", author=\"OpenAI\", country=\"China\", www=\"https://example.invalid/\"";
@@ -178,6 +179,12 @@ impl GomocupProtocol {
 
     fn play_xy(&mut self, x: usize, y: usize, side: i8) -> Result<(), ()> {
         let move_ = xy_to_move(x, y).map_err(|_| ())?;
+        if !self
+            .board
+            .is_legal_move_for_rule(move_, side, self.config.rule_set)
+        {
+            return Err(());
+        }
         self.board.force_side_to_move(side).map_err(|_| ())?;
         self.board.play(move_, Some(side)).map_err(|_| ())?;
         Ok(())
@@ -338,6 +345,16 @@ impl GomocupProtocol {
                     self.searcher = None;
                 }
             }
+            "rule" => {
+                if self.board.move_count() == 0 {
+                    if let Ok(parsed) = value.parse::<RuleSet>() {
+                        if self.config.rule_set != parsed {
+                            self.config.rule_set = parsed;
+                            self.searcher = None;
+                        }
+                    }
+                }
+            }
             "root_profile" => {
                 if let Some(parsed) = parse_one::<i32>(value) {
                     self.config.runtime.root_profile = parsed != 0;
@@ -398,10 +415,21 @@ impl GomocupProtocol {
         self.searcher = Some(searcher);
 
         let mut move_ = result.move_;
-        if !self.board.is_legal_move(move_) {
-            move_ = (0..BOARD_AREA as u16)
-                .find(|&candidate| self.board.is_legal_move(candidate))
-                .expect("engine produced no legal move on non-terminal board");
+        if !self.board.is_legal_move_for_rule(
+            move_,
+            self.board.side_to_move(),
+            self.config.rule_set,
+        ) {
+            let Some(fallback) = (0..BOARD_AREA as u16).find(|&candidate| {
+                self.board.is_legal_move_for_rule(
+                    candidate,
+                    self.board.side_to_move(),
+                    self.config.rule_set,
+                )
+            }) else {
+                return vec!["ERROR No legal move.".to_string()];
+            };
+            move_ = fallback;
         }
         let (x, y) = move_to_xy(move_).expect("selected move stays valid");
         let side = self.board.side_to_move();

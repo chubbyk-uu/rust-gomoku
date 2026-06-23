@@ -3,8 +3,10 @@
 use std::sync::LazyLock;
 
 use crate::constants::DSHAPE_SIZE;
+use crate::rules::RuleSet;
 
 pub const DEFAULT_ENGINE_PROFILE: EngineProfile = EngineProfile::Base;
+pub const DEFAULT_RULE_SET: RuleSet = RuleSet::Freestyle;
 pub const DEFAULT_SEARCH_DEPTH: i32 = 8;
 pub const DEFAULT_SEARCH_WIDTH: i32 = 40;
 pub const DEFAULT_TIMED_SEARCH_MAX_DEPTH: i32 = 25;
@@ -108,6 +110,7 @@ pub struct RootSearchDefaults {
 #[derive(Clone, Debug, PartialEq)]
 pub struct EngineConfig {
     pub profile: EngineProfile,
+    pub rule_set: RuleSet,
     pub eval_tables: EvalBucketTables,
     pub search: SearchParameters,
     pub runtime: RuntimeOptions,
@@ -138,6 +141,7 @@ pub fn load_config_for_profile(profile: EngineProfile) -> EngineConfig {
     let para = default_eval_para();
     let mut config = EngineConfig {
         profile: DEFAULT_ENGINE_PROFILE,
+        rule_set: DEFAULT_RULE_SET,
         eval_tables: slice_eval_tables(para),
         search: slice_search_parameters(para),
         runtime: default_runtime_options(para),

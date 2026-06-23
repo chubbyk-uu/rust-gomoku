@@ -1,7 +1,7 @@
 use rust_gomoku::constants::{HASHF_ALPHA, INF};
 use rust_gomoku::{
     fallback_ai_move, load_default_config, move_to_xy, new_classic_fallback_rng, recompute_all,
-    xy_to_move, Board, EvalCaches, RootSearcher, SearchLimits, TTEntry,
+    xy_to_move, Board, EvalCaches, RootSearcher, RuleSet, SearchLimits, TTEntry,
 };
 
 #[test]
@@ -478,8 +478,17 @@ fn classic_fallback_rng_matches_white_10_10_sequence() {
     let mut caches = EvalCaches::new();
     recompute_all(&mut board, &mut caches);
     assert_eq!(
-        move_to_xy(fallback_ai_move(&board, &caches, board.side_to_move(), &mut rng).unwrap())
+        move_to_xy(
+            fallback_ai_move(
+                &board,
+                &caches,
+                board.side_to_move(),
+                RuleSet::Freestyle,
+                &mut rng,
+            )
             .unwrap(),
+        )
+        .unwrap(),
         (13, 9)
     );
 
@@ -490,8 +499,17 @@ fn classic_fallback_rng_matches_white_10_10_sequence() {
     let mut caches = EvalCaches::new();
     recompute_all(&mut board, &mut caches);
     assert_eq!(
-        move_to_xy(fallback_ai_move(&board, &caches, board.side_to_move(), &mut rng).unwrap())
+        move_to_xy(
+            fallback_ai_move(
+                &board,
+                &caches,
+                board.side_to_move(),
+                RuleSet::Freestyle,
+                &mut rng,
+            )
             .unwrap(),
+        )
+        .unwrap(),
         (9, 7)
     );
 }

@@ -12,6 +12,7 @@ use crate::board::{move_to_xy, xy_to_move, Board};
 use crate::config::EngineConfig;
 use crate::constants::{INF, WIN};
 use crate::eval::{recompute_all, EvalCaches};
+use crate::rules::RuleSet;
 use crate::search::{
     AlphaBetaSearcher, RootCandidateProfile, SearchOptions, SearchStats, TranspositionTable,
 };
@@ -187,6 +188,7 @@ pub fn fallback_ai_move(
     board: &Board,
     caches: &EvalCaches,
     side: Side,
+    rule: RuleSet,
     rng: &mut ClassicFallbackRng,
 ) -> Result<Move, &'static str> {
     let player = if side == 1 { 0 } else { 1 };
@@ -196,7 +198,12 @@ pub fn fallback_ai_move(
 
     for move_index in 0..(board.size() * board.size()) {
         let move_ = move_index as Move;
-        if !board.is_legal_move(move_) {
+        let legal = if rule == RuleSet::Freestyle {
+            board.is_legal_move(move_)
+        } else {
+            board.is_legal_move_for_rule(move_, side, rule)
+        };
+        if !legal {
             continue;
         }
         let (x, y) = move_to_xy(move_).expect("iterated move index stays in range");
@@ -312,6 +319,36 @@ struct AlphaBetaThreadResult {
 }
 
 impl RootSearcher {
+    fn fallback_search_result(
+        &mut self,
+        board: &Board,
+        caches: &EvalCaches,
+        side: Side,
+        score: i32,
+        depth: i32,
+        nodes: usize,
+    ) -> SearchResult {
+        let move_ = fallback_ai_move(
+            board,
+            caches,
+            side,
+            self.config.rule_set,
+            &mut self.fallback_rng,
+        )
+        .unwrap_or(0);
+        let score = if board.is_legal_move_for_rule(move_, side, self.config.rule_set) {
+            score
+        } else {
+            -INF
+        };
+        SearchResult {
+            move_,
+            score,
+            depth,
+            nodes,
+        }
+    }
+
     pub fn new(config: EngineConfig) -> Self {
         let tt = TranspositionTable::default();
         let alphabeta = AlphaBetaSearcher::with_tt(config.clone(), tt.clone());
@@ -345,7 +382,7 @@ impl RootSearcher {
         side: Side,
         move_: Move,
     ) -> (bool, Option<&'static str>) {
-        if !board.is_legal_move(move_) {
+        if !board.is_legal_move_for_rule(move_, side, self.config.rule_set) {
             return (false, Some("illegal"));
         }
         let mut trial = board.clone();
@@ -441,6 +478,9 @@ impl RootSearcher {
         side: Side,
         allowed_moves: Option<HashSet<Move>>,
     ) -> Option<HashSet<Move>> {
+        if self.config.rule_set != RuleSet::Freestyle {
+            return allowed_moves;
+        }
         if !self.config.runtime.compute_vcf {
             return allowed_moves;
         }
@@ -457,14 +497,14 @@ impl RootSearcher {
         let candidates: Vec<Move> = if let Some(allowed) = allowed_moves {
             let mut moves: Vec<_> = allowed
                 .into_iter()
-                .filter(|&move_| board.is_legal_move(move_))
+                .filter(|&move_| board.is_legal_move_for_rule(move_, side, self.config.rule_set))
                 .collect();
             moves.sort_unstable();
             moves
         } else {
             (0..(board.size() * board.size()))
                 .map(|index| index as Move)
-                .filter(|&move_| board.is_legal_move(move_))
+                .filter(|&move_| board.is_legal_move_for_rule(move_, side, self.config.rule_set))
                 .collect()
         };
 
@@ -519,13 +559,7 @@ impl RootSearcher {
             .as_ref()
             .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
         {
-            return SearchResult {
-                move_: fallback_ai_move(board, &caches, side, &mut self.fallback_rng)
-                    .expect("fallback move exists on non-terminal board"),
-                score: best_score,
-                depth: 0,
-                nodes: 0,
-            };
+            return self.fallback_search_result(board, &caches, side, best_score, 0, 0);
         }
         let root_allowed_moves =
             self.apply_opponent_vcf_filter(board, side, self.root_allowed_moves(board));
@@ -533,30 +567,17 @@ impl RootSearcher {
             .as_ref()
             .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
         {
-            return SearchResult {
-                move_: fallback_ai_move(board, &caches, side, &mut self.fallback_rng)
-                    .expect("fallback move exists on non-terminal board"),
-                score: best_score,
-                depth: 0,
-                nodes: 0,
-            };
+            return self.fallback_search_result(board, &caches, side, best_score, 0, 0);
         }
         if let Some(allowed) = &root_allowed_moves {
             let mut root_legal_moves: Vec<_> = allowed
                 .iter()
                 .copied()
-                .filter(|&move_| board.is_legal_move(move_))
+                .filter(|&move_| board.is_legal_move_for_rule(move_, side, self.config.rule_set))
                 .collect();
             root_legal_moves.sort_unstable();
             if root_legal_moves.is_empty() {
-                let move_ = fallback_ai_move(board, &caches, side, &mut self.fallback_rng)
-                    .expect("fallback move exists on non-terminal board");
-                return SearchResult {
-                    move_,
-                    score: -INF,
-                    depth: 0,
-                    nodes: 0,
-                };
+                return self.fallback_search_result(board, &caches, side, -INF, 0, 0);
             }
             if root_legal_moves.len() == 1 {
                 return SearchResult {
@@ -632,10 +653,15 @@ impl RootSearcher {
                 best_move = Some(move_);
                 best_score = score;
             } else if score <= -WIN {
-                best_move = Some(
-                    fallback_ai_move(board, &caches, side, &mut self.fallback_rng)
-                        .expect("fallback move exists on non-terminal board"),
-                );
+                if let Ok(move_) = fallback_ai_move(
+                    board,
+                    &caches,
+                    side,
+                    self.config.rule_set,
+                    &mut self.fallback_rng,
+                ) {
+                    best_move = Some(move_);
+                }
                 best_score = score;
             }
             if score >= WIN || score <= -WIN {
@@ -643,15 +669,22 @@ impl RootSearcher {
             }
         }
 
-        let move_ = best_move.unwrap_or_else(|| {
-            fallback_ai_move(board, &caches, side, &mut self.fallback_rng)
-                .expect("fallback move exists on non-terminal board")
-        });
-        SearchResult {
-            move_,
-            score: best_score,
-            depth: completed_depth,
-            nodes: total_nodes,
+        if let Some(move_) = best_move {
+            SearchResult {
+                move_,
+                score: best_score,
+                depth: completed_depth,
+                nodes: total_nodes,
+            }
+        } else {
+            self.fallback_search_result(
+                board,
+                &caches,
+                side,
+                best_score,
+                completed_depth,
+                total_nodes,
+            )
         }
     }
 
@@ -771,8 +804,9 @@ impl RootSearcher {
         let side = board.side_to_move();
         let mut trace = RootTrace::default();
         self.last_trace = Some(trace.clone());
+        let tactical_enabled = self.config.rule_set == RuleSet::Freestyle;
 
-        if self.config.runtime.compute_vcf {
+        if tactical_enabled && self.config.runtime.compute_vcf {
             trace.used_vcf = true;
             let vcf_result = self.vcf.search_with_multi_reply(
                 board,
@@ -795,7 +829,10 @@ impl RootSearcher {
             }
         }
 
-        if self.config.runtime.compute_vct && self.config.runtime.root_vct_depth > 0 {
+        if tactical_enabled
+            && self.config.runtime.compute_vct
+            && self.config.runtime.root_vct_depth > 0
+        {
             trace.used_vct = true;
             if has_vct_trigger(board, side) {
                 trace.vct_triggered = true;
@@ -837,5 +874,46 @@ impl RootSearcher {
         trace.alphabeta_ms = Some(elapsed_ms(ab_start));
         self.last_trace = Some(trace);
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::xy_to_move;
+    use crate::config::load_default_config;
+    use crate::constants::{BLACK, BOARD_AREA, BOARD_SIZE, WHITE};
+
+    #[test]
+    fn root_search_handles_no_legal_fallback_move_without_panicking() {
+        let mut board = Board::new();
+        board.play(xy_to_move(0, 0).unwrap(), None).unwrap();
+        for y in 0..BOARD_SIZE {
+            for x in 0..BOARD_SIZE {
+                if x == 0 && y == 0 {
+                    continue;
+                }
+                board.grid_rows_mut()[y][x] = if (x + y) % 2 == 0 { BLACK } else { WHITE };
+            }
+        }
+        board.force_side_to_move(BLACK).unwrap();
+
+        let mut caches = EvalCaches::new();
+        recompute_all(&mut board, &mut caches);
+        let mut rng = new_classic_fallback_rng();
+        assert!(fallback_ai_move(&board, &caches, BLACK, RuleSet::Renju, &mut rng).is_err());
+
+        let mut config = load_default_config();
+        config.rule_set = RuleSet::Renju;
+        let mut searcher = RootSearcher::new(config);
+        let result = searcher.search(
+            &mut board,
+            Some(SearchLimits {
+                max_depth: 1,
+                root_width: BOARD_AREA,
+                ..SearchLimits::default()
+            }),
+        );
+        assert_eq!(result.score, -INF);
     }
 }

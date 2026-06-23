@@ -359,6 +359,11 @@ fn generate_candidates_from_moves(
 
     let mut candidates = Vec::with_capacity(moves.len());
     for &move_ in moves {
+        if config.rule_set != crate::rules::RuleSet::Freestyle
+            && !board.is_legal_move_for_rule(move_, side, config.rule_set)
+        {
+            continue;
+        }
         if let Some(allowed) = root_allowed_moves {
             if !allowed.contains(&move_) {
                 continue;

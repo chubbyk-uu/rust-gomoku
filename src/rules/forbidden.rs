@@ -16,6 +16,27 @@ pub enum RuleSet {
     Renju,
 }
 
+impl RuleSet {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Freestyle => "freestyle",
+            Self::Renju => "renju",
+        }
+    }
+}
+
+impl std::str::FromStr for RuleSet {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.to_ascii_lowercase().as_str() {
+            "0" | "freestyle" | "free" => Ok(Self::Freestyle),
+            "4" | "renju" => Ok(Self::Renju),
+            _ => Err(format!("unknown rule set: {raw}")),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForbiddenKind {
     None,

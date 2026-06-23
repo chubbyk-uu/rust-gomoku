@@ -1,9 +1,10 @@
 use rust_gomoku::{
-    EngineProfile, GomocupProtocol, SearchLimits, DEFAULT_DYNAMIC_BOARD_MARGIN,
-    DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_OVERLAP_VCT_ALPHABETA, DEFAULT_ROOT_PROFILE,
-    DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
-    DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH, DEFAULT_VCF_MULTI_REPLY,
-    DEFAULT_VCT_STRICT_AND_MEMO_KEY, DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
+    xy_to_move, EngineProfile, GomocupProtocol, RuleSet, SearchLimits, BLACK,
+    DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_OVERLAP_VCT_ALPHABETA,
+    DEFAULT_ROOT_PROFILE, DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH,
+    DEFAULT_SEARCH_WIDTH, DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
+    DEFAULT_VCF_MULTI_REPLY, DEFAULT_VCT_STRICT_AND_MEMO_KEY,
+    DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH, WHITE,
 };
 
 fn proto() -> GomocupProtocol {
@@ -312,6 +313,44 @@ fn protocol_info_profile_updates_config_profile() {
         DEFAULT_VCF_MULTI_REPLY
     );
     assert!(!proto.config.runtime.fast_history_ordering);
+}
+
+#[test]
+fn protocol_info_rule_updates_only_before_game_start() {
+    let mut proto = proto();
+    assert_eq!(proto.config.rule_set, RuleSet::Freestyle);
+
+    proto.handle_line("INFO rule 4");
+    assert_eq!(proto.config.rule_set, RuleSet::Renju);
+
+    proto.handle_line("START 15");
+    proto.handle_line("BEGIN");
+    proto.handle_line("INFO rule 0");
+    assert_eq!(proto.config.rule_set, RuleSet::Renju);
+}
+
+#[test]
+fn protocol_turn_rejects_renju_forbidden_black_move() {
+    let mut proto = proto();
+    proto.config.rule_set = RuleSet::Renju;
+    for (x, y, side) in [
+        (6, 7, BLACK),
+        (0, 0, WHITE),
+        (8, 7, BLACK),
+        (0, 1, WHITE),
+        (7, 6, BLACK),
+        (0, 2, WHITE),
+        (7, 8, BLACK),
+        (0, 3, WHITE),
+    ] {
+        proto
+            .board
+            .play(xy_to_move(x, y).unwrap(), Some(side))
+            .unwrap();
+    }
+    assert_eq!(proto.board.side_to_move(), BLACK);
+
+    assert_eq!(proto.handle_line("TURN 7,7"), ["ERROR Illegal move."]);
 }
 
 #[test]

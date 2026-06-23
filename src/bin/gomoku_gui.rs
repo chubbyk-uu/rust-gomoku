@@ -10,8 +10,8 @@ use serde::Serialize;
 
 use rust_gomoku::{
     apply_engine_profile, load_default_config, move_to_xy, xy_to_move, Board, EngineConfig,
-    EngineProfile, RootSearcher, RootTrace, SearchLimits, SearchResult, Side, BLACK, BOARD_SIZE,
-    EMPTY, WHITE,
+    EngineProfile, ForbiddenKind, RootSearcher, RootTrace, RuleSet, SearchLimits, SearchResult,
+    Side, BLACK, BOARD_SIZE, EMPTY, WHITE,
 };
 
 const DEFAULT_ADDR: &str = "127.0.0.1:18080";
@@ -111,15 +111,20 @@ impl GameState {
         }
     }
 
-    fn reset(&mut self, human_side: Side) {
+    fn reset(&mut self, human_side: Side, rule: RuleSet) {
         self.game_id = self.game_id.wrapping_add(1);
         self.board.reset();
+        self.config.rule_set = rule;
         self.human_side = human_side;
         self.engine_thinking = false;
+        let rule_name = match rule {
+            RuleSet::Freestyle => "无禁手",
+            RuleSet::Renju => "有禁手",
+        };
         self.status = if human_side == BLACK {
-            "新局开始：你执黑，请落子。".to_string()
+            format!("新局开始（{rule_name}）：你执黑，请落子。")
         } else {
-            "新局开始：你执白，引擎执黑思考中。".to_string()
+            format!("新局开始（{rule_name}）：你执白，引擎执黑思考中。")
         };
         self.error = None;
         self.last_mark = None;
@@ -235,6 +240,7 @@ struct ParamsResponse {
     fast_history_ordering: bool,
     static_board: bool,
     dynamic_board_margin: i32,
+    rule: &'static str,
 }
 
 fn snapshot_state(state: &GameState) -> StateResponse {
@@ -310,6 +316,7 @@ fn snapshot_state(state: &GameState) -> StateResponse {
             fast_history_ordering: state.config.runtime.fast_history_ordering,
             static_board: state.config.runtime.static_board,
             dynamic_board_margin: state.config.runtime.dynamic_board_margin,
+            rule: state.config.rule_set.as_str(),
         },
     }
 }
@@ -337,9 +344,12 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameState>>) {
             let side = query_param(query, "side")
                 .and_then(parse_side)
                 .unwrap_or(BLACK);
+            let rule = query_param(query, "rule")
+                .and_then(|value| value.parse::<RuleSet>().ok())
+                .unwrap_or(RuleSet::Freestyle);
             {
                 let mut game = state.lock().expect("state lock");
-                game.reset(side);
+                game.reset(side, rule);
             }
             if side == WHITE {
                 maybe_start_engine(Arc::clone(&state));
@@ -356,18 +366,32 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameState>>) {
                 if !game.can_human_play() {
                     game.error = Some("现在不能落子。".to_string());
                 } else if let (Some(x), Some(y)) = (x, y) {
-                    match xy_to_move(x, y).and_then(|move_| game.board.play(move_, None)) {
-                        Ok(_) => {
-                            game.last_mark = Some((x, y));
-                            if game.board.winner() == game.human_side {
-                                game.status = "你赢了。".to_string();
-                            } else {
-                                game.status = "你已落子，引擎思考中。".to_string();
-                                should_engine_move = true;
+                    let move_ = xy_to_move(x, y);
+                    let forbidden = move_.ok().and_then(|move_| {
+                        game.board
+                            .forbidden_kind_for_rule(move_, game.human_side, game.config.rule_set)
+                            .ok()
+                            .filter(|kind| kind.is_forbidden())
+                    });
+                    if let Some(kind) = forbidden {
+                        game.error = Some(format!(
+                            "黑棋禁手：{}，不能落在这里。",
+                            forbidden_name(kind)
+                        ));
+                    } else {
+                        match move_.and_then(|move_| game.board.play(move_, None)) {
+                            Ok(_) => {
+                                game.last_mark = Some((x, y));
+                                if game.board.winner() == game.human_side {
+                                    game.status = "你赢了。".to_string();
+                                } else {
+                                    game.status = "你已落子，引擎思考中。".to_string();
+                                    should_engine_move = true;
+                                }
                             }
-                        }
-                        Err(err) => {
-                            game.error = Some(format!("非法落子：{err:?}"));
+                            Err(err) => {
+                                game.error = Some(format!("非法落子：{err:?}"));
+                            }
                         }
                     }
                 } else {
@@ -428,6 +452,15 @@ fn parse_side(value: &str) -> Option<Side> {
         "black" | "1" => Some(BLACK),
         "white" | "-1" => Some(WHITE),
         _ => None,
+    }
+}
+
+fn forbidden_name(kind: ForbiddenKind) -> &'static str {
+    match kind {
+        ForbiddenKind::None => "无",
+        ForbiddenKind::DoubleThree => "三三禁手",
+        ForbiddenKind::DoubleFour => "四四禁手",
+        ForbiddenKind::Overline => "长连禁手",
     }
 }
 
@@ -497,21 +530,30 @@ fn maybe_start_engine(state: Arc<Mutex<GameState>>) {
             return;
         }
         if game.board.winner() == EMPTY && game.board.side_to_move() != game.human_side {
-            match game.board.play(result.move_, None) {
-                Ok(_) => {
-                    game.last_mark = move_to_xy(result.move_).ok();
-                    game.last_result = Some(result);
-                    game.last_trace = trace;
-                    game.last_search_ms = Some((elapsed_ms * 1000.0).round() / 1000.0);
-                    game.status = if game.board.winner() == EMPTY {
-                        "引擎已落子，轮到你。".to_string()
-                    } else {
-                        "引擎获胜。".to_string()
-                    };
-                }
-                Err(err) => {
-                    game.error = Some(format!("引擎返回非法落子：{err:?}"));
-                    game.status = "引擎落子失败。".to_string();
+            if !game.board.is_legal_move_for_rule(
+                result.move_,
+                game.board.side_to_move(),
+                game.config.rule_set,
+            ) {
+                game.error = Some("引擎返回禁手或非法落子。".to_string());
+                game.status = "引擎落子失败。".to_string();
+            } else {
+                match game.board.play(result.move_, None) {
+                    Ok(_) => {
+                        game.last_mark = move_to_xy(result.move_).ok();
+                        game.last_result = Some(result);
+                        game.last_trace = trace;
+                        game.last_search_ms = Some((elapsed_ms * 1000.0).round() / 1000.0);
+                        game.status = if game.board.winner() == EMPTY {
+                            "引擎已落子，轮到你。".to_string()
+                        } else {
+                            "引擎获胜。".to_string()
+                        };
+                    }
+                    Err(err) => {
+                        game.error = Some(format!("引擎返回非法落子：{err:?}"));
+                        game.status = "引擎落子失败。".to_string();
+                    }
                 }
             }
         }
@@ -629,7 +671,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       grid-template-columns: 1fr 1fr;
       gap: 12px;
     }
-    .profile-switch {
+    .profile-switch, .rule-switch {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 12px;
@@ -717,6 +759,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <button class="primary" onclick="newGame('black')">执黑</button>
           <button class="primary" onclick="newGame('white')">执白</button>
         </div>
+        <div class="rule-switch">
+          <button id="rule-freestyle" class="secondary" onclick="selectRule('freestyle')">无禁手</button>
+          <button id="rule-renju" class="secondary" onclick="selectRule('renju')">有禁手</button>
+        </div>
         <div class="profile-switch">
           <button id="profile-base" class="secondary" onclick="setProfile('base')">Base</button>
           <button id="profile-fast" class="secondary" onclick="setProfile('fast')">Fast</button>
@@ -724,7 +770,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="actions">
           <button class="warn" onclick="undo()">悔棋</button>
         </div>
-        <div class="hint">棋盘会自动刷新；点击“执黑/执白”会按对应颜色重新开局。Base/Fast 可在引擎未思考时切换，只影响下一次引擎思考。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
+        <div class="hint">棋盘会自动刷新；规则只在新局生效，点击“执黑/执白”会按当前规则和颜色重新开局。Base/Fast 可在引擎未思考时切换，只影响下一次引擎思考。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
       </div>
       <div class="kv" id="info"></div>
     </aside>
@@ -733,6 +779,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const canvas = document.getElementById('board');
     const ctx = canvas.getContext('2d');
     let state = null;
+    let selectedRule = 'freestyle';
 
     async function api(path) {
       const res = await fetch(path, { method: path === '/state' ? 'GET' : 'POST' });
@@ -742,8 +789,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
       renderInfo();
     }
     function refresh() { api('/state').catch(showError); }
-    function newGame(side) { api('/new?side=' + side).catch(showError); }
+    function newGame(side) { api('/new?side=' + side + '&rule=' + selectedRule).catch(showError); }
     function setProfile(profile) { api('/profile?value=' + profile).catch(showError); }
+    function selectRule(rule) {
+      selectedRule = rule;
+      renderRuleButtons();
+    }
     function restartSameSide() {
       const side = state && state.human_side === -1 ? 'white' : 'black';
       newGame(side);
@@ -834,6 +885,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function yesNo(v) {
       return v ? '是' : '否';
     }
+    function renderRuleButtons() {
+      const freestyleButton = document.getElementById('rule-freestyle');
+      const renjuButton = document.getElementById('rule-renju');
+      if (!freestyleButton || !renjuButton) return;
+      freestyleButton.className = 'secondary' + (selectedRule === 'freestyle' ? ' active' : '');
+      renjuButton.className = 'secondary' + (selectedRule === 'renju' ? ' active' : '');
+      const disabled = !!(state && state.engine_thinking);
+      freestyleButton.disabled = disabled;
+      renjuButton.disabled = disabled;
+    }
     function renderInfo() {
       const status = document.getElementById('status');
       status.textContent = state.status;
@@ -850,11 +911,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
         baseButton.disabled = !!state.engine_thinking;
         fastButton.disabled = !!state.engine_thinking;
       }
+      renderRuleButtons();
       const rows = [
         ['你执', sideName(state.human_side)],
         ['轮到', sideName(state.side_to_move)],
         ['胜者', sideName(state.winner)],
         ['手数', state.move_count],
+        ['规则', p.rule === 'renju' ? '有禁手' : '无禁手'],
         ['引擎模式', `${p.profile === 'fast' ? 'Fast' : 'Base'}${p.fast_history_ordering ? ' / history+killer' : ''}`],
         ['搜索参数', `d${p.depth} / w${p.width}`],
         ['VCF/VCT', `${p.compute_vcf ? 'VCF' + p.root_vcf_depth : 'VCF off'} / ${p.compute_vct ? 'VCT' + p.root_vct_depth : 'VCT off'}`],

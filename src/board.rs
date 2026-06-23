@@ -5,6 +5,7 @@
 //! `grid[row][column]`, and `Move` is encoded as `row * BOARD_SIZE + column`.
 
 use crate::constants::{BLACK, BOARD_AREA, BOARD_SIZE, EMPTY};
+use crate::rules::{classify_forbidden_move, ForbiddenKind, RuleSet};
 use crate::types::{is_valid_side, opposite_side, Move, PlayedMove, Side};
 use crate::zobrist::{validate_side, ZobristError, ZobristTable, DEFAULT_ZOBRIST};
 
@@ -135,6 +136,22 @@ impl Board {
             return false;
         };
         self.grid[row][col] == EMPTY
+    }
+
+    pub fn forbidden_kind_for_rule(
+        &self,
+        move_: Move,
+        side: Side,
+        rule: RuleSet,
+    ) -> Result<ForbiddenKind, BoardError> {
+        classify_forbidden_move(self, move_, side, rule)
+    }
+
+    pub fn is_legal_move_for_rule(&self, move_: Move, side: Side, rule: RuleSet) -> bool {
+        if !self.is_legal_move(move_) {
+            return false;
+        }
+        classify_forbidden_move(self, move_, side, rule).is_ok_and(|kind| !kind.is_forbidden())
     }
 
     pub fn play(&mut self, move_: Move, side: Option<Side>) -> Result<PlayedMove, BoardError> {
