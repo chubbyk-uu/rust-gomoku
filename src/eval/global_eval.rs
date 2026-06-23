@@ -9,6 +9,8 @@ use crate::eval::caches::EvalCaches;
 use crate::eval::local::value_wide_compute_for_rule;
 use crate::patterns::line::Line;
 use crate::patterns::{DIAGONAL_DOWN, DIAGONAL_UP, HORIZONTAL, VERTICAL};
+use crate::rules::{classify_forbidden_move, RuleSet};
+use crate::types::Move;
 
 const NEIGHBOR_CHECKS: [(isize, isize, usize); 8] = [
     (-1, -1, 3),
@@ -253,6 +255,19 @@ pub fn evaluate_last5_branch(
         return f64::from(WIN);
     };
 
+    // SlowRenju ValueW: if `side` (white) has a five-threat whose only block is
+    // a forbidden black move, black cannot block and `side` wins outright. This
+    // mirrors `fflag & moveValue1bWide(ci,cj,-c) < 0 -> WIN`. Freestyle and the
+    // black-perspective evaluation are unaffected.
+    if config.rule_set == RuleSet::Renju && -side == BLACK {
+        let block = (y * BOARD_SIZE + x) as Move;
+        if classify_forbidden_move(board, block, BLACK, RuleSet::Renju)
+            .is_ok_and(|kind| kind.is_forbidden())
+        {
+            return f64::from(WIN);
+        }
+    }
+
     let snapshot = caches.snapshot();
     board.grid_rows_mut()[y][x] = -side;
     let result = {
@@ -429,6 +444,66 @@ mod tests {
         );
         assert_scan_cached_equivalent(&board, &caches, BLACK, &config);
         assert_scan_cached_equivalent(&board, &caches, WHITE, &config);
+    }
+
+    #[test]
+    fn renju_white_wins_when_black_block_is_forbidden() {
+        // White has a broken four on row 7 (5,6,_,8,9); the only block (7,7) is a
+        // black double-three forbidden point, so white wins outright in Renju.
+        let stones = [
+            (5, 7, WHITE),
+            (6, 7, WHITE),
+            (8, 7, WHITE),
+            (9, 7, WHITE),
+            (6, 6, BLACK),
+            (8, 8, BLACK),
+            (6, 8, BLACK),
+            (8, 6, BLACK),
+        ];
+        let block = xy_to_move(7, 7).unwrap();
+
+        let mut renju = load_default_config();
+        renju.rule_set = RuleSet::Renju;
+        assert!(
+            classify_forbidden_move(
+                &{
+                    let mut b = Board::new();
+                    for (x, y, s) in stones {
+                        b.grid_rows_mut()[y][x] = s;
+                    }
+                    b
+                },
+                block,
+                BLACK,
+                RuleSet::Renju,
+            )
+            .unwrap()
+            .is_forbidden(),
+            "the block point must be forbidden for black"
+        );
+
+        let mut board = Board::new();
+        for (x, y, s) in stones {
+            board.grid_rows_mut()[y][x] = s;
+        }
+        let mut caches = EvalCaches::new();
+        recompute_all_for_rule(&mut board, &mut caches, RuleSet::Renju);
+        let renju_score = evaluate_board(&mut board, &mut caches, WHITE, 1, &renju);
+        assert_eq!(renju_score, f64::from(WIN), "white should win in Renju");
+
+        // In freestyle the block is legal, so white does not win outright.
+        let freestyle = load_default_config();
+        let mut board = Board::new();
+        for (x, y, s) in stones {
+            board.grid_rows_mut()[y][x] = s;
+        }
+        let mut caches = EvalCaches::new();
+        recompute_all(&mut board, &mut caches);
+        let freestyle_score = evaluate_board(&mut board, &mut caches, WHITE, 1, &freestyle);
+        assert!(
+            freestyle_score < f64::from(WIN),
+            "freestyle white must not win outright, got {freestyle_score}"
+        );
     }
 
     fn assert_scan_cached_equivalent(
