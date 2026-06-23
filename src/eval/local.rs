@@ -823,6 +823,63 @@ mod tests {
         );
     }
 
+    // Renju double-three legality is recursive and non-monotonic: a move can
+    // flip a distant black point between forbidden and legal. SlowRenju handles
+    // this with its `trd3` dirty list (ValueWide.cpp). This stress check plays
+    // many seeded move sequences in a dense cluster and asserts the incremental
+    // `value_wide_compute_for_rule` caches stay identical to a full recompute,
+    // so any missed non-local invalidation would surface as a mismatch.
+    // KNOWN FAILING until the SlowRenju `trd3` non-local invalidation is ported.
+    // It reproduces the bug (e.g. trial 24 with the seed below): an incrementally
+    // updated black point stays stale-suppressed (0) after a later move makes it
+    // legal again. Un-ignore once the fix lands so it guards against regressions.
+    #[test]
+    #[ignore = "documents the known non-local forbidden invalidation bug; un-ignore after the trd3 fix"]
+    fn renju_incremental_eval_matches_full_recompute_over_random_sequences() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for trial in 0..400usize {
+            let mut board = Board::new();
+            let mut incremental = EvalCaches::new();
+            recompute_all_for_rule(&mut board, &mut incremental, RuleSet::Renju);
+
+            let move_count = 8 + (next() % 22) as usize;
+            for _ in 0..move_count {
+                // Dense 9x9 cluster around the centre, black-heavy to provoke
+                // overlapping fours/threes and forbidden shapes.
+                let x = 3 + (next() % 9) as usize;
+                let y = 3 + (next() % 9) as usize;
+                if board.grid_rows()[y][x] != EMPTY {
+                    continue;
+                }
+                let side = if next() % 100 < 68 { BLACK } else { WHITE };
+                board.grid_rows_mut()[y][x] = side;
+                value_wide_compute_for_rule(&mut board, &mut incremental, (x, y), RuleSet::Renju);
+            }
+
+            let mut full = EvalCaches::new();
+            recompute_all_for_rule(&mut board, &mut full, RuleSet::Renju);
+            assert_eq!(
+                incremental.shape_cache, full.shape_cache,
+                "trial {trial}: shape_cache diverged"
+            );
+            assert_eq!(
+                incremental.value_cache, full.value_cache,
+                "trial {trial}: value_cache diverged (likely non-local forbidden invalidation)"
+            );
+            assert_eq!(
+                incremental.attack_cache, full.attack_cache,
+                "trial {trial}: attack_cache diverged (likely non-local forbidden invalidation)"
+            );
+        }
+    }
+
     #[test]
     fn renju_eval_suppression_matches_detector_on_hand_fixtures() {
         assert_renju_eval_suppression_matches_detector(include_str!(
