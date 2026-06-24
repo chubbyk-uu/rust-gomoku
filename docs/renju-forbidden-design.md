@@ -1502,21 +1502,46 @@ per-node implementation cost.
 The SlowRenju forbidden losses were not caused by failing to send Gomocup rule
 4. The adapter sends `INFO rule 4` after `START`/`RESTART`, and SlowRenju sets
 `fflag=1`. Both offending positions reproduce directly with rule 4. Source
-inspection shows the likely failure contract:
+inspection confirms the failure contract: **SlowRenju soft-penalizes forbidden
+black points rather than excluding them.**
 
-- forbidden black points are suppressed indirectly by clearing their black
-  offensive `valueM`/`attackM` contribution;
-- candidate scoring can still include defensive value from the white side;
-- root candidate initialization first marks every empty point, and the normal
-  search path uses `vbw <= 0` as the effective filter instead of applying a
-  final `foulr()` legality gate before returning a move.
+`SlowRenju/Value/ValueB.cpp:69-87`, for a black move (`c==1`) under `fflag`
+with no exact-five, sets the offensive score to a finite `-100000` for
+double-four (`B4l>=2`), overline (`A6l`), or a `foulr()`-confirmed true
+double-three (`A3l>=2`):
 
-This creates a plausible path for a tactically valuable defence to leak through
-despite the runtime Renju flag. A direct SlowRenju `foulr()` diagnostic on
-those final candidates would distinguish detector failure from a search-return
-bypass. Rust deliberately uses an explicit rule-legality contract at move
-generation and external play boundaries, so the SlowRenju result is not a
-behavior to copy.
+```cpp
+if(fflag && !A5l && c==1) {
+    if(B4l>=2)                       affensive=-100000; // double-four
+    else if(A6l)                     affensive=-100000; // overline
+    else if(A3l>=2 && l4v.foulr(...)) affensive=-100000; // true double-three
+}
+```
+
+Consequences:
+
+- `-100000` is a finite penalty, **not** the `-1000000000` "never select"
+  sentinel used elsewhere (`valuee[]`);
+- candidate generation never filters forbidden points out — they only carry a
+  low score, and the defensive term can still be large (`A5l*50000`, double
+  four-block `2000`, etc.);
+- root candidate initialization marks every empty point and the search uses
+  `vbw <= 0` as the effective filter, with no final `foulr()` legality gate
+  before returning a move.
+
+So when a forbidden point is the only move that blocks a winning white threat,
+or when every legal alternative scores lower, `-100000` can still be the argmax
+and SlowRenju plays an illegal move. That is exactly what produced the four
+adjudicated losses (one overline, three double-three) — not a Rust
+misjudgement: Rust, Rapfi, and `renju_forbid` agreed those points are forbidden.
+
+Rust deliberately uses correct-by-construction hard exclusion instead: Phase 8
+`compute_bucket_and_attack_for_rule` returns `(0,0)` for forbidden black
+points, and `is_rule_legal_for_movegen` drops them via the full detector at
+move generation, with the same rule-legality contract re-enforced at external
+play boundaries. A forbidden black point therefore never enters the candidate
+set, so the SlowRenju result is a reference-implementation Renju-compliance
+defect, not a behavior to copy.
 
 ### Remaining Work After SlowRenju Alignment
 
