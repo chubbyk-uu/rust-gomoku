@@ -244,3 +244,35 @@ risk) but it disproves inner-loop micro-opt as the way to close the freestyle
 gap. The remaining levers are reducing recompute *volume* (Renju covered-region
 scan, direction #2) or the packed 1-D line rewrite (#3); freestyle ~3.2 us/node
 is close to where this re-walk-per-point architecture lands without #3.
+
+### #3 Stage 0 — flatten the shape table (no measurable gain, kept)
+
+`SHAPE_TABLE` was changed from `LazyLock<Vec<Vec<i32>>>` to
+`LazyLock<Box<[[i32; 3969]; 2]>>` (contiguous, single deref + flat index,
+plus load-time dimension asserts). Semantics identical by construction; full
+suite green. Bench A/B (release+LTO): Freestyle ~3193 -> ~3170 ns/node, Renju
+~6370 -> ~6440 ns/node — both within run-to-run noise, i.e. **no measurable
+gain**. So the `Vec<Vec>`/`LazyLock` indirection was not a bottleneck either
+(the table is hot and effectively cached). Kept for cleaner code; not a
+regression.
+
+### #3 Stage 1 — de-risk the walk (positive: 4.7x ceiling)
+
+WSL2 has no branch-miss PMU, so the EMPTY-skip-branch hypothesis was tested
+directly with a throwaway micro-bench (`tests/shape_reader_microbench.rs`, not
+committed): the current data-dependent +/-5 walk vs. a branchless bitmask reader
+that builds forward/backward blocker+own masks, derives `si`/`sj` via
+`trailing_zeros`, and `ssp` via masks + a 5-bit reversal LUT, producing the
+**identical** `table_index`.
+
+- Correctness: 0 mismatches over 20,000 random windows (incl. simulated edges).
+- Timing: walk 19.19 ns/call vs branchless 4.07 ns/call = **4.72x**.
+
+Unlike #1 and Stage 0, the walk's branches are a real cost, so the gate is
+cleared. The de-risk also shows the win comes from the branchless *computation*,
+not from incremental line maintenance: the branchless reader reads the same
+window. Stage 2 is therefore a localized, lower-risk rewrite of
+`shape_raw_from_hypothetical_offsets` (same cells in, bit-identical shape out),
+with no new `EvalCaches` state or snapshot/restore changes. Gated by an
+exhaustive window-identity test plus the existing eval/movegen/root alignment
+and incremental-vs-full suites.
