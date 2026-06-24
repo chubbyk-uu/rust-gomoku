@@ -222,3 +222,25 @@ Candidate directions (not yet implemented; measure each against the bench):
    it per `classify_*` call (same family as the deferred covered-point scan).
 3. Larger/riskier: a packed 1-D incremental line cache to avoid re-walking 10
    cells per point per update; biggest payoff, biggest rewrite.
+
+### #1 result — hypothetical line-walk micro-opt (low yield, kept)
+
+`shape_raw_from_hypothetical_offsets` was rewritten to precompute the on-board
+step count (`ray_steps`) and walk only the on-board prefix, dropping the
+per-cell bounds branch and the rebuilt mask arrays (edge is treated as the
+blocking cell, equivalent to the old off-board `SENTINEL`). All tests pass.
+
+A/B on the bench (release+LTO, deterministic node counts, 3 runs each):
+
+- Freestyle 3193 -> ~3177 ns/node (~0.5-1%, within run-to-run noise).
+- Renju 6499 -> ~6370 ns/node (~2.0%, stable across runs).
+
+Re-profile (profiling build, same conditions) shows `shape_raw` essentially
+unchanged at 18.4% -> 18.1% self. Conclusion: the bounds branches were already
+neutralized by the optimizer (predictable, in-bounds), so the cost inside
+`shape_raw` is memory loads + the shape-table lookup + sheer call volume, not
+the boundary arithmetic. The change is kept (real ~2% Renju, cleaner code, no
+risk) but it disproves inner-loop micro-opt as the way to close the freestyle
+gap. The remaining levers are reducing recompute *volume* (Renju covered-region
+scan, direction #2) or the packed 1-D line rewrite (#3); freestyle ~3.2 us/node
+is close to where this re-walk-per-point architecture lands without #3.

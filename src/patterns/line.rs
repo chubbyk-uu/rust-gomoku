@@ -185,6 +185,26 @@ pub(crate) fn shape_raw_from_board_point_hypothetical(
     }
 }
 
+/// On-board offsets (1..=5) reachable from `(x, y)` along `(dx, dy)` with
+/// `dx, dy ∈ {-1, 0, 1}`. Used to walk only the on-board prefix so the inner
+/// loop can index `grid` without a per-cell bounds branch; the board edge is
+/// then treated as the blocking cell (an off-board square is never EMPTY nor a
+/// stone, so the original code blocked on it too).
+#[inline(always)]
+fn ray_steps(x: usize, y: usize, dx: isize, dy: isize) -> isize {
+    let xlim = match dx {
+        1 => (BOARD_SIZE - 1 - x) as isize,
+        -1 => x as isize,
+        _ => 5,
+    };
+    let ylim = match dy {
+        1 => (BOARD_SIZE - 1 - y) as isize,
+        -1 => y as isize,
+        _ => 5,
+    };
+    xlim.min(ylim).min(5)
+}
+
 #[inline(always)]
 fn shape_raw_from_hypothetical_offsets(
     grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
@@ -203,22 +223,23 @@ fn shape_raw_from_hypothetical_offsets(
     let mut ssp = 0_i32;
     let mut si = 0_i32;
     let mut sj = 0_i32;
+
+    // Forward: offsets +1..+5 along (dx, dy). Walk only the on-board prefix;
+    // if nothing on-board blocks, the edge blocks at `fwd_steps` (or the full
+    // 5-cell window is clear when `fwd_steps == 5`).
+    let fwd_steps = ray_steps(x, y, dx, dy);
     let mut forward_blocked = false;
-    let mut backward_blocked = false;
-
-    let forward_masks = [16, 8, 4, 2, 1];
-    let backward_masks = [32, 64, 128, 256, 512];
-
-    let mut offset = 1_usize;
-    while offset <= 5 {
-        let mask = forward_masks[offset - 1];
-        let value = hypothetical_cell_at(grid, x, y, dx, dy, offset as isize);
+    let mut offset = 1_isize;
+    while offset <= fwd_steps {
+        let xx = (x as isize + dx * offset) as usize;
+        let yy = (y as isize + dy * offset) as usize;
+        let value = i32::from(grid[yy][xx]);
         if value == i32::from(EMPTY) {
             offset += 1;
             continue;
         }
         if value == stone {
-            ssp |= mask;
+            ssp |= 16_i32 >> (offset - 1);
         } else {
             sj = (offset - 1) as i32;
             forward_blocked = true;
@@ -227,19 +248,23 @@ fn shape_raw_from_hypothetical_offsets(
         offset += 1;
     }
     if !forward_blocked {
-        sj = 5;
+        sj = fwd_steps as i32;
     }
 
+    // Backward: offsets -1..-5, i.e. direction (-dx, -dy).
+    let bwd_steps = ray_steps(x, y, -dx, -dy);
+    let mut backward_blocked = false;
     offset = 1;
-    while offset <= 5 {
-        let mask = backward_masks[offset - 1];
-        let value = hypothetical_cell_at(grid, x, y, dx, dy, -(offset as isize));
+    while offset <= bwd_steps {
+        let xx = (x as isize - dx * offset) as usize;
+        let yy = (y as isize - dy * offset) as usize;
+        let value = i32::from(grid[yy][xx]);
         if value == i32::from(EMPTY) {
             offset += 1;
             continue;
         }
         if value == stone {
-            ssp |= mask;
+            ssp |= 32_i32 << (offset - 1);
         } else {
             si = (offset - 1) as i32;
             backward_blocked = true;
@@ -248,7 +273,7 @@ fn shape_raw_from_hypothetical_offsets(
         offset += 1;
     }
     if !backward_blocked {
-        si = 5;
+        si = bwd_steps as i32;
     }
 
     ssp >>= 5 - sj;
@@ -260,24 +285,6 @@ fn shape_raw_from_hypothetical_offsets(
     };
     let trt = shape_table_lookup(row as usize, table_index as usize);
     ((trt & 0xF0) << 12) | (trt & 0xF)
-}
-
-#[inline(always)]
-fn hypothetical_cell_at(
-    grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
-    x: usize,
-    y: usize,
-    dx: isize,
-    dy: isize,
-    offset: isize,
-) -> i32 {
-    let xx = x as isize + dx * offset;
-    let yy = y as isize + dy * offset;
-    if xx < 0 || yy < 0 || xx >= BOARD_SIZE as isize || yy >= BOARD_SIZE as isize {
-        SENTINEL
-    } else {
-        i32::from(grid[yy as usize][xx as usize])
-    }
 }
 
 #[cfg(test)]
