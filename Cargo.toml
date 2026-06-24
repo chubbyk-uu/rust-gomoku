@@ -11,3 +11,10 @@ path = "src/lib.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[profile.release]
+# Search is hot and call-heavy; whole-program optimization closes part of the
+# gap to the single-translation-unit C++ reference build. `panic` is left as the
+# default `unwind` so `cargo test --release` keeps working.
+lto = "fat"
+codegen-units = 1
