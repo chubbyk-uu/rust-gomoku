@@ -333,3 +333,39 @@ Session totals on the bench: Freestyle 3193 -> ~2949 ns/node (~7.6%), Renju
 Renju 225-point apparent-double-three refresh scan — the next candidate, needs an
 incrementally maintained candidate set to cut call count without changing
 semantics).
+
+### Renju refresh — incremental apparent-double-three set (large Renju win, kept)
+
+`refresh_renju_apparent_double_three_points` (src/eval/local.rs) scanned all
+empty points every Renju make, calling `compute_bucket_attack_and_counts` as a
+per-point filter (`exact_fives == 0 && open_threes >= 2`) to find the few
+apparent double-threes it must re-evaluate for non-local forbidden flips. That
+per-make ~225-point scan dominated `compute_bucket_attack_and_counts` (~17%).
+
+Membership is a pure function of a point's own (local) black shapes, so it is now
+maintained incrementally: `EvalCaches` gains `dt3_present` (authoritative
+membership) and an append-only `dt3_members` list, updated in the make dirty
+loop wherever a point's black shapes change (`refresh_dt3_membership`). The
+refresh iterates `dt3_members` (skipping stale entries via `dt3_present`) instead
+of scanning the board. Snapshot/restore reverts membership via a `dt3_present_log`
+journal (transitions) plus `dt3_members` length truncation — chosen over a
+by-value `dt3_present` snapshot because the latter cost a 225-byte copy per node
+and regressed Freestyle ~2.6%; the journal stays empty in Freestyle (which never
+touches the set) for zero overhead.
+
+Correctness: bit-identical — the same point set is re-evaluated the same way.
+Gated by the 400-trial `renju_incremental_eval_matches_full_recompute_over_random_sequences`
+stress test (value/attack caches vs full recompute) and a new
+`renju_snapshot_restore_reverts_caches_including_dt3` test that asserts the whole
+cache (dt3 included) reverts after snapshot -> make -> restore. Full suite green.
+
+Bench A/B (release+LTO, 3 runs): Renju ~5689 -> ~4588 ns/node (**~19.4%**);
+Freestyle unchanged (~2949 -> ~2993, within noise — the set is Renju-only and the
+journal adds no Freestyle cost). Re-profile shows
+`compute_bucket_attack_and_counts` halving from ~17% to ~9.7% and leaving the
+number-two slot.
+
+Session totals on the bench: Freestyle 3193 -> ~2993 ns/node (~6.3%), Renju
+6499 -> ~4588 ns/node (**~29%**). The remaining top cost is the rule-independent
+`shape_raw` (~18-19%) reader; further gains there need the bitboard line model,
+not call-count reduction.

@@ -13,6 +13,10 @@ pub type ValueCache = [[[i32; BOARD_SIZE]; BOARD_SIZE]; 2];
 pub type ShapeCache = [[[[i32; 4]; BOARD_SIZE]; BOARD_SIZE]; 2];
 pub type EmptyBucketCounts = [[u16; DSHAPE_SIZE]; 2];
 pub type OccupiedMoves = [Move; BOARD_AREA];
+/// Membership flags for empty points that are black "apparent double-threes"
+/// (`exact_fives == 0 && open_threes >= 2`). Maintained incrementally so the
+/// Renju refresh only re-evaluates these points instead of scanning the board.
+pub type Dt3Present = [[bool; BOARD_SIZE]; BOARD_SIZE];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvalSnapshot {
@@ -24,6 +28,8 @@ pub struct EvalSnapshot {
     pub occupied_len: usize,
     pub shape_log_len: usize,
     pub value_log_len: usize,
+    pub dt3_present_log_len: usize,
+    pub dt3_members_len: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +46,15 @@ pub struct EvalCaches {
     pub(crate) shape_log: Vec<(usize, usize, usize, usize, i32)>,
     pub(crate) value_log: Vec<(usize, usize, usize, i32, i32)>,
     pub(crate) active_snapshot_count: usize,
+    // Incremental black apparent-double-three set. `dt3_present` is the
+    // authoritative per-point membership; `dt3_members` is an append-only list
+    // of candidate points (it may hold stale entries, filtered by `dt3_present`
+    // when iterated). Membership transitions are journaled in `dt3_present_log`
+    // and `dt3_members` is append-only, so unmake reverts both by replay/truncate
+    // with zero cost when no transitions occur (e.g. Freestyle never touches it).
+    pub(crate) dt3_present: Dt3Present,
+    pub(crate) dt3_members: Vec<Move>,
+    pub(crate) dt3_present_log: Vec<(usize, usize, bool)>,
 }
 
 impl Default for EvalCaches {
@@ -63,6 +78,27 @@ impl EvalCaches {
             shape_log: Vec::with_capacity(512),
             value_log: Vec::with_capacity(256),
             active_snapshot_count: 0,
+            dt3_present: new_dt3_present(),
+            dt3_members: Vec::with_capacity(64),
+            dt3_present_log: Vec::with_capacity(64),
+        }
+    }
+
+    /// Set the apparent-double-three membership of an empty point. Members are
+    /// appended to `dt3_members` on a false->true transition; losing membership
+    /// only clears `dt3_present` and leaves a stale list entry (filtered on
+    /// iteration). No journaling is needed: snapshot captures `dt3_present` by
+    /// value and `dt3_members` by length.
+    pub(crate) fn set_dt3_present(&mut self, x: usize, y: usize, value: bool) {
+        if self.dt3_present[x][y] == value {
+            return;
+        }
+        if self.active_snapshot_count > 0 {
+            self.dt3_present_log.push((x, y, self.dt3_present[x][y]));
+        }
+        self.dt3_present[x][y] = value;
+        if value {
+            self.dt3_members.push((y * BOARD_SIZE + x) as Move);
         }
     }
 
@@ -95,6 +131,8 @@ impl EvalCaches {
             occupied_len: self.occupied_len,
             shape_log_len: self.shape_log.len(),
             value_log_len: self.value_log.len(),
+            dt3_present_log_len: self.dt3_present_log.len(),
+            dt3_members_len: self.dt3_members.len(),
         }
     }
 
@@ -117,6 +155,14 @@ impl EvalCaches {
             self.value_cache[player][x][y] = old_bucket;
             self.attack_cache[player][x][y] = old_attack;
         }
+        while self.dt3_present_log.len() > snapshot.dt3_present_log_len {
+            let (x, y, old_value) = self
+                .dt3_present_log
+                .pop()
+                .expect("dt3 present log length tracked");
+            self.dt3_present[x][y] = old_value;
+        }
+        self.dt3_members.truncate(snapshot.dt3_members_len);
         if self.active_snapshot_count > 0 {
             self.active_snapshot_count -= 1;
         }
@@ -144,6 +190,10 @@ impl EvalCaches {
         self.empty_bucket_counts = other.empty_bucket_counts;
         self.occupied_moves = other.occupied_moves;
         self.occupied_len = other.occupied_len;
+        self.dt3_present = other.dt3_present;
+        self.dt3_members.clear();
+        self.dt3_members.extend_from_slice(&other.dt3_members);
+        self.dt3_present_log.clear();
         self.shape_log.clear();
         self.value_log.clear();
         self.active_snapshot_count = 0;
@@ -151,6 +201,15 @@ impl EvalCaches {
 
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    /// Drop all apparent-double-three membership, for a full from-scratch
+    /// rebuild. Only safe with no active snapshot (it discards the list that
+    /// snapshots truncate against).
+    pub(crate) fn clear_dt3(&mut self) {
+        self.dt3_present = new_dt3_present();
+        self.dt3_members.clear();
+        self.dt3_present_log.clear();
     }
 }
 
@@ -172,4 +231,8 @@ fn new_empty_bucket_counts() -> EmptyBucketCounts {
 
 fn new_occupied_moves() -> OccupiedMoves {
     [0; BOARD_AREA]
+}
+
+fn new_dt3_present() -> Dt3Present {
+    [[false; BOARD_SIZE]; BOARD_SIZE]
 }

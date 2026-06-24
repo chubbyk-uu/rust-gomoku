@@ -244,6 +244,19 @@ pub fn recompute_all_for_rule(board: &mut Board, caches: &mut EvalCaches, rule: 
         }
     }
     rebuild_global_eval_state(board, caches);
+    if rule == RuleSet::Renju {
+        // Populate the incremental apparent-double-three set from scratch. Safe
+        // to hard-reset the list when no snapshot is outstanding (the usual
+        // setup/rule-change case); otherwise fall back to per-point updates.
+        if caches.active_snapshot_count == 0 {
+            caches.clear_dt3();
+        }
+        for x in 0..size {
+            for y in 0..size {
+                refresh_dt3_membership(caches, board, x, y);
+            }
+        }
+    }
     caches.initialized = true;
 }
 
@@ -336,6 +349,11 @@ pub fn value_wide_compute_for_rule(
         }
         add_empty_bucket_contribution(board, caches, x, y);
         caches.board_shadow[x][y] = cell;
+        if rule == RuleSet::Renju {
+            // This point's black shapes (and thus its apparent-double-three
+            // membership) may have changed; keep the incremental set current.
+            refresh_dt3_membership(caches, board, x, y);
+        }
     }
 
     if rule == RuleSet::Renju {
@@ -685,46 +703,61 @@ fn set_bucket_attack(
     caches.attack_cache[player][x][y] = attack;
 }
 
+/// Recompute the black apparent-double-three membership of `(x, y)` from its
+/// current black shapes and update the incremental set. Membership is
+/// `empty && exact_fives == 0 && open_threes >= 2` — exactly the condition the
+/// refresh below uses, so the set holds precisely the points the refresh visits.
+fn refresh_dt3_membership(caches: &mut EvalCaches, board: &Board, x: usize, y: usize) {
+    let member = if board.grid_rows()[y][x] != EMPTY {
+        false
+    } else {
+        let shapes = &caches.shape_cache[0][x][y];
+        let counts = compute_bucket_attack_and_counts((shapes[0], shapes[1], shapes[2], shapes[3]));
+        counts.exact_fives == 0 && counts.open_threes >= 2
+    };
+    caches.set_dt3_present(x, y, member);
+}
+
 fn refresh_renju_apparent_double_three_points(board: &Board, caches: &mut EvalCaches) {
-    let size = board.size();
     let player = 0_usize;
 
-    for x in 0..size {
-        for y in 0..size {
-            if board.grid_rows()[y][x] != EMPTY {
-                continue;
-            }
-
-            let shapes = &caches.shape_cache[player][x][y];
-            let direction_shapes = (shapes[0], shapes[1], shapes[2], shapes[3]);
-            let counts = compute_bucket_attack_and_counts(direction_shapes);
-            if counts.exact_fives > 0 || counts.open_threes < 2 {
-                continue;
-            }
-
-            let (bucket, attack) = compute_bucket_and_attack_for_rule(
-                board,
-                x,
-                y,
-                BLACK,
-                RuleSet::Renju,
-                direction_shapes,
-            );
-            let old_bucket = caches.value_cache[player][x][y];
-            let old_attack = caches.attack_cache[player][x][y];
-            if old_bucket == bucket && old_attack == attack {
-                continue;
-            }
-
-            let old_bucket_index = old_bucket as usize;
-            let new_bucket_index = bucket as usize;
-            debug_assert!(old_bucket_index < DSHAPE_SIZE);
-            debug_assert!(new_bucket_index < DSHAPE_SIZE);
-            debug_assert!(caches.empty_bucket_counts[player][old_bucket_index] > 0);
-            caches.empty_bucket_counts[player][old_bucket_index] -= 1;
-            caches.empty_bucket_counts[player][new_bucket_index] += 1;
-            set_bucket_attack(caches, x, y, player, bucket, attack);
+    // Iterate only the maintained apparent-double-three candidates, re-evaluating
+    // each one because a non-local move can flip its forbidden status without
+    // changing its own shapes. `dt3_members` is append-only and may hold stale
+    // entries, so skip any whose membership flag is no longer set.
+    let member_count = caches.dt3_members.len();
+    for i in 0..member_count {
+        let move_ = caches.dt3_members[i] as usize;
+        let x = move_ % BOARD_SIZE;
+        let y = move_ / BOARD_SIZE;
+        if !caches.dt3_present[x][y] {
+            continue;
         }
+
+        let shapes = &caches.shape_cache[player][x][y];
+        let direction_shapes = (shapes[0], shapes[1], shapes[2], shapes[3]);
+        let (bucket, attack) = compute_bucket_and_attack_for_rule(
+            board,
+            x,
+            y,
+            BLACK,
+            RuleSet::Renju,
+            direction_shapes,
+        );
+        let old_bucket = caches.value_cache[player][x][y];
+        let old_attack = caches.attack_cache[player][x][y];
+        if old_bucket == bucket && old_attack == attack {
+            continue;
+        }
+
+        let old_bucket_index = old_bucket as usize;
+        let new_bucket_index = bucket as usize;
+        debug_assert!(old_bucket_index < DSHAPE_SIZE);
+        debug_assert!(new_bucket_index < DSHAPE_SIZE);
+        debug_assert!(caches.empty_bucket_counts[player][old_bucket_index] > 0);
+        caches.empty_bucket_counts[player][old_bucket_index] -= 1;
+        caches.empty_bucket_counts[player][new_bucket_index] += 1;
+        set_bucket_attack(caches, x, y, player, bucket, attack);
     }
 }
 
@@ -936,6 +969,69 @@ mod tests {
                 incremental.attack_cache, full.attack_cache,
                 "trial {trial}: attack_cache diverged (likely non-local forbidden invalidation)"
             );
+        }
+    }
+
+    #[test]
+    fn renju_snapshot_restore_reverts_caches_including_dt3() {
+        // Exercises the make/unmake path the stress test above does not: every
+        // step snapshots, plays a trial move with value_wide_compute (which
+        // mutates the incremental apparent-double-three set), then restores and
+        // asserts the entire cache — dt3_present/dt3_members included — returns
+        // to the pre-snapshot state.
+        let mut state = 0x51a2_b3c4_d5e6_f701_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for trial in 0..200usize {
+            let mut board = Board::new();
+            let mut caches = EvalCaches::new();
+            recompute_all_for_rule(&mut board, &mut caches, RuleSet::Renju);
+
+            // Build a random dense base position so apparent double-threes exist.
+            let base_moves = 6 + (next() % 16) as usize;
+            for _ in 0..base_moves {
+                let x = 3 + (next() % 9) as usize;
+                let y = 3 + (next() % 9) as usize;
+                if board.grid_rows()[y][x] != EMPTY {
+                    continue;
+                }
+                let side = if next() % 100 < 68 { BLACK } else { WHITE };
+                board.grid_rows_mut()[y][x] = side;
+                value_wide_compute_for_rule(&mut board, &mut caches, (x, y), RuleSet::Renju);
+            }
+
+            // Try several snapshot -> trial move -> restore cycles.
+            for _ in 0..6 {
+                let mut tx = 3 + (next() % 9) as usize;
+                let mut ty = 3 + (next() % 9) as usize;
+                let mut tries = 0;
+                while board.grid_rows()[ty][tx] != EMPTY && tries < 8 {
+                    tx = 3 + (next() % 9) as usize;
+                    ty = 3 + (next() % 9) as usize;
+                    tries += 1;
+                }
+                if board.grid_rows()[ty][tx] != EMPTY {
+                    continue;
+                }
+
+                let before = caches.clone();
+                let snapshot = caches.snapshot();
+                let side = if next() % 100 < 68 { BLACK } else { WHITE };
+                board.grid_rows_mut()[ty][tx] = side;
+                value_wide_compute_for_rule(&mut board, &mut caches, (tx, ty), RuleSet::Renju);
+                board.grid_rows_mut()[ty][tx] = EMPTY;
+                caches.restore_snapshot(&snapshot);
+
+                assert_eq!(
+                    caches, before,
+                    "trial {trial}: caches did not revert after snapshot/restore"
+                );
+            }
         }
     }
 
