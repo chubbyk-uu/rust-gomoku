@@ -17,7 +17,7 @@ pub use movegen::{
 };
 pub use ordering::{getmi, order_candidates, order_candidates_root_classic, ordering_backend_name};
 pub use root::{
-    fallback_ai_move, new_classic_fallback_rng, ClassicFallbackRng, RootDepthProfile, RootSearcher,
-    RootTrace, SearchLimits, SearchResult,
+    fallback_ai_move, fallback_move_score, new_classic_fallback_rng, ClassicFallbackRng,
+    FallbackMoveScore, RootDepthProfile, RootSearcher, RootTrace, SearchLimits, SearchResult,
 };
 pub use tt::{ProbeResult, TTBestMoveHint, TTEntry, TranspositionTable};

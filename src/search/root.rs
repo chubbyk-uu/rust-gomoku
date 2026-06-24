@@ -186,6 +186,117 @@ fn shape_aux(shape: i32) -> i32 {
     shape & 0xF
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FallbackMoveScore {
+    pub move_: Move,
+    pub offensive: i64,
+    pub defensive: i64,
+    pub total: i64,
+}
+
+pub fn fallback_move_score(
+    board: &Board,
+    caches: &EvalCaches,
+    side: Side,
+    rule: RuleSet,
+    move_: Move,
+) -> Option<FallbackMoveScore> {
+    let legal = if rule == RuleSet::Freestyle {
+        board.is_legal_move(move_)
+    } else {
+        board.is_legal_move_for_rule(move_, side, rule)
+    };
+    if !legal {
+        return None;
+    }
+
+    let player = if side == 1 { 0 } else { 1 };
+    let opponent = 1 - player;
+    let (x, y) = move_to_xy(move_).expect("legal move stays in range");
+
+    let mut offensive = 0_i64;
+    let (mut a1l, mut b2l, mut a2l, mut b3l, mut a4l, mut a3l, mut b4l, mut a5l, mut a6l) = (
+        0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64,
+    );
+    for direction in 0..4 {
+        let shape = caches.shape_cache[player][x][y][direction];
+        let label = shape_label(shape);
+        if label == 2 {
+            a1l += 1;
+        } else if label == 3 {
+            b2l += 1;
+        } else if label == 9 || label == 8 {
+            a3l += 1;
+        } else if label == 10 {
+            b4l += i64::from(shape_aux(shape));
+        } else if label == 12 {
+            a5l += 1;
+        } else if label == 7 {
+            b3l += 1;
+        } else if (4..=6).contains(&label) {
+            a2l += 1;
+        } else if label == 11 {
+            a4l += 1;
+            b4l += 1;
+        } else if label == 13 {
+            a6l += 1;
+        }
+    }
+    offensive += a1l;
+    offensive += b2l;
+    offensive += a2l * 5;
+    offensive += b3l * 10;
+    offensive += a3l * 12;
+    offensive += b4l * 16;
+    offensive += i64::from(a3l >= 2) * 100;
+    offensive += i64::from(b4l > 0 && a3l > 0) * 3000;
+    offensive += i64::from(b4l >= 2) * 4000;
+    offensive += a4l * 6000;
+    offensive += a5l * 1_000_000;
+    let _ = a6l;
+
+    let mut defensive = 0_i64;
+    let (mut a2l, mut b3l, mut a3l, mut b4l, mut a4l, mut a5l, mut a6l) =
+        (0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64);
+    for direction in 0..4 {
+        let shape = caches.shape_cache[opponent][x][y][direction];
+        let label = shape_label(shape);
+        if label == 9 || label == 8 {
+            a3l += 1;
+        } else if label == 10 {
+            b4l += i64::from(shape_aux(shape));
+        } else if label == 12 {
+            a5l += 1;
+        } else if label == 7 {
+            b3l += 1;
+        } else if (4..=6).contains(&label) {
+            a2l += 1;
+        } else if label == 11 {
+            a4l += 1;
+            b4l += 1;
+        } else if label == 13 {
+            a6l += 1;
+        }
+    }
+    defensive += a2l;
+    defensive += b3l;
+    defensive += a3l * 6;
+    defensive += b4l * 11;
+    defensive += i64::from(a3l >= 2) * 15;
+    defensive += i64::from(b4l > 0 && a3l > 0) * 1500;
+    defensive += i64::from(b4l >= 2) * 2000;
+    defensive += a4l * 3000;
+    defensive += a5l * 50_000;
+    let _ = a6l;
+
+    Some(FallbackMoveScore {
+        move_,
+        offensive,
+        defensive,
+        total: 5 * offensive + 5 * defensive,
+    })
+}
+
 pub fn fallback_ai_move(
     board: &Board,
     caches: &EvalCaches,
@@ -193,104 +304,19 @@ pub fn fallback_ai_move(
     rule: RuleSet,
     rng: &mut ClassicFallbackRng,
 ) -> Result<Move, &'static str> {
-    let player = if side == 1 { 0 } else { 1 };
-    let opponent = 1 - player;
     let mut best_value = i64::MIN;
     let mut best_moves = Vec::new();
 
     for move_index in 0..(board.size() * board.size()) {
         let move_ = move_index as Move;
-        let legal = if rule == RuleSet::Freestyle {
-            board.is_legal_move(move_)
-        } else {
-            board.is_legal_move_for_rule(move_, side, rule)
-        };
-        if !legal {
+        let Some(score) = fallback_move_score(board, caches, side, rule, move_) else {
             continue;
-        }
-        let (x, y) = move_to_xy(move_).expect("iterated move index stays in range");
-
-        let mut offensive = 0_i64;
-        let (mut a1l, mut b2l, mut a2l, mut b3l, mut a4l, mut a3l, mut b4l, mut a5l, mut a6l) = (
-            0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64,
-        );
-        for direction in 0..4 {
-            let shape = caches.shape_cache[player][x][y][direction];
-            let label = shape_label(shape);
-            if label == 2 {
-                a1l += 1;
-            } else if label == 3 {
-                b2l += 1;
-            } else if label == 9 || label == 8 {
-                a3l += 1;
-            } else if label == 10 {
-                b4l += i64::from(shape_aux(shape));
-            } else if label == 12 {
-                a5l += 1;
-            } else if label == 7 {
-                b3l += 1;
-            } else if (4..=6).contains(&label) {
-                a2l += 1;
-            } else if label == 11 {
-                a4l += 1;
-                b4l += 1;
-            } else if label == 13 {
-                a6l += 1;
-            }
-        }
-        offensive += a1l;
-        offensive += b2l;
-        offensive += a2l * 5;
-        offensive += b3l * 10;
-        offensive += a3l * 12;
-        offensive += b4l * 16;
-        offensive += i64::from(a3l >= 2) * 100;
-        offensive += i64::from(b4l > 0 && a3l > 0) * 3000;
-        offensive += i64::from(b4l >= 2) * 4000;
-        offensive += a4l * 6000;
-        offensive += a5l * 1_000_000;
-        let _ = a6l;
-
-        let mut defensive = 0_i64;
-        let (mut a2l, mut b3l, mut a3l, mut b4l, mut a4l, mut a5l, mut a6l) =
-            (0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64);
-        for direction in 0..4 {
-            let shape = caches.shape_cache[opponent][x][y][direction];
-            let label = shape_label(shape);
-            if label == 9 || label == 8 {
-                a3l += 1;
-            } else if label == 10 {
-                b4l += i64::from(shape_aux(shape));
-            } else if label == 12 {
-                a5l += 1;
-            } else if label == 7 {
-                b3l += 1;
-            } else if (4..=6).contains(&label) {
-                a2l += 1;
-            } else if label == 11 {
-                a4l += 1;
-                b4l += 1;
-            } else if label == 13 {
-                a6l += 1;
-            }
-        }
-        defensive += a2l;
-        defensive += b3l;
-        defensive += a3l * 6;
-        defensive += b4l * 11;
-        defensive += i64::from(a3l >= 2) * 15;
-        defensive += i64::from(b4l > 0 && a3l > 0) * 1500;
-        defensive += i64::from(b4l >= 2) * 2000;
-        defensive += a4l * 3000;
-        defensive += a5l * 50_000;
-        let _ = a6l;
-
-        let total = 5 * offensive + 5 * defensive;
-        if total > best_value {
-            best_value = total;
+        };
+        if score.total > best_value {
+            best_value = score.total;
             best_moves.clear();
             best_moves.push(move_);
-        } else if total == best_value {
+        } else if score.total == best_value {
             best_moves.push(move_);
         }
     }
@@ -893,6 +919,136 @@ mod tests {
     use crate::board::xy_to_move;
     use crate::config::load_default_config;
     use crate::constants::{BLACK, BOARD_AREA, BOARD_SIZE, WHITE};
+    use crate::rules::ForbiddenKind;
+
+    #[derive(serde::Deserialize)]
+    struct FallbackStone {
+        x: usize,
+        y: usize,
+        side: Side,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FallbackPoint {
+        x: usize,
+        y: usize,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FallbackFixture {
+        name: String,
+        moves: Vec<FallbackStone>,
+        candidate: FallbackPoint,
+        expected: String,
+    }
+
+    fn fallback_fixture(name: &str) -> (Board, Move, String) {
+        let raw = include_str!("../../cases/renju/forbidden_hand_cases.jsonl");
+        let case = raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<FallbackFixture>(line).unwrap())
+            .find(|case| case.name == name)
+            .unwrap_or_else(|| panic!("missing fallback fixture {name}"));
+        let mut board = Board::new();
+        for stone in case.moves {
+            board.grid_rows_mut()[stone.y][stone.x] = stone.side;
+        }
+        let candidate = xy_to_move(case.candidate.x, case.candidate.y).unwrap();
+        (board, candidate, case.expected)
+    }
+
+    #[test]
+    fn renju_fallback_scoring_matches_slowrenju_for_forbidden_and_recursive_cases() {
+        let cases = [
+            ("black_exact_five_priority", ForbiddenKind::None),
+            ("black_overline_six", ForbiddenKind::Overline),
+            ("simple_cross_double_four", ForbiddenKind::DoubleFour),
+            ("true_cross_double_three", ForbiddenKind::DoubleThree),
+            (
+                "recursive_fake_three_both_gains_forbidden",
+                ForbiddenKind::None,
+            ),
+        ];
+
+        for (name, expected_kind) in cases {
+            let (mut board, candidate, expected) = fallback_fixture(name);
+            let mut freestyle_caches = EvalCaches::new();
+            recompute_all_for_rule(&mut board, &mut freestyle_caches, RuleSet::Freestyle);
+            let freestyle = fallback_move_score(
+                &board,
+                &freestyle_caches,
+                BLACK,
+                RuleSet::Freestyle,
+                candidate,
+            )
+            .unwrap_or_else(|| panic!("{name}: freestyle candidate must be scored"));
+
+            let mut renju_caches = EvalCaches::new();
+            recompute_all_for_rule(&mut board, &mut renju_caches, RuleSet::Renju);
+            let kind = board
+                .forbidden_kind_for_rule(candidate, BLACK, RuleSet::Renju)
+                .unwrap();
+            assert_eq!(kind, expected_kind, "{name}: detector result changed");
+            assert_eq!(
+                expected != "none",
+                expected_kind.is_forbidden(),
+                "{name}: fixture expectation changed"
+            );
+
+            let renju =
+                fallback_move_score(&board, &renju_caches, BLACK, RuleSet::Renju, candidate);
+            if expected_kind.is_forbidden() {
+                assert!(
+                    renju.is_none(),
+                    "{name}: forbidden point must be excluded from fallback scoring"
+                );
+            } else {
+                let renju = renju.unwrap_or_else(|| panic!("{name}: legal point was suppressed"));
+                assert_eq!(
+                    renju, freestyle,
+                    "{name}: legal point must keep the SlowRenju value1b score"
+                );
+            }
+        }
+
+        let (mut exact_five_board, exact_five, _) = fallback_fixture("black_exact_five_priority");
+        let mut exact_five_caches = EvalCaches::new();
+        recompute_all_for_rule(
+            &mut exact_five_board,
+            &mut exact_five_caches,
+            RuleSet::Renju,
+        );
+        assert_eq!(
+            fallback_move_score(
+                &exact_five_board,
+                &exact_five_caches,
+                BLACK,
+                RuleSet::Renju,
+                exact_five,
+            )
+            .unwrap()
+            .total,
+            5_000_015
+        );
+
+        let (mut recursive_board, recursive, _) =
+            fallback_fixture("recursive_fake_three_both_gains_forbidden");
+        let mut recursive_caches = EvalCaches::new();
+        recompute_all_for_rule(&mut recursive_board, &mut recursive_caches, RuleSet::Renju);
+        assert_eq!(
+            fallback_move_score(
+                &recursive_board,
+                &recursive_caches,
+                BLACK,
+                RuleSet::Renju,
+                recursive,
+            )
+            .unwrap()
+            .total,
+            670
+        );
+    }
 
     #[test]
     fn root_search_handles_no_legal_fallback_move_without_panicking() {

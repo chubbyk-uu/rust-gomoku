@@ -1124,7 +1124,7 @@ Status meanings:
 | Global `ValueW` evaluation | `Value/ValueW.cpp::value` | `eval::global_eval` | Aligned | Offensive/defensive bucket sums, DGN term, LAST5 recursion, NEXT4 and NEXT43 branches map directly to Rust. |
 | White exploiting a forbidden black block | `ValueW.cpp:158` (`fflag & moveValue1bWide(...) < 0`) | `evaluate_last5_branch` full detector gate | Aligned | Rust uses explicit forbidden classification instead of relying on the negative cached move value. A focused test proves white wins when black's only block is forbidden. |
 | Main move generation | `AI/AIx.cpp` covered set, `moveValue1bWide`, attack priorities | `search::movegen`, `CoverageTracker` | Aligned classic flow; Renju differential open | The 32-point coverage set, move score, hostile-three bonus, forcing collapse, and ordering descend from SlowRenju/pygomoku. Renju black points are filtered through the cache prefilter plus full detector. A direct SlowRenju-vs-Rust candidate differential has not yet been built. |
-| Fallback move scoring | `Value/ValueB.cpp::value1b`, `AI/AIs.cpp` | `search::root::fallback_ai_move` | Different implementation, open | The scoring formula is ported and Rust explicitly excludes illegal Renju moves. A fixture-level differential is still needed, especially for legal black points adjacent to forbidden shapes. |
+| Fallback move scoring | `Value/ValueB.cpp::value1b`, `AI/AIs.cpp` | `search::root::{fallback_move_score,fallback_ai_move}` | Aligned semantics, different forbidden representation | The offensive/defensive formula and weights map term-for-term. SlowRenju assigns forbidden black points a large negative offensive value; Rust excludes them before selection. Shared production scoring is fixed-tested for exact five, overline, double-four, double-three, and a recursive apparent-double-three point that remains legal. |
 | Root VCF | `AIx.cpp::rootsearch`, `VCF.cpp::VCFd_hash` | `RootSearcher`, `VCFSearcher` | Aligned plus fixes | Depth normalization and core threat flow map to SlowRenju. Rust additionally supports multi-reply handling and explicitly removes forbidden attacker/defender moves. Renju tactical fixtures cover overline, double-four, double-three, and forbidden black defence. |
 | Opponent VCF root filter | `AIx.cpp` variable `vctt`: test each root move against opponent `VCFd_hash` | `RootSearcher::apply_opponent_vcf_filter` | Aligned | Despite the SlowRenju variable name, this is an opponent-VCF evasion filter, not a general VCT search. |
 | General VCT | no independent equivalent in this SlowRenju revision | `VCTSearcher`, rule-aware `ThreatBoardView` | Rust extension | It must be validated by Rust tactical fixtures and rule-legality invariants, not claimed as a direct SlowRenju port. |
@@ -1173,17 +1173,21 @@ Candidate diagnostic status:
 - The release movegen probe measured about 1542 ns per Renju node after
   avoiding a large by-value analysis return, versus the Phase 9 baseline of
   about 1604 ns/node. The diagnostic path itself is not called by search.
+- `fallback_move_score` is the single per-point implementation used by
+  production `fallback_ai_move` and fixed tests. The tests read the
+  oracle-validated hand-case file and prove that exact five keeps the
+  SlowRenju score `5_000_015`, all three forbidden classes are excluded, and
+  `recursive_fake_three_both_gains_forbidden` stays legal with the unchanged
+  `value1b` score `670`.
 
 Next audit/implementation gates:
 
 1. Add a durable static provenance check that parses the SlowRenju checkout
    when available and confirms both `para[]` and `ShapeList` equality. Keep
    normal tests independent of the external checkout.
-2. Add fallback-scoring fixtures covering exact five, overline, double-four,
-   recursive double-three, and legal near-forbidden black points.
-3. Establish a SlowRenju-compatible match/probe executable or document why the
+2. Establish a SlowRenju-compatible match/probe executable or document why the
    Windows-era source cannot be reproduced reliably on the current host.
-4. Only after candidate and fallback parity is understood, run Renju strength
+3. With candidate and fallback parity now fixed-tested, run Renju strength
    matches and decide whether any eval/search changes are needed.
 
 ## Fixture Format Proposal

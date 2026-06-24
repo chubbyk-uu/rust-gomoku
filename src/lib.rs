@@ -48,12 +48,13 @@ pub use protocol::{GomocupProtocol, ABOUT_TEXT};
 pub use rules::{classify_forbidden_move, classify_forbidden_stones, ForbiddenKind, RuleSet};
 pub use search::{
     apply_hostile_three_extension, compute_corner_state, covered_moves, diagnose_candidates,
-    fallback_ai_move, generate_candidates, getmi, movegen_backend_name, new_classic_fallback_rng,
-    order_candidates, order_candidates_root_classic, ordering_backend_name, rootbonus,
-    terminal_score, AlphaBetaSearcher, Candidate, CandidateDiagnostic, CandidateDiagnosticsResult,
-    CandidateGenerationResult, ClassicFallbackRng, ProbeResult, RootCandidateProfile,
-    RootDepthProfile, RootSearcher, RootTrace, SearchLimits, SearchOptions, SearchResult,
-    SearchStats, TTBestMoveHint, TTEntry, TranspositionTable,
+    fallback_ai_move, fallback_move_score, generate_candidates, getmi, movegen_backend_name,
+    new_classic_fallback_rng, order_candidates, order_candidates_root_classic,
+    ordering_backend_name, rootbonus, terminal_score, AlphaBetaSearcher, Candidate,
+    CandidateDiagnostic, CandidateDiagnosticsResult, CandidateGenerationResult, ClassicFallbackRng,
+    FallbackMoveScore, ProbeResult, RootCandidateProfile, RootDepthProfile, RootSearcher,
+    RootTrace, SearchLimits, SearchOptions, SearchResult, SearchStats, TTBestMoveHint, TTEntry,
+    TranspositionTable,
 };
 pub use threats::{
     broken_four_reply, forcing_threat_moves, forcing_threat_moves_for_rule, has_open_four,
