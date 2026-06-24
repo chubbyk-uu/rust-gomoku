@@ -308,3 +308,28 @@ on freestyle. Remaining top costs are now `compute_bucket_attack_and_counts`
 (~18-19%, pure classifier called per dirty point/side; reduce call count rather
 than the function) and, for Renju, `DirectionalLine::from_grid` (~8%, rebuilt per
 detector call — direction #2).
+
+### Renju forbidden detector — build the 4 lines once (Renju win, kept)
+
+`classify_placed_black` (src/rules/forbidden.rs) rebuilt a `DirectionalLine` in
+each of its checks (`has_exact_five`, `has_overline`, `count_four_directions`,
+`count_true_open_three_directions`), up to ~20 `from_grid` calls per
+classification of one point. It now builds the four lines once
+(`std::array::from_fn`) and reuses them across all checks (~20 -> 4). `from_grid`
+is a pure function of (grid, x, y, dir), and the recursive gain probe restores
+`grid` before each subsequent check, so this is bit-identical; the 72 forbidden
+fixtures plus the Rapfi/`renju_forbid` alignment suite and full test suite stay
+green. The test-only free fns `has_exact_five`/`has_overline`/
+`count_four_shapes_through` were `#[cfg(test)]`-gated.
+
+Bench A/B (release+LTO, 3 runs): Freestyle ~2994 -> ~2949 ns/node (noise; the
+detector is Renju-only) and Renju ~6138 -> ~5689 ns/node (**~7.3%**). Re-profile
+shows `DirectionalLine::from_grid` dropping from ~8.4% (was 4th) out of the top
+8, with `classify_placed_black` and `count_four_shapes_through` also leaving it.
+
+Session totals on the bench: Freestyle 3193 -> ~2949 ns/node (~7.6%), Renju
+6499 -> ~5689 ns/node (~12.5%). Remaining top costs are the eval core
+`shape_raw` (~18%) and `compute_bucket_attack_and_counts` (~17%, dominated by the
+Renju 225-point apparent-double-three refresh scan — the next candidate, needs an
+incrementally maintained candidate set to cut call count without changing
+semantics).

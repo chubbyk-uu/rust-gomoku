@@ -345,16 +345,32 @@ fn classify_placed_black(
     x: usize,
     y: usize,
 ) -> ForbiddenKind {
-    if has_exact_five(grid, x, y) {
+    // Build the four directional lines through (x, y) once and reuse them across
+    // every check. `from_grid` is a pure function of (grid, x, y, dir), and the
+    // recursive gain probing in `is_legal_black_gain` restores `grid` before the
+    // next check, so a single build per direction is equivalent to the previous
+    // code rebuilding a line per check (was up to ~20 `from_grid` calls here).
+    let lines: [DirectionalLine; 4] =
+        std::array::from_fn(|i| DirectionalLine::from_grid(grid, x, y, DIRECTIONS[i]));
+
+    if lines.iter().any(DirectionalLine::has_exact_five) {
         return ForbiddenKind::None;
     }
-    if has_overline(grid, x, y) {
+    if lines.iter().any(DirectionalLine::has_overline) {
         return ForbiddenKind::Overline;
     }
-    if count_four_directions(grid, x, y) >= 2 {
+    let four_count: usize = lines
+        .iter()
+        .map(DirectionalLine::count_four_shapes_through)
+        .sum();
+    if four_count >= 2 {
         return ForbiddenKind::DoubleFour;
     }
-    if count_true_open_three_directions(grid, x, y) >= 2 {
+    let three_count = lines
+        .iter()
+        .filter(|line| is_true_open_three_with_line(grid, line))
+        .count();
+    if three_count >= 2 {
         return ForbiddenKind::DoubleThree;
     }
     ForbiddenKind::None
@@ -368,45 +384,21 @@ fn is_legal_black_gain(grid: &mut [[Side; BOARD_SIZE]; BOARD_SIZE], x: usize, y:
     legal
 }
 
+#[cfg(test)]
 fn has_exact_five(grid: &[[Side; BOARD_SIZE]; BOARD_SIZE], x: usize, y: usize) -> bool {
     DIRECTIONS
         .into_iter()
         .any(|dir| DirectionalLine::from_grid(grid, x, y, dir).has_exact_five())
 }
 
+#[cfg(test)]
 fn has_overline(grid: &[[Side; BOARD_SIZE]; BOARD_SIZE], x: usize, y: usize) -> bool {
     DIRECTIONS
         .into_iter()
         .any(|dir| DirectionalLine::from_grid(grid, x, y, dir).has_overline())
 }
 
-fn count_four_directions(grid: &mut [[Side; BOARD_SIZE]; BOARD_SIZE], x: usize, y: usize) -> usize {
-    DIRECTIONS
-        .into_iter()
-        .map(|dir| count_four_shapes_through(grid, x, y, dir))
-        .sum()
-}
-
-fn count_true_open_three_directions(
-    grid: &mut [[Side; BOARD_SIZE]; BOARD_SIZE],
-    x: usize,
-    y: usize,
-) -> usize {
-    DIRECTIONS
-        .into_iter()
-        .filter(|&dir| is_true_open_three_direction(grid, x, y, dir))
-        .count()
-}
-
-fn has_four_through(
-    grid: &mut [[Side; BOARD_SIZE]; BOARD_SIZE],
-    x: usize,
-    y: usize,
-    dir: (isize, isize),
-) -> bool {
-    count_four_shapes_through(grid, x, y, dir) > 0
-}
-
+#[cfg(test)]
 fn count_four_shapes_through(
     grid: &mut [[Side; BOARD_SIZE]; BOARD_SIZE],
     x: usize,
@@ -416,17 +408,14 @@ fn count_four_shapes_through(
     DirectionalLine::from_grid(grid, x, y, dir).count_four_shapes_through()
 }
 
-fn is_true_open_three_direction(
+fn is_true_open_three_with_line(
     grid: &mut [[Side; BOARD_SIZE]; BOARD_SIZE],
-    x: usize,
-    y: usize,
-    dir: (isize, isize),
+    line: &DirectionalLine,
 ) -> bool {
-    if has_four_through(grid, x, y, dir) {
+    if line.count_four_shapes_through() > 0 {
         return false;
     }
 
-    let line = DirectionalLine::from_grid(grid, x, y, dir);
     let (gains, gain_count) = line.open_three_gain_indices();
     for &gain in &gains[..gain_count] {
         let gx = line.xs[gain];
