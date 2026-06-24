@@ -276,3 +276,35 @@ window. Stage 2 is therefore a localized, lower-risk rewrite of
 with no new `EvalCaches` state or snapshot/restore changes. Gated by an
 exhaustive window-identity test plus the existing eval/movegen/root alignment
 and incremental-vs-full suites.
+
+### #3 Stage 2 — branchless bitmask shape reader (real win, kept)
+
+`shape_raw_from_hypothetical_offsets` (src/patterns/line.rs) was rewritten to
+build forward/backward blocker+own bitmasks over offsets 1..=5 via a fixed
+5-iteration `directional_masks` (off-board = blocker, no data-dependent
+early-exit), derive `si`/`sj` with `trailing_zeros`, and `ssp` via masks + a
+const `REVERSE5` 5-bit-reversal LUT. This produces the **identical**
+`table_index`, so every shape value is unchanged. No `EvalCaches`/snapshot
+changes were needed — the win is in the computation, not in maintaining a packed
+line.
+
+Equivalence gate: the existing
+`point_shape_reader_matches_full_line_extraction_on_varied_boards` already
+drives this path against the full-line reference; a new
+`hypothetical_reader_matches_full_line_on_random_and_edge_boards` extends it to
+120 random/dense/edge boards over every empty point, direction, side, and rule
+(0 mismatches). Full eval/movegen/root alignment and incremental-vs-full suites
+stay green unchanged.
+
+Bench A/B (release+LTO, deterministic node counts, 3 runs):
+
+- Freestyle ~3172 -> ~2994 ns/node (**~5.6%**).
+- Renju ~6440 -> ~6138 ns/node (**~4.7%**).
+
+Re-profile (profiling build) shows `shape_raw` self-cost dropping 18.4% -> 16.6%
+and no longer the top function; the larger release wall-clock gain comes from LTO
+inlining `directional_masks`. This is the first real win in the thread and lands
+on freestyle. Remaining top costs are now `compute_bucket_attack_and_counts`
+(~18-19%, pure classifier called per dirty point/side; reduce call count rather
+than the function) and, for Renju, `DirectionalLine::from_grid` (~8%, rebuilt per
+detector call — direction #2).

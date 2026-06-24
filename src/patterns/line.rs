@@ -185,24 +185,59 @@ pub(crate) fn shape_raw_from_board_point_hypothetical(
     }
 }
 
-/// On-board offsets (1..=5) reachable from `(x, y)` along `(dx, dy)` with
-/// `dx, dy ∈ {-1, 0, 1}`. Used to walk only the on-board prefix so the inner
-/// loop can index `grid` without a per-cell bounds branch; the board edge is
-/// then treated as the blocking cell (an off-board square is never EMPTY nor a
-/// stone, so the original code blocked on it too).
+/// Maps a 5-bit forward own-stone mask to the `ssp` bits the old walk produced:
+/// a stone at forward offset `k+1` contributed `16 >> k`, i.e. bit `k` maps to
+/// bit `4 - k`. Precomputed so the hot reader avoids a per-bit loop.
+const REVERSE5: [i32; 32] = {
+    let mut table = [0_i32; 32];
+    let mut mask = 0_usize;
+    while mask < 32 {
+        let mut reversed = 0_i32;
+        let mut k = 0;
+        while k < 5 {
+            if mask & (1 << k) != 0 {
+                reversed |= 1 << (4 - k);
+            }
+            k += 1;
+        }
+        table[mask] = reversed;
+        mask += 1;
+    }
+    table
+};
+
+/// Build the blocker and own-stone bitmasks over offsets `1..=5` from `(x, y)`
+/// along `(dx, dy)` with `dx, dy ∈ {-1, 0, 1}`. Bit `k` corresponds to offset
+/// `k + 1`. An off-board square is a blocker (never EMPTY nor a stone), matching
+/// the old `SENTINEL` walk. The fixed 5-iteration loop has no data-dependent
+/// early-exit, so the result is computed branchlessly from the masks.
 #[inline(always)]
-fn ray_steps(x: usize, y: usize, dx: isize, dy: isize) -> isize {
-    let xlim = match dx {
-        1 => (BOARD_SIZE - 1 - x) as isize,
-        -1 => x as isize,
-        _ => 5,
-    };
-    let ylim = match dy {
-        1 => (BOARD_SIZE - 1 - y) as isize,
-        -1 => y as isize,
-        _ => 5,
-    };
-    xlim.min(ylim).min(5)
+fn directional_masks(
+    grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
+    x: usize,
+    y: usize,
+    dx: isize,
+    dy: isize,
+    stone: i32,
+) -> (u32, u32) {
+    let mut blocker = 0_u32;
+    let mut own = 0_u32;
+    for k in 0..5_isize {
+        let offset = k + 1;
+        let xx = x as isize + dx * offset;
+        let yy = y as isize + dy * offset;
+        let on_board =
+            xx >= 0 && yy >= 0 && (xx as usize) < BOARD_SIZE && (yy as usize) < BOARD_SIZE;
+        let value = if on_board {
+            i32::from(grid[yy as usize][xx as usize])
+        } else {
+            SENTINEL
+        };
+        let bit = 1_u32 << k;
+        own |= u32::from(value == stone) << k;
+        blocker |= u32::from(value != stone && value != i32::from(EMPTY)) * bit;
+    }
+    (blocker, own)
 }
 
 #[inline(always)]
@@ -220,63 +255,30 @@ fn shape_raw_from_hypothetical_offsets(
         return 0;
     }
 
-    let mut ssp = 0_i32;
-    let mut si = 0_i32;
-    let mut sj = 0_i32;
+    // Forward (dx, dy) and backward (-dx, -dy) blocker/own masks over offsets
+    // 1..=5. `sj`/`si` are the distance to the first blocker (capped at 5 when
+    // none); `ssp` collects own stones before that blocker, mapped to the same
+    // bit positions the old walk used (forward reversed via REVERSE5, backward
+    // shifted up by 5).
+    let (blocker_fwd, own_fwd) = directional_masks(grid, x, y, dx, dy, stone);
+    let (blocker_bwd, own_bwd) = directional_masks(grid, x, y, -dx, -dy, stone);
 
-    // Forward: offsets +1..+5 along (dx, dy). Walk only the on-board prefix;
-    // if nothing on-board blocks, the edge blocks at `fwd_steps` (or the full
-    // 5-cell window is clear when `fwd_steps == 5`).
-    let fwd_steps = ray_steps(x, y, dx, dy);
-    let mut forward_blocked = false;
-    let mut offset = 1_isize;
-    while offset <= fwd_steps {
-        let xx = (x as isize + dx * offset) as usize;
-        let yy = (y as isize + dy * offset) as usize;
-        let value = i32::from(grid[yy][xx]);
-        if value == i32::from(EMPTY) {
-            offset += 1;
-            continue;
-        }
-        if value == stone {
-            ssp |= 16_i32 >> (offset - 1);
-        } else {
-            sj = (offset - 1) as i32;
-            forward_blocked = true;
-            break;
-        }
-        offset += 1;
-    }
-    if !forward_blocked {
-        sj = fwd_steps as i32;
-    }
+    let sj = if blocker_fwd == 0 {
+        5
+    } else {
+        blocker_fwd.trailing_zeros() as i32
+    };
+    let si = if blocker_bwd == 0 {
+        5
+    } else {
+        blocker_bwd.trailing_zeros() as i32
+    };
 
-    // Backward: offsets -1..-5, i.e. direction (-dx, -dy).
-    let bwd_steps = ray_steps(x, y, -dx, -dy);
-    let mut backward_blocked = false;
-    offset = 1;
-    while offset <= bwd_steps {
-        let xx = (x as isize - dx * offset) as usize;
-        let yy = (y as isize - dy * offset) as usize;
-        let value = i32::from(grid[yy][xx]);
-        if value == i32::from(EMPTY) {
-            offset += 1;
-            continue;
-        }
-        if value == stone {
-            ssp |= 32_i32 << (offset - 1);
-        } else {
-            si = (offset - 1) as i32;
-            backward_blocked = true;
-            break;
-        }
-        offset += 1;
-    }
-    if !backward_blocked {
-        si = bwd_steps as i32;
-    }
-
+    let fwd_ssp = REVERSE5[(own_fwd & ((1_u32 << sj) - 1)) as usize];
+    let bwd_ssp = ((own_bwd & ((1_u32 << si) - 1)) as i32) << 5;
+    let mut ssp = fwd_ssp | bwd_ssp;
     ssp >>= 5 - sj;
+
     let table_index = (1 << si) * ((1 << sj) + 62) - 63 + ssp;
     let row = if stone == i32::from(BLACK) && !freestyle {
         1
@@ -541,6 +543,81 @@ mod tests {
                                 assert_eq!(
                                     hypothetical, full,
                                     "x={x} y={y} side={side} direction={direction} freestyle={freestyle}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hypothetical_reader_matches_full_line_on_random_and_edge_boards() {
+        // Stage 2 gate: the branchless `directional_masks` reader must equal the
+        // full-line reference for every empty point, direction, side, and rule,
+        // across many random boards (some very dense so windows are blocker- and
+        // gap-rich, exercising the bitmask `trailing_zeros`/REVERSE5 paths) plus
+        // saturated cells against every edge and corner.
+        let mut state = 0xC0FF_EE15_600D_1234_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for trial in 0..120_u64 {
+            let mut board = Board::new();
+            let dense = trial % 4 == 0;
+            for y in 0..BOARD_SIZE {
+                for x in 0..BOARD_SIZE {
+                    let roll = next() % if dense { 3 } else { 5 };
+                    board.grid_rows_mut()[y][x] = match roll {
+                        0 => BLACK,
+                        1 => WHITE,
+                        _ => EMPTY,
+                    };
+                }
+            }
+
+            for y in 0..BOARD_SIZE {
+                for x in 0..BOARD_SIZE {
+                    if board.grid_rows()[y][x] != EMPTY {
+                        continue;
+                    }
+                    for side in [BLACK, WHITE] {
+                        for freestyle in [true, false] {
+                            for direction in [HORIZONTAL, VERTICAL, DIAGONAL_DOWN, DIAGONAL_UP] {
+                                let hypothetical = shape_raw_from_board_point_hypothetical(
+                                    board.grid_rows(),
+                                    x,
+                                    y,
+                                    direction,
+                                    side,
+                                    freestyle,
+                                )
+                                .unwrap();
+                                let (pivot, point_index) = match direction {
+                                    HORIZONTAL => (x, y),
+                                    VERTICAL => (y, x),
+                                    DIAGONAL_DOWN => (x + y, y),
+                                    DIAGONAL_UP => (BOARD_SIZE - 1 - y + x, BOARD_SIZE - 1 - y),
+                                    _ => unreachable!(),
+                                };
+                                board.grid_rows_mut()[y][x] = side;
+                                let full = shape_raw_from_board_python(
+                                    &board,
+                                    pivot,
+                                    direction,
+                                    point_index,
+                                    freestyle,
+                                )
+                                .unwrap();
+                                board.grid_rows_mut()[y][x] = EMPTY;
+                                assert_eq!(
+                                    hypothetical, full,
+                                    "trial={trial} x={x} y={y} side={side} dir={direction} fs={freestyle}"
                                 );
                             }
                         }
