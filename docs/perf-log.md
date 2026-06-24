@@ -157,3 +157,68 @@ Follow-up:
 - Conservative parameters changed no move/score in 6 representative cases, but only triggered 1/6 and saved about 0.6s there.
 - Medium parameters triggered more often but changed one representative fast case move.
 - `smoke_quick` showed only small avg/p95 improvement and worse max, so the implementation was not worth keeping.
+
+## 2026-06-24 — Single-process search baseline and first CPU profile
+
+Setup:
+
+- `[profile.release]` now uses `lto = "fat"` + `codegen-units = 1`. Measured
+  LTO gain on the fixed-position bench was modest (~4-5% ns/node), because the
+  hot code is already inside one crate; kept because it is free. A separate
+  `[profile.profiling]` (`inherits = "release"`, `debug = true`, `lto = false`)
+  exists only for symbol-resolving CPU profiles.
+- New `tests/renju_search_bench.rs` (`#[ignore]`d) runs a full fixed depth/width
+  root search per preset prefix and reports nodes, ms, and ns/node, so per-node
+  cost is separated from node count.
+
+Baseline (depth 8 / width 40, first 4 `strength_100_prefixes`, 3 searched; one
+returns immediately):
+
+- Freestyle: 404,959 nodes, 1293 ms, **3193 ns/node**.
+- Renju: 480,808 nodes, 3125 ms, **6499 ns/node**.
+- So the Renju gap is ~1.19x node count but ~2.04x per-node cost: the slowdown
+  is per-node work, not extra nodes. Worst single position (`zhou_g3`,
+  tactical) hit 2.9x per node.
+
+CPU profile (WSL2 has no hardware PMU; sampled with software `task-clock` at
+997 Hz, `--call-graph dwarf`, 4493 samples, Freestyle+Renju mixed):
+
+| % self | function | bucket |
+| --- | --- | --- |
+| 18.4 | `patterns::line::shape_raw_from_board_point_hypothetical` | eval, rule-independent |
+| 18.3 | `eval::local::compute_bucket_attack_and_counts` | eval, rule-independent |
+| 11.6 | `eval::local::value_wide_compute_for_rule` | eval driver, rule-independent |
+| 7.4 | `rules::forbidden::DirectionalLine::from_grid` | Renju forbidden only |
+| 5.6 | `search::ordering::getmi` | ordering |
+| 4.5 | `eval::global_eval::evaluate_board_main_cached` | leaf eval |
+| 4.5 | `search::alphabeta::...::search_with_coverage` | node |
+| 3.8 | `rules::forbidden::classify_placed_black` | Renju forbidden only |
+| ~3.7 | slice sorts (smallsort/insertion/quicksort) | ordering |
+| 1.5 | `rules::forbidden::count_four_shapes_through` | Renju forbidden only |
+
+Interpretation:
+
+- ~48% of total time is the rule-independent eval shape path (top 3). This is
+  the freestyle headroom, not allocation or the opponent-VCF probe — both of
+  which were hypothesized first and are **not** bottlenecks (`restore_snapshot`
+  ~1.6%, the VCF probe does not rank).
+- Renju-only forbidden detection (`DirectionalLine::from_grid` +
+  `classify_placed_black` + `count_four_shapes_through`) is ~13%, matching the
+  measured 2x per-node Renju gap. `DirectionalLine::from_grid` rebuilds 1-D
+  line arrays per call.
+- The incremental updater is already line-scoped: `value_wide_compute_for_rule`
+  marks dirty cells only along the 4 lines through the move and recomputes only
+  the flagged direction per dirty point (no all-4-direction redundancy). The
+  cost is inherent recompute volume times per-call cost, where each call
+  re-walks 10 board cells (with per-cell bounds checks) in
+  `shape_raw_from_hypothetical_offsets` and re-derives buckets, rather than
+  maintaining a SlowRenju-style packed 1-D line that updates incrementally.
+
+Candidate directions (not yet implemented; measure each against the bench):
+
+1. Micro-opt the hypothetical line walk: precompute clamped step counts once to
+   drop per-cell bounds branches; avoid rebuilding the mask arrays per call.
+2. Renju: cache/incrementally maintain `DirectionalLine` instead of rebuilding
+   it per `classify_*` call (same family as the deferred covered-point scan).
+3. Larger/riskier: a packed 1-D incremental line cache to avoid re-walking 10
+   cells per point per update; biggest payoff, biggest rewrite.
