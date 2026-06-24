@@ -1664,6 +1664,31 @@ but worsened avg/median and searched slightly more moves. Treat the strength
 gate as passed, while the performance case remains mixed until a same-position
 benchmark demonstrates a stable net benefit.
 
+### Post-optimization re-run (bit-identical perf work)
+
+After the search/eval performance series (release LTO profile; branchless
+shape reader; build-the-four-forbidden-lines-once; incremental
+apparent-double-three set — all proven bit-identical by the eval/movegen/root
+alignment suites, the incremental-vs-full stress test, and a snapshot/restore
+revert test; see `docs/perf-log.md`), both 100-game gates were re-run at the
+same fixed depth 8 / width 40 on `strength_100_prefixes.jsonl`, twelve-way
+parallel:
+
+- Renju: Rust 55, SlowRenju 44, draw 1; 4 of Rust's wins were adjudications of
+  SlowRenju forbidden black moves, so normal games were Rust 51, SlowRenju 44,
+  draw 1 (~53.6%) — statistically the same as the original 52.6% gate.
+- Freestyle: Rust 55, SlowRenju 45, draw 0 (55.0%) — the same as the original
+  56.0% gate.
+
+Strength is unchanged, as expected: at fixed depth/width the optimizations are
+bit-identical, so the engine plays the same moves; the +/-1 game drift comes
+from SlowRenju's time-based search under different parallelism, not from the
+Rust side. The engine is measurably faster end-to-end: parallel-batch Rust move
+time fell to avg 1148 ms (Renju, from 1469 ms) and avg 839 ms (Freestyle, from
+912 ms), the latter now on par with SlowRenju's ~853 ms average. These remain
+contended end-to-end figures, not single-process microbenchmarks; the clean
+per-node deltas are in `docs/perf-log.md`.
+
 ## Fixture Format Proposal
 
 Use JSONL so cases are easy to append:
