@@ -8,10 +8,12 @@ A Chinese version of this document is available at [README-cn.md](README-cn.md).
 
 Completed:
 
-- 15x15 free-rule Gomoku state machine, zobrist, config, pattern, eval cache, movegen, ordering, TT, and alpha-beta root search.
-- Root VCF, root-only VCT trigger/verify/trace.
+- 15x15 freestyle and Renju state machine, zobrist, config, pattern, eval cache, movegen, ordering, TT, and alpha-beta root search.
+- Renju black forbidden-move handling for overline, double-four, and recursive true double-three, with exact-five priority; freestyle remains the default.
+- Rule-aware root VCF and root-only VCT trigger/verify/trace.
 - Gomocup stdin/stdout engine entry point and a local Web GUI.
 - Rust/reference diff harness, Rust/reference matches, base/fast matches, and same-position benchmark scaffolding.
+- Renju oracle, dense-stress, exhaustive-line, candidate-diagnostic, performance, and rule-aware match-referee tooling.
 - Non-root candidate ordering cost optimization: keeps the original ordering key while reducing `getmi` and candidate copy overhead.
 - Fast profile enables third-generation history/killer ordering by default: only reorders quiet moves within the same static-ordering group; base is unaffected.
 - `opponent/zhou` is kept in the repo as a lightweight opponent; the full Python reference is not committed.
@@ -87,6 +89,7 @@ Gomocup smoke:
 
 ```bash
 printf 'START 15\nBEGIN\nEND\n' | cargo run --quiet --bin gomocup_engine -- --depth 2 --width 8
+printf 'START 15\nINFO rule 4\nBEGIN\nEND\n' | cargo run --quiet --bin gomocup_engine -- --depth 2 --width 8
 ```
 
 Launch the GUI:
@@ -109,6 +112,7 @@ target/release/gomocup_engine --profile fast
 
 Common `INFO` commands:
 
+- `INFO rule 0|4` or `INFO rule freestyle|renju` (only while the board is empty)
 - `INFO timeout_turn N`
 - `INFO time_left N`
 - `INFO max_node N`
@@ -172,6 +176,22 @@ python3 scripts/bench_match_cases.py \
 
 `run_gomocup_match.py` is used for real matches and strength evaluation; `bench_match_cases.py` is used for single-move searches on the same batch of prefix positions. To judge whether an optimization is genuinely faster, look at the same-position benchmark first, then at match win rate and long-tail latency.
 
+For Renju matches, pass `--rule renju`. The match runner then configures both
+engines with Gomocup rule `4` and uses the rule-aware referee to reject illegal
+black moves:
+
+```bash
+cargo build --release --bin gomocup_engine --bin renju_referee
+python3 scripts/run_gomocup_match.py \
+  --rule renju \
+  --case-file cases/renju/strength_prefixes.jsonl \
+  --engine-a-side both \
+  --engine-a-command 'target/release/gomocup_engine --depth 8 --width 40'
+```
+
+The full Renju design, validation evidence, SlowRenju comparison contract, and
+remaining work are maintained in `docs/renju-forbidden-design.md`.
+
 To observe real cross-move TT behavior, pass `--reuse-engine-state` to `run_gomocup_match.py`. By default the match script issues `RESTART` per move, which is fairer for reproducibility; `--reuse-engine-state` retains engine/searcher state and aggregates each move's `MESSAGE tt_generation current=... old=...` into the `tt_generation` field of the output JSON.
 
 ## Directory Layout
@@ -180,6 +200,7 @@ To observe real cross-move TT behavior, pass `--reuse-engine-state` to `run_gomo
 src/                 Rust engine, Gomocup, GUI, diff/case probe
 cases/diff/          root diff cases
 cases/match/         match and benchmark prefix positions
+cases/renju/         forbidden, tactical, diagnostic, and strength fixtures
 data/static/         static matrices extracted from the reference
 opponent/zhou/       zhou baseline opponent
 scripts/             diff, match, benchmark, and case extraction scripts
@@ -188,10 +209,11 @@ tests/               Rust automated tests
 
 ## Current Focus
 
-1. Continue expanding reference/Rust diff coverage.
-2. Target real slow moves to optimize VCT miss and alpha-beta long tail, prioritizing approaches that reliably lower p95/max latency.
-3. Continue expanding fast vs. base match coverage for the fast profile to confirm that the default-on history/killer ordering does not lose win rate against base at larger sample sizes.
-4. All performance experiments must report correctness, latency, nodes, and any changes to move/score/trace together.
+1. Expand fixed-depth Renju strength evidence against SlowRenju with more independent paired openings while retaining forbidden-move adjudication.
+2. Profile Renju search by subsystem and reduce the measured latency gap to SlowRenju, prioritizing forbidden checks, eval refresh, opponent-VCF filtering, and VCT long tails.
+3. Audit Rapfi primarily to improve playing strength, focusing on candidate ordering, evaluation, tactical search, TT, pruning/extensions, and time management. Line-pattern and forbidden-table ideas are also relevant when they enable deeper search.
+4. Continue expanding classic reference/Rust diffs, fast-vs-base matches, and freestyle Rust-vs-SlowRenju matches with Renju disabled so Renju or performance work does not regress freestyle behavior.
+5. All performance experiments must report correctness, latency, nodes, and any changes to move/score/trace together.
 
 ## License
 

@@ -1,9 +1,31 @@
 # Renju Forbidden-Move Design
 
-This document is the implementation plan for adding an optional Renju
-forbidden-move rule set to `rust_gomoku`. It is intentionally written before
-implementation so the hard rule questions, oracle checks, and test gates are
-clear before search code changes.
+This document started as the implementation plan for an optional Renju
+forbidden-move rule set and now records the implemented design, validation
+evidence, SlowRenju comparison, and remaining optimization work.
+
+## Current Status
+
+The main Renju implementation is complete:
+
+- freestyle and Renju coexist behind `RuleSet`, with freestyle still the
+  default and rule changes locked after the first move;
+- black exact-five, overline, double-four, and recursive true double-three
+  semantics are integrated through board play, movegen, alpha-beta, fallback,
+  VCF, VCT, static eval, Gomocup, and the GUI;
+- the GUI rejects and marks black forbidden points, while protocol and search
+  paths reject illegal black moves;
+- detector fixtures, one-dimensional exhaustion, dense stress, incremental
+  eval consistency, tactical regressions, and Rapfi/`renju_forbid` comparison
+  gates are in place;
+- SlowRenju static tables and the relevant `ValueWide`/`ValueW` semantics have
+  been audited, and a Linux fixed-depth match adapter is available.
+
+This is not a claim that Renju strength or performance is finished. The active
+work is larger strength samples, search profiling and optimization, and a
+Rapfi architecture audit whose primary objective is stronger play. Renju
+opening protocols such as RIF, Yamaguchi, Soosorv, and Swap2 remain out of
+scope.
 
 ## Goals
 
@@ -1180,15 +1202,29 @@ Candidate diagnostic status:
   `recursive_fake_three_both_gains_forbidden` stays legal with the unchanged
   `value1b` score `670`.
 
-Next audit/implementation gates:
+Completed SlowRenju gates:
 
-1. Add a durable static provenance check that parses the SlowRenju checkout
-   when available and confirms both `para[]` and `ShapeList` equality. Keep
-   normal tests independent of the external checkout.
-2. Establish a SlowRenju-compatible match/probe executable or document why the
-   Windows-era source cannot be reproduced reliably on the current host.
-3. With candidate and fallback parity now fixed-tested, run Renju strength
-   matches and decide whether any eval/search changes are needed.
+1. Static extraction confirmed all 375 evaluation parameters and both rows of
+   the 7938-entry shape table are identical.
+2. The Windows-era source now builds through the Linux/WSL compatibility
+   adapter with configurable fixed depth and width.
+3. Candidate diagnostics, fallback scoring, tactical legality, and complete
+   game matches are available and have been exercised at the Rust default
+   depth/width.
+
+Remaining SlowRenju/Renju gates:
+
+1. Expand the paired, non-symmetric fixed-depth match set to at least 100 games
+   before making a strong win-rate claim.
+2. Add a durable optional provenance command/test for rechecking external
+   SlowRenju static data without making normal tests depend on that checkout.
+3. Profile complete searches by detector, eval, movegen, VCF/VCT, alpha-beta,
+   and TT cost; optimize only with legality, freestyle diff, and strength gates.
+4. Audit Rapfi primarily for strength improvements. Candidate ordering,
+   evaluation, tactical search, TT policy, pruning/extensions, and time
+   management are higher-level targets; faster line/forbidden tables are
+   supporting work when they permit deeper or broader search. Do not replace
+   the search architecture wholesale.
 
 ### SlowRenju Strength Comparison Contract
 
@@ -1402,6 +1438,93 @@ The current small-sample conclusion is therefore:
 - the clearest measured difference is speed: in the aligned default-depth
   prefix sample Rust averaged about 259 ms per move versus SlowRenju 106 ms,
   with materially worse long-tail latency.
+
+Expanded default-depth comparison:
+
+- A later batch selected 14 dihedral-unique, locally Renju-legal 10-ply
+  prefixes from the standard match cases and played both colors, for 28 games
+  per configuration at depth 8 / width 40.
+- With Rust VCT disabled, the recorded score was Rust 15,
+  SlowRenju 13. Two Rust wins were match-referee adjudications after
+  SlowRenju played black forbidden moves: one overline and one double-three.
+  Excluding those two illegal games, normally completed games were 13:13.
+- With the normal Rust VCT path enabled, the recorded score was Rust 16,
+  SlowRenju 12. One SlowRenju overline remained; excluding it, normally
+  completed games were Rust 15, SlowRenju 12.
+- VCT changed one normally completed game from a SlowRenju win to a Rust win.
+  It also changed the continuation of the position where the VCT-disabled run
+  ended with SlowRenju's double-three.
+- Rust average move time increased from about 784 ms with VCT disabled to
+  959 ms with VCT enabled. SlowRenju averaged about 476 ms and 548 ms in the
+  respective batches. The batches are paired but still too small for a strong
+  win-rate claim; they do show no current evidence of a material Rust strength
+  deficit and confirm a significant Rust latency gap.
+
+The SlowRenju forbidden losses were not caused by failing to send Gomocup rule
+4. The adapter sends `INFO rule 4` after `START`/`RESTART`, and SlowRenju sets
+`fflag=1`. Both offending positions reproduce directly with rule 4. Source
+inspection shows the likely failure contract:
+
+- forbidden black points are suppressed indirectly by clearing their black
+  offensive `valueM`/`attackM` contribution;
+- candidate scoring can still include defensive value from the white side;
+- root candidate initialization first marks every empty point, and the normal
+  search path uses `vbw <= 0` as the effective filter instead of applying a
+  final `foulr()` legality gate before returning a move.
+
+This creates a plausible path for a tactically valuable defence to leak through
+despite the runtime Renju flag. A direct SlowRenju `foulr()` diagnostic on
+those final candidates would distinguish detector failure from a search-return
+bypass. Rust deliberately uses an explicit rule-legality contract at move
+generation and external play boundaries, so the SlowRenju result is not a
+behavior to copy.
+
+### Remaining Work After SlowRenju Alignment
+
+1. **Strength confidence**
+   - Increase paired, non-symmetric fixed-depth coverage and report black/white
+     splits, illegal moves, timeouts, and latency distributions.
+   - Keep VCT-off and complete-product lanes separate so independent VCT value
+     remains measurable.
+2. **Performance**
+   - Compare nodes and time-per-node before concluding the remaining gap is
+     implementation speed rather than additional Rust search work.
+   - Profile forbidden checks, rule-aware eval refresh, candidate generation,
+     opponent-VCF filtering, VCT misses, TT, and alpha-beta separately.
+   - Keep `tests/renju_perf.rs` as the micro-regression gate, but judge
+     end-to-end changes with same-position probes and matches.
+3. **Rapfi architecture audit**
+   - Map Rapfi line-pattern/forbidden tables, incremental board state, move
+     ordering, tactical search, TT, pruning/extensions, time management, and
+     parallel search to the current Rust modules.
+   - The primary success criterion is increased playing strength, not source
+     similarity or raw microbenchmark speed. Performance work matters because
+     it can buy deeper search under the same budget.
+   - Select one idea at a time. Each Rapfi-inspired experiment must preserve
+     Renju legality, pass freestyle diffs, and beat the appropriate base in
+     paired strength matches; latency and node changes must be reported even
+     when the accepted benefit is strength.
+4. **Rule surface intentionally deferred**
+   - Opening protocols remain separate future features.
+   - Equal-time product matches remain blocked until one deadline covers root
+     VCF, opponent-VCF filtering, VCT/verification, and alpha-beta together.
+
+### Freestyle Regression Against SlowRenju
+
+SlowRenju is also useful as a complete-game freestyle regression opponent. Run
+the same Linux adapter with Gomocup rule `0` and the Rust engine in
+`RuleSet::Freestyle`, using paired openings and matched fixed depth/width.
+
+This lane complements rather than replaces the Python reference gates:
+
+- Python reference/root diffs remain the semantic authority for classic
+  move/score/nodes/trace alignment.
+- Rust-vs-SlowRenju freestyle matches detect practical playing-strength
+  regressions that fixed-position diffs may not expose.
+- Fast-vs-base remains the direct gate for accepting experimental Rust search
+  changes.
+- Report wins/losses/draws, color split, avg/median/p95/max move time,
+  timeouts, nodes when available, and the exact search/tactical settings.
 
 ## Fixture Format Proposal
 

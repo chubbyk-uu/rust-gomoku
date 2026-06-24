@@ -6,10 +6,12 @@
 
 已完成：
 
-- 15x15 自由规则五子棋状态机、zobrist、配置、pattern、eval cache、movegen、ordering、TT、alpha-beta root search。
-- root VCF、root-only VCT 触发/验证/trace。
+- 15x15 无禁手与连珠规则状态机、zobrist、配置、pattern、eval cache、movegen、ordering、TT、alpha-beta root search。
+- 连珠黑方长连、四四、递归真三三禁手及五连优先语义；默认规则仍为无禁手。
+- 规则感知的 root VCF、root-only VCT 触发/验证/trace。
 - Gomocup stdin/stdout 引擎入口和本地 Web GUI。
 - Rust/reference 差分、Rust/reference 对战、base/fast 对战和同局面 benchmark 脚手架。
+- 连珠 oracle、定向密集压测、一维穷举、候选诊断、性能测试和规则感知对局裁判工具。
 - 非 root 候选排序成本优化：保持原排序 key 不变，减少 `getmi` 和候选复制开销。
 - fast profile 默认开启第三版 history/killer ordering：只在静态排序同组内调整安静着法顺序，base 不受影响。
 - 仓库内保留 `opponent/zhou` 作为轻量对手；完整 Python reference 不随仓库提交。
@@ -85,6 +87,7 @@ Gomocup smoke：
 
 ```bash
 printf 'START 15\nBEGIN\nEND\n' | cargo run --quiet --bin gomocup_engine -- --depth 2 --width 8
+printf 'START 15\nINFO rule 4\nBEGIN\nEND\n' | cargo run --quiet --bin gomocup_engine -- --depth 2 --width 8
 ```
 
 启动 GUI：
@@ -107,6 +110,7 @@ target/release/gomocup_engine --profile fast
 
 常用 `INFO`：
 
+- `INFO rule 0|4` 或 `INFO rule freestyle|renju`（仅空棋盘时允许）
 - `INFO timeout_turn N`
 - `INFO time_left N`
 - `INFO max_node N`
@@ -170,6 +174,21 @@ python3 scripts/bench_match_cases.py \
 
 `run_gomocup_match.py` 用于真实对战和棋力评估；`bench_match_cases.py` 用于同一批前缀局面的一手搜索对照。判断优化是否真的提速，应先看同局面 benchmark，再看对战胜率和长尾耗时。
 
+连珠对战使用 `--rule renju`。对战脚本会给双方设置 Gomocup 规则 `4`，
+并使用规则感知裁判拒绝黑方禁手：
+
+```bash
+cargo build --release --bin gomocup_engine --bin renju_referee
+python3 scripts/run_gomocup_match.py \
+  --rule renju \
+  --case-file cases/renju/strength_prefixes.jsonl \
+  --engine-a-side both \
+  --engine-a-command 'target/release/gomocup_engine --depth 8 --width 40'
+```
+
+完整连珠设计、验证证据、SlowRenju 对照约定和剩余工作见
+`docs/renju-forbidden-design.md`。
+
 如需观察真实跨手 TT，可给 `run_gomocup_match.py` 加 `--reuse-engine-state`。默认对战脚本每手 `RESTART`，更适合公平复现；`--reuse-engine-state` 会保留 engine/searcher 状态，并把每手 `MESSAGE tt_generation current=... old=...` 汇总到 JSON 的 `tt_generation` 字段。
 
 ## 目录
@@ -178,6 +197,7 @@ python3 scripts/bench_match_cases.py \
 src/                 Rust engine、Gomocup、GUI、diff/case probe
 cases/diff/          root 差分 case
 cases/match/         对战和 benchmark 前缀局面
+cases/renju/         禁手、战术、候选诊断和棋力前缀 case
 data/static/         从 reference 提取的静态矩阵
 opponent/zhou/       zhou 基线对手
 scripts/             差分、对战、benchmark、case 抽取脚本
@@ -186,10 +206,11 @@ tests/               Rust 自动测试
 
 ## 当前重点
 
-1. 继续扩大 reference/Rust 差分覆盖。
-2. 针对真实慢手优化 VCT miss 和 alphabeta 长尾，优先寻找能稳定压低 p95/max 的方案。
-3. 继续扩大 fast profile 的 fast vs base 对战覆盖，确认默认开启的 history/killer ordering 在更大样本下胜率不低于 base。
-4. 所有性能实验都要同时报告正确性、耗时、nodes、move/score/trace 是否变化。
+1. 使用更多独立、交换黑白的开局扩大固定深度 Rust vs SlowRenju 连珠棋力证据，并继续保留禁手裁判。
+2. 按子系统 profile 连珠搜索，缩小相对 SlowRenju 的耗时差距，优先检查禁手、eval 刷新、opponent-VCF filter 和 VCT 长尾。
+3. 学习 Rapfi 的首要目标是提高棋力，重点审计候选排序、评估、战术搜索、TT、剪枝/延伸和时间管理；线模式与禁手表也可作为加深搜索的支撑。
+4. 继续扩大 classic reference/Rust 差分、fast-vs-base 对战，以及关闭禁手后的 Rust-vs-SlowRenju 无禁手对战，确保连珠与性能改动不影响无禁手语义和棋力。
+5. 所有性能实验都要同时报告正确性、耗时、nodes、move/score/trace 是否变化。
 
 ## 许可证
 
