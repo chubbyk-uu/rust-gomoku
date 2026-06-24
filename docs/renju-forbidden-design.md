@@ -1460,6 +1460,45 @@ Expanded default-depth comparison:
   win-rate claim; they do show no current evidence of a material Rust strength
   deficit and confirm a significant Rust latency gap.
 
+The planned 100-game fixed-depth gate is now complete. The durable opening set
+is `cases/renju/strength_100_prefixes.jsonl`:
+
+- 50 locally Renju-legal positions, each played with colors swapped;
+- all positions are unique under the eight square-board symmetries;
+- positions come from 18 source trajectories at plies 10, 14, 18, 22, and 26,
+  so the set includes opening and early/middle-game states but is not 50
+  statistically independent source games;
+- all 398 black moves in the preset prefixes passed the Rust detector, Rapfi,
+  and `renju_forbid` before the match.
+
+Both engines used fixed depth 8 / width 40. Rust used its complete base
+configuration, including rule-aware VCF and VCT. Eight games ran in parallel on
+a 24-logical-CPU host:
+
+- recorded result: Rust 54, SlowRenju 45, draw 1, timeout 0;
+- four Rust wins were adjudications after SlowRenju, playing black, selected
+  one overline and three double-three moves;
+- excluding those illegal games, normally completed games were Rust 50,
+  SlowRenju 45, draw 1, or 52.6% Rust points;
+- Rust as black scored 27 wins, 22 losses, and 1 draw;
+- Rust as white had 23 normal wins and 23 normal losses, plus the four
+  SlowRenju forbidden-move losses;
+- paired openings produced 39 split pairs, 7 Rust sweeps, 3 SlowRenju sweeps,
+  and 1 pair containing the draw.
+
+The post-match audit deduplicated the played black positions into 1174
+fixtures: 1170 successful black moves plus the four rejected candidates. Rust,
+Rapfi, and `renju_forbid` agreed on every fixture with zero mismatches. No Rust
+move was illegal.
+
+The parallel batch measured Rust at avg/median/p95/max
+1469.849/143.775/5780.036/22399.597 ms per move and SlowRenju at
+825.720/15.496/3095.064/12547.858 ms. These numbers confirm the end-to-end
+latency gap but are not clean single-process benchmarks: eight simultaneous
+games introduced CPU contention, especially for long tactical searches.
+Use same-position and single-process profiling before attributing the ratio to
+per-node implementation cost.
+
 The SlowRenju forbidden losses were not caused by failing to send Gomocup rule
 4. The adapter sends `INFO rule 4` after `START`/`RESTART`, and SlowRenju sets
 `fflag=1`. Both offending positions reproduce directly with rule 4. Source
@@ -1482,8 +1521,10 @@ behavior to copy.
 ### Remaining Work After SlowRenju Alignment
 
 1. **Strength confidence**
-   - Increase paired, non-symmetric fixed-depth coverage and report black/white
-     splits, illegal moves, timeouts, and latency distributions.
+   - The initial 100-game fixed-depth gate is complete and shows no evidence
+     that Rust is weaker than SlowRenju.
+   - Future strength expansion should use additional source games rather than
+     more nearby prefixes from these same 18 trajectories.
    - Keep VCT-off and complete-product lanes separate so independent VCT value
      remains measurable.
 2. **Performance**
@@ -1525,6 +1566,78 @@ This lane complements rather than replaces the Python reference gates:
   changes.
 - Report wins/losses/draws, color split, avg/median/p95/max move time,
   timeouts, nodes when available, and the exact search/tactical settings.
+
+The first 100-game freestyle gate reused
+`cases/renju/strength_100_prefixes.jsonl` so the rule comparison has the same
+positions, colors, fixed depth 8 / width 40, 120-ply cap, and eight-way
+parallelism as the Renju batch. Both engines received Gomocup rule `0`; Rust
+kept its complete base VCF/VCT configuration.
+
+Results:
+
+- Rust 55, SlowRenju 43, draw 2, errors/timeouts 0;
+- Rust as black: 33 wins, 15 losses, 2 draws;
+- Rust as white: 22 wins, 28 losses;
+- paired openings: 41 split pairs, 6 Rust sweeps, 1 SlowRenju sweep, and 2
+  pairs containing a draw;
+- Rust score was 56.0%, with no evidence that current freestyle playing
+  strength is below SlowRenju on this gate.
+
+The same revision also passed all 11 classic root diff cases with all 18
+reported fields aligned. Together, the match and diff results show no current
+freestyle regression signal. They do not replace a direct old-revision-vs-new-
+revision match when a future change specifically claims to preserve strength.
+
+Parallel-batch move timing was Rust avg/median/p95/max
+912.578/45.926/3631.614/8596.887 ms and SlowRenju
+852.695/11.202/3165.806/12792.387 ms. Compared with the Renju batch, Rust
+freestyle was materially faster, especially at median and maximum latency.
+SlowRenju's average was similar across the two rule modes. As with the Renju
+batch, CPU contention means these figures are end-to-end throughput evidence,
+not clean per-node microbenchmarks.
+
+The direct historical A/B is also complete. The pre-Renju baseline is
+`dafb664` (`Add GPL license declaration`), the last commit before the Renju
+design/oracle work began. It was built in a detached worktree and played the
+same 50 paired prefixes against the current `20dfab4` base profile at fixed
+depth 8 / width 40:
+
+- current 49, pre-Renju 49, draw 2, errors/timeouts 0;
+- current as black: 27 wins, 22 losses, 1 draw;
+- current as white: 22 wins, 27 losses, 1 draw;
+- all 49 decisive opening pairs split 1:1 and the remaining pair was a double
+  draw;
+- all 50 paired games had exactly identical coordinate/side sequences after
+  swapping engine assignments;
+- both versions searched 1391 moves and reported the same aggregate TT
+  generation counts.
+
+This is stronger than a 50% match result: under this deterministic fixed-search
+gate, current freestyle base behavior is sequence-identical to the pre-Renju
+baseline. The classic 11-case reference diff also remained fully aligned.
+
+Parallel timing was current avg/median/p95/max
+942.377/90.531/3733.413/11472.891 ms versus pre-Renju
+922.284/89.250/3614.786/11068.765 ms. The roughly 2% aggregate difference is
+too small to call a performance regression under eight-way CPU contention;
+use same-position single-process benchmarks for that decision.
+
+The current fast-vs-base freestyle gate used the same 100 games:
+
+- fast 52, base 44, draw 4, errors/timeouts 0;
+- fast as black: 28 wins, 18 losses, 4 draws;
+- fast as white: 24 wins, 26 losses;
+- paired openings: 39 split pairs, 6 fast sweeps, 1 base sweep, and 4 pairs
+  containing a draw;
+- fast scored 54.0%, passing the project requirement that fast must not score
+  below 50% against base.
+
+Parallel timing was fast avg/median/p95/max
+1176.237/454.412/3991.700/13259.241 ms versus base
+1114.297/339.188/4248.023/13863.986 ms. Fast improved p95/max in this batch
+but worsened avg/median and searched slightly more moves. Treat the strength
+gate as passed, while the performance case remains mixed until a same-position
+benchmark demonstrates a stable net benefit.
 
 ## Fixture Format Proposal
 

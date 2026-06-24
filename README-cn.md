@@ -181,7 +181,7 @@ python3 scripts/bench_match_cases.py \
 cargo build --release --bin gomocup_engine --bin renju_referee
 python3 scripts/run_gomocup_match.py \
   --rule renju \
-  --case-file cases/renju/strength_prefixes.jsonl \
+  --case-file cases/renju/strength_100_prefixes.jsonl \
   --engine-a-side both \
   --engine-a-command 'target/release/gomocup_engine --depth 8 --width 40'
 ```
@@ -206,10 +206,10 @@ tests/               Rust 自动测试
 
 ## 当前重点
 
-1. 使用更多独立、交换黑白的开局扩大固定深度 Rust vs SlowRenju 连珠棋力证据，并继续保留禁手裁判。
+1. 保留已经完成的 100 局固定深度 Rust vs SlowRenju 连珠门槛；后续扩样应增加独立来源对局，而不是继续截取同一批轨迹的相邻前缀。
 2. 按子系统 profile 连珠搜索，缩小相对 SlowRenju 的耗时差距，优先检查禁手、eval 刷新、opponent-VCF filter 和 VCT 长尾。
 3. 学习 Rapfi 的首要目标是提高棋力，重点审计候选排序、评估、战术搜索、TT、剪枝/延伸和时间管理；线模式与禁手表也可作为加深搜索的支撑。
-4. 继续扩大 classic reference/Rust 差分、fast-vs-base 对战，以及关闭禁手后的 Rust-vs-SlowRenju 无禁手对战，确保连珠与性能改动不影响无禁手语义和棋力。
+4. 保留已经完成的无禁手门槛：100 局 Rust-vs-SlowRenju、当前版本与 Renju 前历史版本逐手等价、classic reference/Rust 差分，以及 fast-vs-base 棋力检查。
 5. 所有性能实验都要同时报告正确性、耗时、nodes、move/score/trace 是否变化。
 
 ## 许可证

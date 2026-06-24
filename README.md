@@ -184,7 +184,7 @@ black moves:
 cargo build --release --bin gomocup_engine --bin renju_referee
 python3 scripts/run_gomocup_match.py \
   --rule renju \
-  --case-file cases/renju/strength_prefixes.jsonl \
+  --case-file cases/renju/strength_100_prefixes.jsonl \
   --engine-a-side both \
   --engine-a-command 'target/release/gomocup_engine --depth 8 --width 40'
 ```
@@ -209,10 +209,10 @@ tests/               Rust automated tests
 
 ## Current Focus
 
-1. Expand fixed-depth Renju strength evidence against SlowRenju with more independent paired openings while retaining forbidden-move adjudication.
+1. Preserve the completed 100-game fixed-depth Renju-vs-SlowRenju gate; future expansion should add independent source games rather than nearby prefixes from the same trajectories.
 2. Profile Renju search by subsystem and reduce the measured latency gap to SlowRenju, prioritizing forbidden checks, eval refresh, opponent-VCF filtering, and VCT long tails.
 3. Audit Rapfi primarily to improve playing strength, focusing on candidate ordering, evaluation, tactical search, TT, pruning/extensions, and time management. Line-pattern and forbidden-table ideas are also relevant when they enable deeper search.
-4. Continue expanding classic reference/Rust diffs, fast-vs-base matches, and freestyle Rust-vs-SlowRenju matches with Renju disabled so Renju or performance work does not regress freestyle behavior.
+4. Preserve the completed 100-game freestyle gates: Rust-vs-SlowRenju, current-vs-pre-Renju sequence equivalence, classic reference/Rust diffs, and fast-vs-base strength checks.
 5. All performance experiments must report correctness, latency, nodes, and any changes to move/score/trace together.
 
 ## License
