@@ -1,6 +1,6 @@
 # rust_gomoku
 
-`rust_gomoku` 是 Python reference 项目 `pygomoku` classic 主线的 Rust 重构。当前主线目标是守住 classic 行为，同时继续降低平均耗时和长尾耗时。
+`rust_gomoku` 是 Python reference 项目 `pygomoku` classic 主线的 Rust 重构，并支持可选的连珠禁手规则。当前主线目标是同时守住两种规则的正确性，在可验证的前提下继续降低搜索耗时并提高棋力。
 
 ## 当前状态
 
@@ -52,6 +52,8 @@ GUI 入口为了降低手动对局体感等待，默认单独开启 `overlap_vct
 与 Python reference 严格差分或复现实验时，通常显式使用 `depth=6,width=20,root_vct_depth=4`。
 
 默认 profile 是 `base`，用于守住 classic 语义和 reference 差分。`--profile fast` 当前会默认开启 `fast_history_ordering`；如需对照可用 `--no-fast-history-ordering` 关闭。
+
+连珠模式实现轮流落子和黑方禁手；RIF、Yamaguchi、Soosorv、Swap2 等连珠开局协议尚未实现。
 
 ## 坐标约定
 
@@ -207,7 +209,7 @@ tests/               Rust 自动测试
 ## 当前重点
 
 1. 保留已经完成的 100 局固定深度 Rust vs SlowRenju 连珠门槛；后续扩样应增加独立来源对局，而不是继续截取同一批轨迹的相邻前缀。
-2. 按子系统 profile 连珠搜索，缩小相对 SlowRenju 的耗时差距，优先检查禁手、eval 刷新、opponent-VCF filter 和 VCT 长尾。
+2. 以当前优化后基线继续降低连珠每节点剩余开销和 VCF/VCT 长尾；性能改动必须通过 oracle、root diff 和棋力门槛。
 3. 学习 Rapfi 的首要目标是提高棋力，重点审计候选排序、评估、战术搜索、TT、剪枝/延伸和时间管理；线模式与禁手表也可作为加深搜索的支撑。
 4. 保留已经完成的无禁手门槛：100 局 Rust-vs-SlowRenju、当前版本与 Renju 前历史版本逐手等价、classic reference/Rust 差分，以及 fast-vs-base 棋力检查。
 5. 所有性能实验都要同时报告正确性、耗时、nodes、move/score/trace 是否变化。

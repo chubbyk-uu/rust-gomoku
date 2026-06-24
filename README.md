@@ -1,6 +1,6 @@
 # rust_gomoku
 
-`rust_gomoku` is a Rust rewrite of the classic mainline of the Python reference project `pygomoku`. The current focus is to preserve classic behavior while continuing to reduce average and long-tail search latency.
+`rust_gomoku` is a Rust rewrite of the classic mainline of the Python reference project `pygomoku`, with optional Renju forbidden-move support. Current work preserves both rule modes while reducing search latency and improving playing strength through measured experiments.
 
 A Chinese version of this document is available at [README-cn.md](README-cn.md).
 
@@ -54,6 +54,8 @@ The main defaults live in `src/config.rs`.
 For strict diffs against the Python reference or reproducing reference experiments, `depth=6,width=20,root_vct_depth=4` is typically passed explicitly.
 
 The default profile is `base`, used to preserve classic semantics and reference diffs. `--profile fast` currently enables `fast_history_ordering` by default; pass `--no-fast-history-ordering` to disable it for comparison.
+
+Renju mode implements alternating play plus black forbidden moves. Renju opening protocols such as RIF, Yamaguchi, Soosorv, and Swap2 are not implemented.
 
 ## Coordinate Convention
 
@@ -210,7 +212,7 @@ tests/               Rust automated tests
 ## Current Focus
 
 1. Preserve the completed 100-game fixed-depth Renju-vs-SlowRenju gate; future expansion should add independent source games rather than nearby prefixes from the same trajectories.
-2. Profile Renju search by subsystem and reduce the measured latency gap to SlowRenju, prioritizing forbidden checks, eval refresh, opponent-VCF filtering, and VCT long tails.
+2. Continue reducing the remaining Renju per-node overhead and VCF/VCT long tails from the current post-optimization baseline; keep performance changes behind oracle, root-diff, and strength gates.
 3. Audit Rapfi primarily to improve playing strength, focusing on candidate ordering, evaluation, tactical search, TT, pruning/extensions, and time management. Line-pattern and forbidden-table ideas are also relevant when they enable deeper search.
 4. Preserve the completed 100-game freestyle gates: Rust-vs-SlowRenju, current-vs-pre-Renju sequence equivalence, classic reference/Rust diffs, and fast-vs-base strength checks.
 5. All performance experiments must report correctness, latency, nodes, and any changes to move/score/trace together.

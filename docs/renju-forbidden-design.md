@@ -1145,7 +1145,7 @@ Status meanings:
 | Evaluation parameter tables | `para[]`, `LASTEVAL`, `NEXTEVAL`, `ATTACKVALUE`, `DEFENDVALUE` | `DEFAULT_EVAL_PARA`, `EvalBucketTables` | Aligned | All 375 values are identical, including the distinct last/next/attack/defend tables and search parameters. There is no separate missing “Renju weight table” in SlowRenju; Renju changes cached black point semantics while reusing these tables. |
 | Global `ValueW` evaluation | `Value/ValueW.cpp::value` | `eval::global_eval` | Aligned | Offensive/defensive bucket sums, DGN term, LAST5 recursion, NEXT4 and NEXT43 branches map directly to Rust. |
 | White exploiting a forbidden black block | `ValueW.cpp:158` (`fflag & moveValue1bWide(...) < 0`) | `evaluate_last5_branch` full detector gate | Aligned | Rust uses explicit forbidden classification instead of relying on the negative cached move value. A focused test proves white wins when black's only block is forbidden. |
-| Main move generation | `AI/AIx.cpp` covered set, `moveValue1bWide`, attack priorities | `search::movegen`, `CoverageTracker` | Aligned classic flow; Renju differential open | The 32-point coverage set, move score, hostile-three bonus, forcing collapse, and ordering descend from SlowRenju/pygomoku. Renju black points are filtered through the cache prefilter plus full detector. A direct SlowRenju-vs-Rust candidate differential has not yet been built. |
+| Main move generation | `AI/AIx.cpp` covered set, `moveValue1bWide`, attack priorities | `search::movegen`, `CoverageTracker` | Aligned classic flow; diagnostics complete | The 32-point coverage set, move score, hostile-three bonus, forcing collapse, and ordering descend from SlowRenju/pygomoku. Renju black points are filtered through the cache prefilter plus full detector. Production-path candidate diagnostics and complete-game comparisons are available; exporting SlowRenju's internal candidate list remains an optional provenance enhancement rather than a correctness blocker. |
 | Fallback move scoring | `Value/ValueB.cpp::value1b`, `AI/AIs.cpp` | `search::root::{fallback_move_score,fallback_ai_move}` | Aligned semantics, different forbidden representation | The offensive/defensive formula and weights map term-for-term. SlowRenju assigns forbidden black points a large negative offensive value; Rust excludes them before selection. Shared production scoring is fixed-tested for exact five, overline, double-four, double-three, and a recursive apparent-double-three point that remains legal. |
 | Root VCF | `AIx.cpp::rootsearch`, `VCF.cpp::VCFd_hash` | `RootSearcher`, `VCFSearcher` | Aligned plus fixes | Depth normalization and core threat flow map to SlowRenju. Rust additionally supports multi-reply handling and explicitly removes forbidden attacker/defender moves. Renju tactical fixtures cover overline, double-four, double-three, and forbidden black defence. |
 | Opponent VCF root filter | `AIx.cpp` variable `vctt`: test each root move against opponent `VCFd_hash` | `RootSearcher::apply_opponent_vcf_filter` | Aligned | Despite the SlowRenju variable name, this is an opponent-VCF evasion filter, not a general VCT search. |
@@ -1159,10 +1159,11 @@ Current conclusion:
 - Forbidden legality, static shape data, value tables, black suppression,
   non-local double-three invalidation, and the key white `ValueW` forbidden
   defence branch are substantially aligned with SlowRenju.
-- The main remaining uncertainty is no longer “missing Renju weights.” It is
-  behavioral strength evidence: candidate selection, fallback scoring, and
-  complete-game search choices have not yet been compared against a runnable
-  SlowRenju Renju baseline.
+- Candidate selection, fallback scoring, and complete-game search behavior
+  have now been exercised against a runnable SlowRenju baseline. The completed
+  100-game fixed-depth gates show no evidence that Rust is weaker in either
+  Renju or freestyle; remaining work is performance refinement and
+  strength-focused architecture study.
 - The independent Rust VCT implementation is a separate extension. Its Renju
   correctness is covered by focused tests, but its strength impact must be
   measured rather than inferred from SlowRenju.
@@ -1214,8 +1215,9 @@ Completed SlowRenju gates:
 
 Remaining SlowRenju/Renju gates:
 
-1. Expand the paired, non-symmetric fixed-depth match set to at least 100 games
-   before making a strong win-rate claim.
+1. Add independent-source strength positions when expanding beyond the
+   completed 100-game paired gate; avoid treating nearby prefixes from the
+   same trajectories as independent evidence.
 2. Add a durable optional provenance command/test for rechecking external
    SlowRenju static data without making normal tests depend on that checkout.
 3. Profile complete searches by detector, eval, movegen, VCF/VCT, alpha-beta,
@@ -1738,6 +1740,3 @@ Search integration should not begin until:
 - Whether to expose `RuleSet::Standard` separately. Rapfi distinguishes
   freestyle, standard, and Renju. This project only needs freestyle and Renju
   for now unless a concrete use case appears.
-- Whether forbidden move in Gomocup should be reported as illegal input,
-  immediate loss, or internal engine-only filtering. This needs a protocol
-  decision before Phase 5.
