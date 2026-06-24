@@ -2,6 +2,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -33,7 +34,13 @@ fn main() {
     let state = Arc::new(Mutex::new(GameState::new(config)));
     let addr = args.addr;
     let listener = TcpListener::bind(&addr).expect("GUI server binds to local address");
-    eprintln!("gomoku gui listening on http://{addr}");
+    let url = browser_url(&addr);
+    eprintln!("gomoku gui listening on {url}");
+    if args.open_browser {
+        if let Err(err) = open_browser(&url) {
+            eprintln!("warning: failed to open the browser automatically: {err}");
+        }
+    }
     for stream in listener.incoming() {
         let Ok(stream) = stream else {
             continue;
@@ -47,6 +54,7 @@ struct GuiArgs {
     addr: String,
     depth: Option<i32>,
     width: Option<i32>,
+    open_browser: bool,
 }
 
 fn parse_args() -> GuiArgs {
@@ -54,6 +62,7 @@ fn parse_args() -> GuiArgs {
         addr: DEFAULT_ADDR.to_string(),
         depth: None,
         width: None,
+        open_browser: true,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -73,10 +82,63 @@ fn parse_args() -> GuiArgs {
                     result.width = Some(value.max(1));
                 }
             }
+            "--no-open-browser" => {
+                result.open_browser = false;
+            }
             _ => {}
         }
     }
     result
+}
+
+fn browser_url(addr: &str) -> String {
+    if let Some(port) = addr.strip_prefix("0.0.0.0:") {
+        format!("http://127.0.0.1:{port}")
+    } else if let Some(port) = addr.strip_prefix("[::]:") {
+        format!("http://[::1]:{port}")
+    } else {
+        format!("http://{addr}")
+    }
+}
+
+fn spawn_browser(program: &str, args: &[&str]) -> std::io::Result<()> {
+    Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(target_os = "windows")]
+fn open_browser(url: &str) -> std::io::Result<()> {
+    spawn_browser("cmd", &["/C", "start", "", url])
+}
+
+#[cfg(target_os = "macos")]
+fn open_browser(url: &str) -> std::io::Result<()> {
+    spawn_browser("open", &[url])
+}
+
+#[cfg(target_os = "linux")]
+fn open_browser(url: &str) -> std::io::Result<()> {
+    let is_wsl = std::env::var_os("WSL_DISTRO_NAME").is_some()
+        || std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|release| release.to_ascii_lowercase().contains("microsoft"))
+            .unwrap_or(false);
+    if is_wsl && spawn_browser("cmd.exe", &["/C", "start", "", url]).is_ok() {
+        return Ok(());
+    }
+    spawn_browser("xdg-open", &[url])
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn open_browser(_url: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "automatic browser opening is unsupported on this platform",
+    ))
 }
 
 #[derive(Clone)]
@@ -641,6 +703,13 @@ fn response(status: u16, content_type: &str, body: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_url_rewrites_unspecified_bind_addresses() {
+        assert_eq!(browser_url("0.0.0.0:18080"), "http://127.0.0.1:18080");
+        assert_eq!(browser_url("[::]:18080"), "http://[::1]:18080");
+        assert_eq!(browser_url("127.0.0.1:18080"), "http://127.0.0.1:18080");
+    }
 
     fn double_three_state(rule: RuleSet) -> GameState {
         let mut config = load_default_config();
