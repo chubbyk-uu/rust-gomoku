@@ -174,6 +174,7 @@ struct StateResponse {
     board_size: usize,
     cells: Vec<i8>,
     moves: Vec<MoveResponse>,
+    forbidden_points: Vec<ForbiddenPointResponse>,
     human_side: i8,
     side_to_move: i8,
     winner: i8,
@@ -194,6 +195,13 @@ struct MoveResponse {
     y: usize,
     side: i8,
     number: usize,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct ForbiddenPointResponse {
+    x: usize,
+    y: usize,
+    kind: &'static str,
 }
 
 #[derive(Serialize)]
@@ -292,6 +300,7 @@ fn snapshot_state(state: &GameState) -> StateResponse {
                 })
             })
             .collect(),
+        forbidden_points: visible_forbidden_points(state),
         human_side: state.human_side,
         side_to_move: state.board.side_to_move(),
         winner: state.board.winner(),
@@ -319,6 +328,38 @@ fn snapshot_state(state: &GameState) -> StateResponse {
             rule: state.config.rule_set.as_str(),
         },
     }
+}
+
+fn visible_forbidden_points(state: &GameState) -> Vec<ForbiddenPointResponse> {
+    if state.config.rule_set != RuleSet::Renju
+        || state.board.side_to_move() != BLACK
+        || state.board.winner() != EMPTY
+    {
+        return Vec::new();
+    }
+
+    let mut points = Vec::new();
+    for y in 0..BOARD_SIZE {
+        for x in 0..BOARD_SIZE {
+            let Some(move_) = xy_to_move(x, y).ok() else {
+                continue;
+            };
+            let Ok(kind) = state
+                .board
+                .forbidden_kind_for_rule(move_, BLACK, RuleSet::Renju)
+            else {
+                continue;
+            };
+            if kind.is_forbidden() {
+                points.push(ForbiddenPointResponse {
+                    x,
+                    y,
+                    kind: forbidden_code(kind),
+                });
+            }
+        }
+    }
+    points
 }
 
 fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameState>>) {
@@ -465,6 +506,15 @@ fn forbidden_name(kind: ForbiddenKind) -> &'static str {
     }
 }
 
+fn forbidden_code(kind: ForbiddenKind) -> &'static str {
+    match kind {
+        ForbiddenKind::None => "none",
+        ForbiddenKind::DoubleThree => "double_three",
+        ForbiddenKind::DoubleFour => "double_four",
+        ForbiddenKind::Overline => "overline",
+    }
+}
+
 fn undo_turn(game: &mut GameState) {
     if game.board.move_count() == 0 {
         game.error = Some("当前没有可悔棋步。".to_string());
@@ -586,6 +636,71 @@ fn response(status: u16, content_type: &str, body: String) -> String {
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn double_three_state(rule: RuleSet) -> GameState {
+        let mut config = load_default_config();
+        config.rule_set = rule;
+        let mut state = GameState::new(config);
+        for (x, y) in [
+            (6, 7),
+            (0, 0),
+            (8, 7),
+            (0, 1),
+            (7, 6),
+            (0, 2),
+            (7, 8),
+            (0, 3),
+        ] {
+            state
+                .board
+                .play_for_rule(xy_to_move(x, y).unwrap(), None, rule)
+                .unwrap();
+        }
+        state
+    }
+
+    #[test]
+    fn renju_black_turn_exposes_forbidden_points() {
+        let mut state = double_three_state(RuleSet::Renju);
+        let points = visible_forbidden_points(&state);
+
+        assert!(points.contains(&ForbiddenPointResponse {
+            x: 7,
+            y: 7,
+            kind: "double_three",
+        }));
+        let move_count = state.board.move_count();
+        assert!(state
+            .board
+            .play_for_rule(xy_to_move(7, 7).unwrap(), None, RuleSet::Renju)
+            .is_err());
+        assert_eq!(state.board.move_count(), move_count);
+    }
+
+    #[test]
+    fn freestyle_does_not_expose_forbidden_points() {
+        let state = double_three_state(RuleSet::Freestyle);
+        assert!(visible_forbidden_points(&state).is_empty());
+    }
+
+    #[test]
+    fn renju_white_turn_does_not_expose_forbidden_points() {
+        let mut config = load_default_config();
+        config.rule_set = RuleSet::Renju;
+        let mut state = GameState::new(config);
+        state
+            .board
+            .play_for_rule(xy_to_move(7, 7).unwrap(), Some(BLACK), RuleSet::Renju)
+            .unwrap();
+
+        assert_eq!(state.board.side_to_move(), WHITE);
+        assert!(visible_forbidden_points(&state).is_empty());
+    }
 }
 
 const INDEX_HTML: &str = r#"<!doctype html>
@@ -852,10 +967,33 @@ const INDEX_HTML: &str = r#"<!doctype html>
         ctx.fillStyle = 'rgba(45, 28, 10, .75)';
         ctx.fill();
       });
+      for (const point of state.forbidden_points) {
+        forbiddenMark(point.x, point.y);
+      }
       const lastNumber = state.moves.length;
       for (const move of state.moves) {
         stone(move.x, move.y, move.side, move.number, move.number === lastNumber);
       }
+    }
+    function forbiddenMark(x, y) {
+      const p = boardMetrics();
+      const cx = p.margin + x*p.cell, cy = p.margin + y*p.cell;
+      const r = p.cell * .24;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(170, 25, 20, .9)';
+      ctx.fillStyle = 'rgba(255, 242, 218, .72)';
+      ctx.lineWidth = Math.max(2.5, p.cell * .055);
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * 1.35, 0, Math.PI*2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(cx-r, cy-r);
+      ctx.lineTo(cx+r, cy+r);
+      ctx.moveTo(cx+r, cy-r);
+      ctx.lineTo(cx-r, cy+r);
+      ctx.stroke();
+      ctx.restore();
     }
     function stone(x, y, side, number, isLast) {
       const p = boardMetrics();

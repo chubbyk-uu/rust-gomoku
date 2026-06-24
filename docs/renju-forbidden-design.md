@@ -976,11 +976,14 @@ python3 scripts/renju_dense_stress.py --skeleton all --count 400 --seed <seed> \
     --output /tmp/renju_dense_phase9.jsonl
 python3 scripts/renju_eval_suppression_check.py \
     --case-file /tmp/renju_dense_phase9.jsonl
+python3 scripts/renju_oracle_compare.py \
+    --case-file /tmp/renju_dense_phase9.jsonl --quiet --require-oracles
+python3 scripts/run_diff.py --jobs 4
 cargo test --release --test renju_perf -- --ignored --nocapture
 git diff --check
 ```
 
-Phase 9 progress:
+Phase 9 status: complete.
 
 - Added `scripts/renju_eval_suppression_check.py`, which wraps an ignored Rust
   test to validate arbitrary JSONL fixture files. The gate asserts that if
@@ -1000,6 +1003,26 @@ Phase 9 progress:
 - Promoted the seeded dense incremental-vs-full recompute stress test to a
   normal unit regression. It covers the original non-local stale-suppression
   failure where a later move made a previously forbidden black point legal.
+- The browser GUI applies freestyle/Renju selection only when starting a new
+  game. During a Renju black turn it exposes the detector's current forbidden
+  points in the state response and draws red cross markers on those
+  intersections. Clicking a marked point is rejected without changing the
+  board, with the specific forbidden reason retained in the error message.
+  Freestyle and white turns expose no forbidden markers.
+- GUI smoke covered new-game rule selection, rule persistence after a move,
+  forbidden-point display, and forbidden input rejection. The rendered marker
+  was also checked manually in the browser.
+- Final Phase 9 release gate used dense seed 36 with 2000 cases:
+  `double_four=614`, `double_three=167`, `none=406`, `overline=813`.
+  Eval suppression matched the full detector for all cases. The local
+  detector, Rapfi, and `renju_forbid` had zero unexplained mismatches; three
+  overline/double-three coexistence cases were accepted by the documented
+  reporting-convention rule.
+- The 72 hand fixtures passed all three detectors with zero unexplained
+  mismatches, and the freestyle root diff passed all 11 default cases.
+- Final release performance measured about 859 ns per full Renju legality
+  check and 1604 ns per Renju movegen node on the existing release probes.
+  These figures are regression baselines, not strength measurements.
 
 ### SlowRenju Alignment Plan
 

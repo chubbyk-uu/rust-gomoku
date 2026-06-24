@@ -95,7 +95,7 @@ Launch the GUI:
 cargo run --release --bin gomoku_gui
 ```
 
-Then open `http://127.0.0.1:18080`. The GUI supports playing black/white, undo, restart, Base/Fast mode switching, async thinking, move number display, and a status panel; shortcuts: `U` to undo, `R` to restart. The Base/Fast switch is only allowed when the engine is idle, does not reset the current game, and only affects the next engine think.
+Then open `http://127.0.0.1:18080`. The GUI supports playing black/white, freestyle or Renju rules, undo, restart, Base/Fast mode switching, async thinking, move number display, and a status panel; shortcuts: `U` to undo, `R` to restart. Rule selection applies only when starting a new game. During a Renju black turn, forbidden intersections are marked with red crosses and forbidden input is rejected without placing a stone. The Base/Fast switch is only allowed when the engine is idle, does not reset the current game, and only affects the next engine think.
 
 Gomocup engine:
 
