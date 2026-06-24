@@ -286,6 +286,65 @@ class GomocupEngine:
         self.proc = None
 
 
+class RenjuReferee:
+    def __init__(self, command: str, cwd: Path) -> None:
+        self.command = command
+        self.cwd = cwd
+        self.proc: subprocess.Popen[str] | None = None
+
+    def start(self) -> None:
+        if self.proc is not None and self.proc.poll() is None:
+            return
+        argv = shlex.split(self.command)
+        if not argv:
+            raise RuntimeError("renju referee: empty command")
+        self.proc = subprocess.Popen(
+            argv,
+            cwd=self.cwd,
+            env=dict(os.environ),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+    def judge(
+        self,
+        moves: list[dict[str, Any]],
+        candidate: tuple[int, int],
+        side: int,
+    ) -> dict[str, Any]:
+        self.start()
+        assert self.proc is not None
+        assert self.proc.stdin is not None
+        assert self.proc.stdout is not None
+        request = {
+            "moves": [[move["x"], move["y"]] for move in moves],
+            "candidate": list(candidate),
+            "side": side,
+        }
+        self.proc.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+        self.proc.stdin.flush()
+        line = self.proc.stdout.readline()
+        if not line:
+            stderr = self.proc.stderr.read() if self.proc.stderr is not None else ""
+            raise RuntimeError(f"renju referee exited: {stderr.strip()}")
+        response = json.loads(line)
+        if response.get("error"):
+            raise RuntimeError(f"renju referee: {response['error']}")
+        return response
+
+    def close(self) -> None:
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        self.proc = None
+
+
 @dataclass(frozen=True)
 class EngineSpec:
     name: str
@@ -417,6 +476,9 @@ def run_match_task(
     max_moves: int,
     move_timeout_sec: float,
     game_timeout_sec: float,
+    rule: str,
+    referee_command: str,
+    referee_cwd: Path,
 ) -> dict[str, Any]:
     game_started = time.perf_counter()
     engines = {
@@ -445,6 +507,9 @@ def run_match_task(
     winner_engine: str | None = None
     winner_side: int | None = None
     error: str | None = None
+    referee = (
+        RenjuReferee(referee_command, referee_cwd) if rule == "renju" else None
+    )
 
     try:
         for index, (x, y) in enumerate(task.case.moves):
@@ -492,6 +557,18 @@ def run_match_task(
                 winner_side = opposite(side)
                 break
 
+            referee_result = (
+                referee.judge(moves, (mx, my), side)
+                if referee is not None
+                else None
+            )
+            if referee_result is not None and not referee_result["legal"]:
+                forbidden = referee_result.get("forbidden_kind")
+                error = f"{engine_name} played forbidden move {(mx, my)}: {forbidden}"
+                winner_engine = side_to_engine[opposite(side)]
+                winner_side = opposite(side)
+                break
+
             move = {
                 "ply": len(moves) + 1,
                 "x": mx,
@@ -516,7 +593,12 @@ def run_match_task(
             occupied.add((mx, my))
             times_ms[engine_name].append(elapsed_ms)
 
-            if winner_after(moves, mx, my, side):
+            won = (
+                referee_result is not None and referee_result["winner"] == side
+            ) or (
+                referee_result is None and winner_after(moves, mx, my, side)
+            )
+            if won:
                 winner_engine = engine_name
                 winner_side = side
                 break
@@ -528,6 +610,8 @@ def run_match_task(
     finally:
         for engine in engines.values():
             engine.close()
+        if referee is not None:
+            referee.close()
 
     return {
         "case_index": task.case_index,
@@ -653,6 +737,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--engine-b-cwd", type=Path, default=root)
     parser.add_argument("--engine-a-info", action="append", default=[])
     parser.add_argument("--engine-b-info", action="append", default=[])
+    parser.add_argument("--rule", choices=["freestyle", "renju"], default="freestyle")
+    parser.add_argument(
+        "--referee-command",
+        default=str(root / "target" / "release" / "renju_referee"),
+    )
+    parser.add_argument("--referee-cwd", type=Path, default=root)
     parser.add_argument(
         "--reuse-engine-state",
         action="store_true",
@@ -682,6 +772,16 @@ def main() -> int:
         info=parse_info(args.engine_b_info),
         restart_each_move=not args.reuse_engine_state,
     )
+    if args.rule == "renju":
+        if not any(key.lower() == "rule" for key, _value in engine_a.info):
+            engine_a.info.append(("rule", "4"))
+        if not any(key.lower() == "rule" for key, _value in engine_b.info):
+            engine_b.info.append(("rule", "4"))
+        check_command(
+            args.referee_command,
+            args.referee_cwd.expanduser().resolve(),
+            "renju referee",
+        )
     check_command(engine_a.command, engine_a.cwd, engine_a.name)
     check_command(engine_b.command, engine_b.cwd, engine_b.name)
 
@@ -739,6 +839,9 @@ def main() -> int:
                     max_moves=args.max_moves,
                     move_timeout_sec=args.move_timeout_sec,
                     game_timeout_sec=args.game_timeout_sec,
+                    rule=args.rule,
+                    referee_command=args.referee_command,
+                    referee_cwd=args.referee_cwd.expanduser().resolve(),
                 )
             )
             print_progress(len(games), len(tasks), games[-1])
@@ -753,6 +856,9 @@ def main() -> int:
                     max_moves=args.max_moves,
                     move_timeout_sec=args.move_timeout_sec,
                     game_timeout_sec=args.game_timeout_sec,
+                    rule=args.rule,
+                    referee_command=args.referee_command,
+                    referee_cwd=args.referee_cwd.expanduser().resolve(),
                 ): index
                 for index, task in enumerate(tasks)
             }
@@ -776,6 +882,8 @@ def main() -> int:
             "max_moves": args.max_moves,
             "move_timeout_sec": args.move_timeout_sec,
             "game_timeout_sec": args.game_timeout_sec,
+            "rule": args.rule,
+            "referee_command": args.referee_command if args.rule == "renju" else None,
             "engine_a": {
                 "name": engine_a.name,
                 "command": engine_a.command,

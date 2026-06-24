@@ -1,0 +1,3 @@
+{"name":"renju_strength_asymmetric_corner_ply10","moves":[[2,2],[5,5],[4,2],[6,4],[2,4],[4,6],[3,7],[5,4],[3,3],[7,3]],"side_to_move":"black","tags":["renju_strength","ply10","asymmetric"]}
+{"name":"renju_strength_central_ply10","moves":[[4,4],[6,4],[6,6],[6,3],[5,5],[3,3],[4,5],[3,5],[5,6],[5,3]],"side_to_move":"black","tags":["renju_strength","ply10","central"]}
+{"name":"renju_strength_edge_attack_ply10","moves":[[12,2],[9,5],[10,2],[8,4],[10,6],[8,5],[11,2],[9,2],[13,2],[14,2]],"side_to_move":"black","tags":["renju_strength","ply10","edge"]}
