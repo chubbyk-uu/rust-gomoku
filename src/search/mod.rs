@@ -11,8 +11,9 @@ pub use alphabeta::{
     SearchOptions, SearchStats,
 };
 pub use movegen::{
-    apply_hostile_three_extension, covered_moves, generate_candidates, movegen_backend_name,
-    Candidate, CandidateGenerationResult,
+    apply_hostile_three_extension, covered_moves, diagnose_candidates, generate_candidates,
+    movegen_backend_name, Candidate, CandidateDiagnostic, CandidateDiagnosticsResult,
+    CandidateGenerationResult,
 };
 pub use ordering::{getmi, order_candidates, order_candidates_root_classic, ordering_backend_name};
 pub use root::{

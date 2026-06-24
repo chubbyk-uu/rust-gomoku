@@ -1076,6 +1076,116 @@ Execution order:
    - Keep each Rapfi-inspired idea behind a measured correctness/performance
      gate before mixing it into the default Renju path.
 
+### SlowRenju Mapping Audit
+
+Audit baseline:
+
+- SlowRenju commit: `41007cf70762b62df77223da25c9605d0a853602`
+  (2019-05-07).
+- pygomoku commit: `e9b1ad8df6ce515b3cfde2ae2d5726a46fc0752d`.
+- Rust audit point: `779f1ac86a0dbe4f3839270dd73c68c98691e3dd`.
+- SlowRenju is GPL-3.0-or-later; this repository is also GPL-3.0, so adapted
+  implementation work is license-compatible. The audit records behavior and
+  provenance rather than copying source text into this document.
+
+Static-data verification:
+
+- SlowRenju `Common/global_value.cpp::para[]` contains 375 values. It is
+  number-for-number equal to `data/static/default_eval_para.txt`.
+- SlowRenju `Shape/ShapeList.cpp::ShapeList[2][3969]` contains 7938 entries.
+  Both rows are exactly equal to `data/static/shape_table.txt`.
+- `patterns::buckets::DOUBLE_SHAPE` is the same triangular 13-row mapping as
+  SlowRenju `Value/ValueWide.cpp::doubleShape`.
+
+Status meanings:
+
+- **Aligned**: source structure and current tests establish the intended
+  behavior.
+- **Different implementation**: semantics are intended to match but Rust uses
+  a safer or faster structure and still needs differential evidence where
+  noted.
+- **Rust extension**: deliberately outside SlowRenju parity; it must remain
+  rule-correct but cannot be validated by one-to-one source mapping.
+- **Open**: evidence is not yet strong enough to claim parity.
+
+| SlowRenju surface | SlowRenju source | Rust surface | Status | Audit result |
+|---|---|---|---|---|
+| Rule selection | `Common/main.cpp` (`rule 0/1/4`, `fflag`, `nosix`) | `rules::RuleSet`, `protocol::gomocup` | Aligned, narrower scope | Rust supports the requested freestyle and Renju modes. Standard Gomoku (`rule 1`) remains intentionally out of scope. Rule changes are locked after the first move. |
+| Renju one-dimensional shape table | `Shape/ShapeList.cpp`, `Shape/line.cpp` | `data/static/shape_table.txt`, `patterns::line` | Aligned | The complete two-row table is identical. Rust selects row 1 only for hypothetical black moves under Renju; white continues to use the freestyle row. |
+| Exact five / overline terminal semantics | `Shape/line4v.cpp::foulr`, `A5`, `overline` | `rules::forbidden`, `Board::is_winning_move_for_rule` | Aligned | Black exact five wins; black overline is forbidden and is not a win. White still wins with five or more. |
+| Double-four | `line4v::double4`, `B4` | `count_four_shapes_through`, four-direction sum | Different implementation, validated | Rust counts distinct four shapes, including same-direction multiplicity. One-dimensional exhaustive tests and oracle fixtures cover the rare window/overline boundaries. |
+| Recursive true double-three | `line4v::A3r`, recursive `foulr` and `A5test` | `is_true_open_three_direction`, recursive `is_legal_black_gain` | Different implementation, validated | Both require an apparent three to have a legal black gain that creates a real open four. Rust has hand fixtures, dense stress, and Rapfi/`renju_forbid` comparison. |
+| Forbidden reason priority | `foulr`: exact five, double-four, double-three, overline | exact five, overline, double-four, double-three | Intentional convention difference | Legality agrees. Coexisting overline/double-three positions can report different primary types; the oracle harness accepts this only when every implementation still says forbidden. |
+| `ValueWide` shape/value caches | `Value/ValueWide.cpp` (`shapeM`, `valueM`, `attackM`) | `eval::EvalCaches`, `eval::local` | Aligned, different storage | Direction shapes, bucket selection, attack levels, snapshots, and incremental updates have direct Rust equivalents. Rust also maintains bucket counts for faster global evaluation. |
+| Renju incremental radius | `ValueWideCompute`: `ar=(nosix||fflag)?5:4` | `value_wide_compute_for_rule`: Renju radius 5, freestyle radius 4 | Aligned | The extra Renju cell needed to observe six-in-a-row is present. |
+| Non-local double-three invalidation | `pretrd3` / `trd3` forced recomputation | full-board apparent-double-three early-out refresh | Aligned semantics, different implementation | Rust deliberately uses a stateless scan so snapshot/restore stays simple. Incremental-vs-full randomized regression covers the non-monotonic legality flip. |
+| Black forbidden-point eval suppression | `ComputeValue1b`: clear `valueM/attackM` for forbidden black points | `compute_bucket_and_attack_for_rule` | Aligned | Exact five keeps priority. Apparent four/overline points use the shape cache gate; apparent double-threes call the full recursive detector. Suppression-vs-detector gates passed hand and dense fixtures. |
+| Evaluation parameter tables | `para[]`, `LASTEVAL`, `NEXTEVAL`, `ATTACKVALUE`, `DEFENDVALUE` | `DEFAULT_EVAL_PARA`, `EvalBucketTables` | Aligned | All 375 values are identical, including the distinct last/next/attack/defend tables and search parameters. There is no separate missing “Renju weight table” in SlowRenju; Renju changes cached black point semantics while reusing these tables. |
+| Global `ValueW` evaluation | `Value/ValueW.cpp::value` | `eval::global_eval` | Aligned | Offensive/defensive bucket sums, DGN term, LAST5 recursion, NEXT4 and NEXT43 branches map directly to Rust. |
+| White exploiting a forbidden black block | `ValueW.cpp:158` (`fflag & moveValue1bWide(...) < 0`) | `evaluate_last5_branch` full detector gate | Aligned | Rust uses explicit forbidden classification instead of relying on the negative cached move value. A focused test proves white wins when black's only block is forbidden. |
+| Main move generation | `AI/AIx.cpp` covered set, `moveValue1bWide`, attack priorities | `search::movegen`, `CoverageTracker` | Aligned classic flow; Renju differential open | The 32-point coverage set, move score, hostile-three bonus, forcing collapse, and ordering descend from SlowRenju/pygomoku. Renju black points are filtered through the cache prefilter plus full detector. A direct SlowRenju-vs-Rust candidate differential has not yet been built. |
+| Fallback move scoring | `Value/ValueB.cpp::value1b`, `AI/AIs.cpp` | `search::root::fallback_ai_move` | Different implementation, open | The scoring formula is ported and Rust explicitly excludes illegal Renju moves. A fixture-level differential is still needed, especially for legal black points adjacent to forbidden shapes. |
+| Root VCF | `AIx.cpp::rootsearch`, `VCF.cpp::VCFd_hash` | `RootSearcher`, `VCFSearcher` | Aligned plus fixes | Depth normalization and core threat flow map to SlowRenju. Rust additionally supports multi-reply handling and explicitly removes forbidden attacker/defender moves. Renju tactical fixtures cover overline, double-four, double-three, and forbidden black defence. |
+| Opponent VCF root filter | `AIx.cpp` variable `vctt`: test each root move against opponent `VCFd_hash` | `RootSearcher::apply_opponent_vcf_filter` | Aligned | Despite the SlowRenju variable name, this is an opponent-VCF evasion filter, not a general VCT search. |
+| General VCT | no independent equivalent in this SlowRenju revision | `VCTSearcher`, rule-aware `ThreatBoardView` | Rust extension | It must be validated by Rust tactical fixtures and rule-legality invariants, not claimed as a direct SlowRenju port. |
+| Search tree legality | forbidden points suppressed indirectly by `valueM`, plus `foulr` inside VCF | rule-aware movegen and tactical search; internal play skips duplicate recheck | Aligned with stronger explicit contract | Every emitted black candidate is checked or proven safe by the Renju cache gate. Tree play assumes movegen already established legality. |
+| Protocol input | Gomocup `INFO rule`, board reconstruction | `GomocupProtocol` | Aligned | Standard `START -> INFO rule -> BEGIN` works; illegal Renju black input is rejected; one game cannot change rules after its first move. |
+| GUI | no browser equivalent | `bin/gomoku_gui` | Rust extension | New-game rule selection, forbidden input rejection, and black-turn forbidden-point red crosses are implemented and smoke-tested. |
+
+Current conclusion:
+
+- Forbidden legality, static shape data, value tables, black suppression,
+  non-local double-three invalidation, and the key white `ValueW` forbidden
+  defence branch are substantially aligned with SlowRenju.
+- The main remaining uncertainty is no longer “missing Renju weights.” It is
+  behavioral strength evidence: candidate selection, fallback scoring, and
+  complete-game search choices have not yet been compared against a runnable
+  SlowRenju Renju baseline.
+- The independent Rust VCT implementation is a separate extension. Its Renju
+  correctness is covered by focused tests, but its strength impact must be
+  measured rather than inferred from SlowRenju.
+
+Candidate diagnostic status:
+
+- `diagnose_candidates` reuses the same analysis and selection functions as
+  production movegen. It reports every covered point's raw and hostile-adjusted
+  move value, attack levels, full-detector requirement, forbidden type,
+  rule legality, retention state, rejection reason, order score, and final
+  classic-order rank.
+- `src/bin/renju_candidate_probe.rs` emits those diagnostics as JSON for one
+  JSON case or a JSONL case file:
+
+  ```bash
+  cargo run --quiet --bin renju_candidate_probe -- \
+      --case-file cases/renju/candidate_diagnostic_cases.jsonl
+  ```
+
+- The durable diagnostic fixtures cover exact-five priority, overline,
+  double-four, and recursive double-three. The three forbidden fixtures expose
+  the target point as `requires_full_detector=true`, with the expected
+  forbidden type and `rejection_reason=forbidden`; exact five remains legal and
+  is retained as the forcing candidate.
+- A movegen unit regression builds the double-three position through normal
+  alternating play and proves that incremental and full Renju caches produce
+  identical complete diagnostics after every move.
+- Refactoring movegen around the shared diagnostic analysis did not change the
+  classic root surface: all 11 default root diff cases still match.
+- The release movegen probe measured about 1542 ns per Renju node after
+  avoiding a large by-value analysis return, versus the Phase 9 baseline of
+  about 1604 ns/node. The diagnostic path itself is not called by search.
+
+Next audit/implementation gates:
+
+1. Add a durable static provenance check that parses the SlowRenju checkout
+   when available and confirms both `para[]` and `ShapeList` equality. Keep
+   normal tests independent of the external checkout.
+2. Add fallback-scoring fixtures covering exact five, overline, double-four,
+   recursive double-three, and legal near-forbidden black points.
+3. Establish a SlowRenju-compatible match/probe executable or document why the
+   Windows-era source cannot be reproduced reliably on the current host.
+4. Only after candidate and fallback parity is understood, run Renju strength
+   matches and decide whether any eval/search changes are needed.
+
 ## Fixture Format Proposal
 
 Use JSONL so cases are easy to append:
