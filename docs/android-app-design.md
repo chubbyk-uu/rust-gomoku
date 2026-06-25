@@ -29,6 +29,7 @@ Implementation progress on `feature/android-app`:
 - Phase 2 shared controller extraction is complete.
 - Phase 3 Android project skeleton is complete.
 - Phase 4 Rust JNI bridge is complete.
+- Phase 5 Kotlin bridge and search thread are complete.
 - The desktop HTTP GUI now uses `GameController`.
 - Controller tests cover forbidden input, first-move search, undo, profile
   switching, invalid sides, and stale search completion.
@@ -37,14 +38,27 @@ Implementation progress on `feature/android-app`:
 - Gradle 9.4.1, Android Gradle Plugin 9.2.0, Kotlin Activity,
   `WebViewAssetLoader`, local assets, and the ARM64 Rust packaging task are in
   place.
-- `test`, `lint`, and `assembleDebug` pass. The resulting 2.3 MiB debug APK
-  contains only `arm64-v8a`, has no `INTERNET` permission, and has a valid
-  debug signature.
+- `test`, `lint`, and `assembleDebug` pass. The debug APK (4.6 MiB after the
+  `androidx.activity`/`lifecycle-viewmodel` dependencies are added) contains only
+  `arm64-v8a`, packages the 714 KiB stripped `librust_gomoku_android.so` exporting
+  all three `nativeCreate`/`nativeRequest`/`nativeDestroy` symbols, has no
+  `INTERNET` permission, and has a valid debug signature.
 - The bridge implements native create/request/destroy handles, strict JSON
   command validation, lock-free search execution, stale-result protection
   through `GameController`, and structured errors.
-- The APK currently displays a placeholder mobile board. Kotlin and WebView
-  gameplay wiring starts in Phase 5.
+- Phase 5 wiring is in place: `NativeBridge` declares the JNI contract,
+  `GameViewModel` owns the native handle across configuration changes and
+  serializes every request onto a single background thread (so engine search
+  never runs on the UI thread), and `MainActivity` exposes a narrow
+  `@JavascriptInterface` command bridge whose responses are marshalled back to
+  the WebView on the main thread. The packaged page now drives `state`,
+  `new_game`, `play`, `undo`, and `engine_move` end to end, renders stones, the
+  last-move marker, and Renju forbidden crosses, and re-syncs through `state`
+  after rotation recreates the page. The UI-thread, rotation, and stale-result
+  behaviors are device-confirmed in Phase 8; stale protection is already covered
+  by the `GameController` generation tests.
+- The mobile page is still a functional placeholder; the polished phone layout,
+  diagnostics sheet, and responsive viewport work begin in Phase 6.
 
 ## Goals
 
@@ -423,6 +437,8 @@ Gate:
 
 ### Phase 5: Kotlin Bridge And Search Thread
 
+Status: complete.
+
 1. Add `GameViewModel`, executor, and bridge.
 2. Connect page load to `state`.
 3. Implement new game, play, undo, and profile requests.
@@ -523,6 +539,8 @@ Stop and diagnose before proceeding when:
 
 ## Next Implementation Step
 
-Implement Phase 5 on `feature/android-app`: add `NativeBridge`,
-`GameViewModel`, and a single-thread executor; connect the packaged page to the
-JNI request protocol without running search on the Android main thread.
+Implement Phase 6 on `feature/android-app`: extract reusable board rendering and
+game commands from the desktop page into the mobile layout, add the new-game
+sheet and compact status/actions, move desktop diagnostics into an advanced
+sheet, and verify the responsive rules at the target viewports. The Phase 5
+bridge, executor, and JNI transport are already in place to build on.

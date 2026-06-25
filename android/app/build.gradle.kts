@@ -76,4 +76,6 @@ tasks.named("preBuild").configure {
 
 dependencies {
     implementation("androidx.webkit:webkit:1.16.0")
+    implementation("androidx.activity:activity:1.9.3")
+    implementation("androidx.lifecycle:lifecycle-viewmodel:2.8.7")
 }
