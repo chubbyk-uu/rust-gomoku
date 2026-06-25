@@ -8,6 +8,14 @@
 </head>
 <body>
   <div id="app">
+    <header id="titlebar">
+      <span id="app-title">rust_gomoku</span>
+      <div id="meta">
+        <span class="chip" id="meta-rule">—</span>
+        <span class="chip" id="meta-side">—</span>
+        <span class="chip" id="meta-moves">第 0 手</span>
+      </div>
+    </header>
     <header id="statusbar">
       <span id="turn-dot" class="none" aria-hidden="true"></span>
       <span id="status-msg">准备连接引擎…</span>
@@ -38,8 +46,8 @@
     <div class="field">
       <label>规则</label>
       <div class="segmented" id="opt-rule">
-        <button data-value="renju" aria-pressed="true">有禁手</button>
-        <button data-value="freestyle" aria-pressed="false">无禁手</button>
+        <button data-value="freestyle" aria-pressed="true">无禁手</button>
+        <button data-value="renju" aria-pressed="false">有禁手</button>
       </div>
     </div>
     <div class="field">

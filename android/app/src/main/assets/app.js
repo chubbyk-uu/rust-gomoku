@@ -210,6 +210,14 @@ function render(state) {
   const msg = state.error || state.status || "";
   statusMsg.textContent = msg;
   statusMsg.classList.toggle("error", Boolean(state.error));
+  document.getElementById("statusbar").classList.toggle("thinking", Boolean(state.engine_thinking) && !state.error);
+  // title-bar meta
+  const isRenju = state.params && state.params.rule === "renju";
+  const ruleChip = document.getElementById("meta-rule");
+  ruleChip.textContent = isRenju ? "有禁手" : "无禁手";
+  ruleChip.classList.toggle("renju", isRenju);
+  document.getElementById("meta-side").textContent = state.human_side === WHITE ? "你执白" : "你执黑";
+  document.getElementById("meta-moves").textContent = "第 " + state.move_count + " 手";
   // controls
   document.getElementById("btn-undo").disabled = busy || state.engine_thinking || state.move_count === 0;
   // advanced panel

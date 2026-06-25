@@ -27,7 +27,7 @@ body { user-select: none; -webkit-user-select: none; }
 #app {
   height: 100dvh;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: clamp(6px, 1.6vw, 12px);
   padding:
     max(10px, env(safe-area-inset-top))
@@ -36,34 +36,71 @@ body { user-select: none; -webkit-user-select: none; }
     max(10px, env(safe-area-inset-left));
 }
 
-#statusbar {
-  min-height: 44px;
+#titlebar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
-  padding: 4px 6px;
+  padding: 2px 6px;
+}
+#app-title {
+  font-size: clamp(16px, 4.4vw, 19px);
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  color: var(--ink);
+}
+#meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.chip {
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(23, 107, 85, 0.10);
+  color: var(--accent);
+  border: 1px solid rgba(23, 107, 85, 0.22);
+  white-space: nowrap;
+}
+.chip.renju { background: rgba(179, 51, 31, 0.10); color: var(--danger); border-color: rgba(179, 51, 31, 0.24); }
+
+#statusbar {
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  box-shadow: 0 2px 8px rgba(25, 23, 20, 0.08);
 }
 #turn-dot {
   flex: none;
-  width: 14px;
-  height: 14px;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
-  border: 1px solid var(--line);
+  border: 1.5px solid var(--line);
   background: var(--ink);
 }
 #turn-dot.white { background: #f7f5ef; }
 #turn-dot.thinking { background: var(--accent); border-color: var(--accent); animation: pulse 1s ease-in-out infinite; }
-#turn-dot.none { background: transparent; }
+#turn-dot.none { background: transparent; border-style: dashed; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
 #status-msg {
-  font-size: clamp(13px, 3.6vw, 16px);
-  line-height: 1.25;
-  color: var(--muted);
+  font-size: clamp(14px, 3.9vw, 17px);
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 #status-msg.error { color: var(--danger); }
+#statusbar.thinking #status-msg { color: var(--accent); }
 
 #board-area {
   min-height: 0;
@@ -88,7 +125,18 @@ canvas#board {
   display: flex;
   gap: 8px;
 }
-#actionbar button { flex: 1; }
+#actionbar button { flex: 1; font-weight: 600; }
+/* distinct colour per action */
+#btn-undo {
+  background: rgba(179, 51, 31, 0.08);
+  color: var(--danger);
+  border-color: rgba(179, 51, 31, 0.30);
+}
+#btn-more {
+  background: rgba(25, 23, 20, 0.06);
+  color: var(--ink);
+  border-color: var(--hairline);
+}
 
 /* ---- Buttons ----------------------------------------------------------- */
 button {
@@ -198,32 +246,18 @@ details.advanced > summary {
 /* ---- Landscape / tablet: board left, panel right ----------------------- */
 @media (orientation: landscape) {
   #app {
-    grid-template-rows: 1fr;
-    grid-template-columns: minmax(0, 1fr) clamp(200px, 30vw, 280px);
-    grid-template-areas: "board side";
-    align-items: stretch;
-  }
-  #board-area { grid-area: board; }
-  #statusbar {
-    grid-area: side;
-    align-self: start;
-    align-items: flex-start;
-  }
-  #actionbar {
-    grid-area: side;
-    align-self: end;
-    flex-direction: column;
-  }
-  /* stack status at top and actions at bottom of the side column */
-  #app {
-    grid-template-rows: auto 1fr auto;
-    grid-template-columns: minmax(0, 1fr) clamp(200px, 30vw, 280px);
+    grid-template-columns: minmax(0, 1fr) clamp(210px, 30vw, 300px);
+    grid-template-rows: auto auto 1fr auto;
     grid-template-areas:
+      "board title"
       "board status"
       "board ."
       "board actions";
+    align-items: stretch;
   }
-  #statusbar { grid-area: status; }
-  #actionbar { grid-area: actions; }
   #board-area { grid-area: board; grid-row: 1 / -1; }
+  #titlebar { grid-area: title; flex-direction: column; align-items: flex-start; gap: 8px; }
+  #meta { justify-content: flex-start; }
+  #statusbar { grid-area: status; }
+  #actionbar { grid-area: actions; flex-direction: column; }
 }
