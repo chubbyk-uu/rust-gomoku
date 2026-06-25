@@ -578,6 +578,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <option value="hard" selected>困难 · d8 / w40 · VCF/VCT</option>
             </select>
           </label>
+          <div class="setting-row">
+            <span class="setting-label">落子音效</span>
+            <button id="sound-toggle" class="secondary" onclick="toggleSound()">开</button>
+          </div>
         </div>
         <div class="actions">
           <button class="warn" onclick="undo()">悔棋</button>
@@ -603,11 +607,77 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let state = null;
     let selectedRule = 'freestyle';
     let announcedResult = null;
+    let soundOn = true;
+    let prevMoveCount = null;
+
+    // Stone-placement sound, synthesized via Web Audio (no asset file).
+    let audioCtx = null;
+    function unlockAudio() {
+      try {
+        if (!audioCtx) {
+          const AC = window.AudioContext || window.webkitAudioContext;
+          if (!AC) return;
+          audioCtx = new AC();
+        }
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+      } catch (e) { /* audio unsupported */ }
+    }
+    function playStoneSound() {
+      if (!soundOn) return;
+      unlockAudio();
+      if (!audioCtx || audioCtx.state !== 'running') return;
+      const c = audioCtx;
+      const now = c.currentTime;
+      const dur = 0.05;
+      const frames = Math.max(1, Math.floor(c.sampleRate * dur));
+      const buffer = c.createBuffer(1, frames, c.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < frames; i++) {
+        const decay = 1 - i / frames;
+        data[i] = (Math.random() * 2 - 1) * decay * decay;
+      }
+      const noise = c.createBufferSource();
+      noise.buffer = buffer;
+      const bandpass = c.createBiquadFilter();
+      bandpass.type = 'bandpass';
+      bandpass.frequency.value = 1900;
+      bandpass.Q.value = 0.9;
+      const noiseGain = c.createGain();
+      noiseGain.gain.value = 0.5;
+      noise.connect(bandpass); bandpass.connect(noiseGain); noiseGain.connect(c.destination);
+      noise.start(now); noise.stop(now + dur);
+      const osc = c.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(230, now);
+      osc.frequency.exponentialRampToValueAtTime(120, now + 0.045);
+      const oscGain = c.createGain();
+      oscGain.gain.setValueAtTime(0.45, now);
+      oscGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.05);
+      osc.connect(oscGain); oscGain.connect(c.destination);
+      osc.start(now); osc.stop(now + 0.05);
+    }
+    function maybePlayStoneSound() {
+      if (!state) return;
+      if (prevMoveCount !== null && state.move_count === prevMoveCount + 1) {
+        playStoneSound();
+      }
+      prevMoveCount = state.move_count;
+    }
+    function toggleSound() {
+      soundOn = !soundOn;
+      const btn = document.getElementById('sound-toggle');
+      btn.textContent = soundOn ? '开' : '关';
+      btn.classList.toggle('primary', soundOn);
+      btn.classList.toggle('secondary', !soundOn);
+      if (soundOn) unlockAudio();
+    }
+    window.addEventListener('pointerdown', unlockAudio);
 
     async function api(path) {
       const res = await fetch(path, { method: path === '/state' ? 'GET' : 'POST' });
       if (!res.ok) throw new Error(await res.text());
       state = await res.json();
+      maybePlayStoneSound();
       draw();
       renderInfo();
     }

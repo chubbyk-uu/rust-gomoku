@@ -40,6 +40,9 @@ class MainActivity : ComponentActivity() {
             settings.allowFileAccess = false
             settings.allowContentAccess = false
             settings.domStorageEnabled = false
+            // Allow the synthesized stone-placement sound to play; the page still
+            // resumes its AudioContext from a user gesture.
+            settings.mediaPlaybackRequiresUserGesture = false
             webViewClient = LocalContentWebViewClient(assetLoader)
         }
 

@@ -62,6 +62,8 @@ let lastState = null;     // latest controller snapshot
 let ghost = null;         // pending stone awaiting same-point confirmation: {x,y}
 let busy = false;         // a native round-trip (incl. engine search) is running
 let showNumbers = false;  // render every move number vs. only the last marker
+let soundOn = true;       // play a click when a stone is placed
+let prevMoveCount = null; // tracks placements to trigger the stone sound
 let announcedResult = null;
 
 // Board geometry, recomputed on resize (CSS-pixel logical space).
@@ -211,8 +213,71 @@ function haptic(ms) {
   try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) { /* unsupported */ }
 }
 
+// Stone-placement sound, synthesized via Web Audio (no bundled asset). The
+// AudioContext starts suspended until a user gesture, so unlockAudio() is also
+// called from the first pointer interaction.
+let audioCtx = null;
+function unlockAudio() {
+  try {
+    if (!audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      audioCtx = new AC();
+    }
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch (e) { /* audio unsupported */ }
+}
+function playStoneSound() {
+  if (!soundOn) return;
+  unlockAudio();
+  if (!audioCtx || audioCtx.state !== "running") return;
+  const ctx = audioCtx;
+  const now = ctx.currentTime;
+  // Sharp filtered noise burst — the wooden "clack".
+  const dur = 0.05;
+  const frames = Math.max(1, Math.floor(ctx.sampleRate * dur));
+  const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < frames; i += 1) {
+    const decay = 1 - i / frames;
+    data[i] = (Math.random() * 2 - 1) * decay * decay;
+  }
+  const noise = ctx.createBufferSource();
+  noise.buffer = buffer;
+  const bandpass = ctx.createBiquadFilter();
+  bandpass.type = "bandpass";
+  bandpass.frequency.value = 1900;
+  bandpass.Q.value = 0.9;
+  const noiseGain = ctx.createGain();
+  noiseGain.gain.value = 0.5;
+  noise.connect(bandpass);
+  bandpass.connect(noiseGain);
+  noiseGain.connect(ctx.destination);
+  noise.start(now);
+  noise.stop(now + dur);
+  // Low pitched "thock" body for weight.
+  const osc = ctx.createOscillator();
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(230, now);
+  osc.frequency.exponentialRampToValueAtTime(120, now + 0.045);
+  const oscGain = ctx.createGain();
+  oscGain.gain.setValueAtTime(0.45, now);
+  oscGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.05);
+  osc.connect(oscGain);
+  oscGain.connect(ctx.destination);
+  osc.start(now);
+  osc.stop(now + 0.05);
+}
+
 function render(state) {
   lastState = state;
+  // play a click when exactly one stone was added since the last render
+  // (covers both the human's confirmed move and each engine reply, but not
+  // undo, new game, ghost previews, or the optimistic thinking re-render)
+  if (prevMoveCount !== null && state.move_count === prevMoveCount + 1) {
+    playStoneSound();
+  }
+  prevMoveCount = state.move_count;
   // turn indicator
   turnDot.className = "";
   if (state.engine_thinking) {
@@ -487,6 +552,18 @@ function bindEvents() {
     numBtn.textContent = showNumbers ? "开" : "关";
     draw();
   });
+
+  const soundBtn = document.getElementById("opt-sound");
+  soundBtn.addEventListener("click", () => {
+    soundOn = !soundOn;
+    soundBtn.setAttribute("aria-pressed", String(soundOn));
+    soundBtn.textContent = soundOn ? "开" : "关";
+    if (soundOn) unlockAudio();
+  });
+
+  // Resume the AudioContext on the first user gesture so engine-first moves can
+  // also play (Web Audio starts suspended until a gesture).
+  window.addEventListener("pointerdown", unlockAudio);
 
   window.addEventListener("resize", resize);
   window.addEventListener("orientationchange", resize);
