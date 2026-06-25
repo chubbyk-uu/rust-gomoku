@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Run Gradle with the host proxy applied to the build daemon.
+#
+# The proxy endpoint is resolved at runtime so the WSL gateway IP is never
+# hardcoded (it changes between WSL restarts). Gradle dependency resolution runs
+# in the daemon JVM, and command-line -D system properties are forwarded there,
+# so the proxy is passed as -Dhttp(s).proxyHost/Port rather than via GRADLE_OPTS
+# (which only affects the client JVM).
+#
+# Proxy source order:
+#   1. $HTTPS_PROXY / $HTTP_PROXY (set by the shell on WSL, e.g. http://<gw>:7890)
+#   2. fallback: default route gateway (ip route) + port 7890
+#
+# Usage: ./gradlew-proxy <same args as ./gradlew>, e.g. ./gradlew-proxy assembleDebug
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+
+proxy_url="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"
+
+if [ -z "$proxy_url" ]; then
+  gw="$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
+  [ -n "$gw" ] && proxy_url="http://${gw}:7890"
+fi
+
+args=()
+if [ -n "$proxy_url" ]; then
+  hostport="${proxy_url#*://}"   # strip scheme
+  hostport="${hostport%%/*}"     # strip any trailing path
+  host="${hostport%%:*}"
+  port="${hostport##*:}"
+  [ "$port" = "$host" ] && port=7890
+  echo "[gradlew-proxy] using proxy ${host}:${port}" >&2
+  args+=(
+    -Dhttp.proxyHost="$host"  -Dhttp.proxyPort="$port"
+    -Dhttps.proxyHost="$host" -Dhttps.proxyPort="$port"
+    -Dhttp.nonProxyHosts="localhost|127.0.0.1|::1"
+  )
+else
+  echo "[gradlew-proxy] no proxy found; running direct" >&2
+fi
+
+exec "$here/gradlew" ${args[@]+"${args[@]}"} "$@"
