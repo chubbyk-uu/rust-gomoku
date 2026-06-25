@@ -2,8 +2,8 @@
 
 ## Status
 
-This document defines the implementation plan for an Android version of
-`rust_gomoku`. The Android application has not been implemented yet.
+This document defines the implementation plan and records progress for the
+Android version of `rust_gomoku`.
 
 Development should start on a dedicated `feature/android-app` branch while
 remaining in this repository. The engine, forbidden-move rules, evaluation,
@@ -20,20 +20,27 @@ The local WSL build environment has been verified with:
 - Rust target `aarch64-linux-android`
 - `cargo-ndk` 4.1.2
 
-The existing Rust library has already completed an optimized ARM64 Android
-cross-build. This proves the toolchain baseline only; it does not mean that a
-JNI library or APK exists.
+The existing Rust library and the Android bridge crate have completed optimized
+ARM64 Android cross-builds.
 
 Implementation progress on `feature/android-app`:
 
 - Phase 1 baseline is complete.
 - Phase 2 shared controller extraction is complete.
+- Phase 3 Android project skeleton is complete.
 - The desktop HTTP GUI now uses `GameController`.
 - Controller tests cover forbidden input, first-move search, undo, profile
   switching, invalid sides, and stale search completion.
 - Full Rust tests, Linux release builds, ARM64 Android cross-build, all 11 root
   diff cases, and a desktop HTTP workflow smoke passed after the refactor.
-- No Gradle project, JNI library, Kotlin code, mobile assets, or APK exists yet.
+- Gradle 9.4.1, Android Gradle Plugin 9.2.0, Kotlin Activity,
+  `WebViewAssetLoader`, local assets, and the ARM64 Rust packaging task are in
+  place.
+- `test`, `lint`, and `assembleDebug` pass. The resulting 1.6 MiB debug APK
+  contains only `arm64-v8a`, has no `INTERNET` permission, and has a valid
+  debug signature.
+- The APK currently displays a placeholder mobile board. JNI gameplay wiring
+  starts in Phase 4.
 
 ## Goals
 
@@ -65,7 +72,7 @@ src/bin/gomoku_gui.rs            desktop HTTP and browser adapter
 android/
 ├── app/
 │   └── src/main/
-│       ├── java/...             Activity, ViewModel, WebView bridge
+│       ├── kotlin/...           Activity, ViewModel, WebView bridge
 │       ├── assets/              mobile HTML, CSS, and JavaScript
 │       └── res/                 manifest resources, theme, and icons
 ├── rust_bridge/                 JNI `cdylib` crate
@@ -354,7 +361,7 @@ Gate:
 
 ### Phase 3: Android Project Skeleton
 
-Status: next.
+Status: complete.
 
 1. Add Gradle wrapper and application module.
 2. Add a minimal Activity and local WebView page.
@@ -364,13 +371,17 @@ Status: next.
 
 Gate:
 
-- `./gradlew assembleDebug` succeeds in WSL.
-- APK contains only `arm64-v8a` native code.
-- Manifest has no network permission.
+- `./gradlew test lint assembleDebug` succeeds in WSL.
+- APK contains only `arm64-v8a` native code and the optimized
+  `librust_gomoku_android.so`.
+- Manifest has no network permission and the debug signature verifies.
 
 ### Phase 4: Rust JNI Bridge
 
-1. Add the `android/rust_bridge` `cdylib`.
+Status: next.
+
+1. Replace the placeholder export in the `android/rust_bridge` `cdylib` with
+   the JNI contract.
 2. Implement handle creation, request dispatch, and destruction.
 3. Connect the bridge to the shared controller.
 4. Add panic containment and structured errors.
@@ -484,7 +495,6 @@ Stop and diagnose before proceeding when:
 
 ## Next Implementation Step
 
-Implement Phase 3 on `feature/android-app`: add the Gradle wrapper and minimal
-Android application, package only `arm64-v8a`, and prove that
-`./gradlew assembleDebug` produces an APK containing an optimized Rust
-placeholder library without requesting network access.
+Implement Phase 4 on `feature/android-app`: connect the Rust bridge to
+`GameController`, add handle lifecycle and JSON request dispatch, contain
+panics, and cross-build the tested JNI library for `arm64-v8a`.

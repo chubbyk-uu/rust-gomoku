@@ -1,5 +1,12 @@
 /target/
 /dist/
+/android/.gradle/
+/android/**/build/
+/android/rust_bridge/target/
+/android/local.properties
+/android/.idea/
+/android/*.iml
+/android/**/*.iml
 /AGENTS.md
 /.codex
 /.codex/
