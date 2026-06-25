@@ -25,7 +25,8 @@
 GUI 入口为了降低手动对局体感等待，默认单独开启 `overlap_vct_alphabeta`；Gomocup、diff、case probe 和库默认仍保持关闭。
 历史性能实验和止损结论记录在 `docs/perf-log.md`，README 不重复维护失败方案清单。
 Android 架构、手机界面、JNI 边界和分阶段验证门槛记录在
-`docs/android-app-design.md`；Android 版本尚未实现。
+`docs/android-app-design.md`。Android 应用已可构建 ARM64 APK，并通过
+JNI 使用共享 Rust 控制器。
 
 ## 默认参数
 
@@ -50,6 +51,18 @@ Android 架构、手机界面、JNI 边界和分阶段验证门槛记录在
 | `nonroot_vcf` | 关闭 |
 | `static_board` | 开启 |
 | `dynamic_board_margin` | `4` |
+
+桌面 GUI 和 Android 应用提供四档共享难度：
+
+| 难度 | 搜索参数 | VCF / VCT |
+|---|---:|---:|
+| 容易 | `d2 / w10` | 关闭 |
+| 一般 | `d4 / w20` | 关闭 |
+| 进阶 | `d6 / w30` | 开启 |
+| 困难 | `d8 / w40` | 开启 |
+
+困难是默认难度，正好对应当前引擎固定搜索默认值。难度与 Base/Fast
+互相独立：难度控制深度、宽度和战术搜索，Base/Fast 控制排序行为。
 
 与 Python reference 严格差分或复现实验时，通常显式使用 `depth=6,width=20,root_vct_depth=4`。
 
@@ -100,7 +113,7 @@ printf 'START 15\nINFO rule 4\nBEGIN\nEND\n' | cargo run --quiet --bin gomocup_e
 cargo run --release --bin gomoku_gui
 ```
 
-GUI 会自动用默认浏览器打开 `http://127.0.0.1:18080`；如需关闭自动打开行为，可加 `--no-open-browser`。GUI 支持执黑/执白、无禁手或连珠规则、悔棋、重新开局、Base/Fast 模式切换、异步思考、手数显示和状态面板；快捷键 `U` 悔棋，`R` 重新开局。规则选择只在新局开始时生效；连珠黑方回合会用红叉标出禁手点，点击禁手点会被拒绝且不会落子。Base/Fast 切换只在引擎未思考时允许，不重置当前棋局，只影响下一次引擎思考。
+GUI 会自动用默认浏览器打开 `http://127.0.0.1:18080`；如需关闭自动打开行为，可加 `--no-open-browser`。GUI 支持执黑/执白、无禁手或连珠规则、四档难度、悔棋、重新开局、Base/Fast 模式切换、异步思考、手数显示、胜负弹窗和状态面板；快捷键 `U` 悔棋，`R` 重新开局。规则选择只在新局开始时生效；连珠黑方回合会用红叉标出禁手点，点击禁手点会被拒绝且不会落子。难度和 Base/Fast 只在引擎未思考时允许切换，不重置当前棋局，只影响下一次引擎思考。
 
 Gomocup engine：
 

@@ -18,8 +18,8 @@ pub mod zobrist;
 
 pub use app::{
     EngineSearchCompletion, EngineSearchTask, ForbiddenPointSnapshot, GameController,
-    GameMoveSnapshot, GameParamsSnapshot, GameStateSnapshot, SearchResultSnapshot,
-    SearchTraceSnapshot,
+    GameMoveSnapshot, GameParamsSnapshot, GameStateSnapshot, SearchDifficulty,
+    SearchResultSnapshot, SearchTraceSnapshot,
 };
 pub use board::{move_to_rc, move_to_xy, rc_to_move, xy_to_move, Board, BoardError};
 pub use config::{

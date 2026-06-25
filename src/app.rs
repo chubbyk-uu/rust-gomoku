@@ -10,6 +10,69 @@ use crate::{
     BOARD_SIZE, EMPTY, WHITE,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchDifficulty {
+    Easy,
+    Normal,
+    Advanced,
+    Hard,
+}
+
+impl SearchDifficulty {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Easy => "easy",
+            Self::Normal => "normal",
+            Self::Advanced => "advanced",
+            Self::Hard => "hard",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Easy => "容易",
+            Self::Normal => "一般",
+            Self::Advanced => "进阶",
+            Self::Hard => "困难",
+        }
+    }
+
+    fn settings(self) -> (i32, i32, bool) {
+        match self {
+            Self::Easy => (2, 10, false),
+            Self::Normal => (4, 20, false),
+            Self::Advanced => (6, 30, true),
+            Self::Hard => (8, 40, true),
+        }
+    }
+
+    fn detect(config: &EngineConfig) -> Option<Self> {
+        [Self::Easy, Self::Normal, Self::Advanced, Self::Hard]
+            .into_iter()
+            .find(|difficulty| {
+                let (depth, width, tactical) = difficulty.settings();
+                config.root_search.depth == depth
+                    && config.root_search.wide == width
+                    && config.runtime.compute_vcf == tactical
+                    && config.runtime.compute_vct == tactical
+            })
+    }
+}
+
+impl std::str::FromStr for SearchDifficulty {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.to_ascii_lowercase().as_str() {
+            "easy" => Ok(Self::Easy),
+            "normal" | "medium" => Ok(Self::Normal),
+            "advanced" => Ok(Self::Advanced),
+            "hard" => Ok(Self::Hard),
+            _ => Err(format!("unknown search difficulty: {raw}")),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct GameController {
     config: EngineConfig,
@@ -22,6 +85,7 @@ pub struct GameController {
     last_result: Option<SearchResult>,
     last_trace: Option<RootTrace>,
     last_search_ms: Option<f64>,
+    difficulty: Option<SearchDifficulty>,
     generation: u64,
 }
 
@@ -109,6 +173,7 @@ pub struct SearchTraceSnapshot {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct GameParamsSnapshot {
     pub profile: &'static str,
+    pub difficulty: &'static str,
     pub depth: i32,
     pub width: usize,
     pub compute_vcf: bool,
@@ -125,6 +190,7 @@ pub struct GameParamsSnapshot {
 
 impl GameController {
     pub fn new(config: EngineConfig) -> Self {
+        let difficulty = SearchDifficulty::detect(&config);
         Self {
             config,
             board: Board::new(),
@@ -136,6 +202,7 @@ impl GameController {
             last_result: None,
             last_trace: None,
             last_search_ms: None,
+            difficulty,
             generation: 0,
         }
     }
@@ -270,6 +337,29 @@ impl GameController {
         );
     }
 
+    pub fn set_difficulty(&mut self, difficulty: SearchDifficulty) {
+        if self.engine_thinking {
+            self.error = Some("引擎思考中，暂不能切换难度。".to_string());
+            return;
+        }
+        let (depth, width, tactical) = difficulty.settings();
+        self.config.root_search.depth = depth;
+        self.config.root_search.wide = width;
+        self.config.root_search.timed_max_wide = width;
+        self.config.runtime.compute_vcf = tactical;
+        self.config.runtime.compute_vct = tactical;
+        self.difficulty = Some(difficulty);
+        self.error = None;
+        self.last_result = None;
+        self.last_trace = None;
+        self.last_search_ms = None;
+        self.status = format!(
+            "已切换到{}难度（d{depth}/w{width}，VCF/VCT {}），下一次引擎思考生效。",
+            difficulty.label(),
+            if tactical { "开启" } else { "关闭" }
+        );
+    }
+
     pub fn set_error(&mut self, message: impl Into<String>) {
         self.error = Some(message.into());
     }
@@ -395,6 +485,10 @@ impl GameController {
             last_trace,
             params: GameParamsSnapshot {
                 profile: self.config.profile.as_str(),
+                difficulty: self
+                    .difficulty
+                    .map(SearchDifficulty::as_str)
+                    .unwrap_or("custom"),
                 depth: limits.max_depth,
                 width: limits.root_width,
                 compute_vcf: self.config.runtime.compute_vcf,
@@ -609,6 +703,39 @@ mod tests {
         assert_eq!(snapshot.move_count, 0);
         assert_eq!(snapshot.params.profile, "fast");
         assert!(snapshot.can_play);
+    }
+
+    #[test]
+    fn difficulty_presets_update_search_and_tactical_settings() {
+        let mut controller = GameController::new(load_default_config());
+        assert_eq!(controller.snapshot().params.difficulty, "hard");
+
+        for (difficulty, name, depth, width, tactical) in [
+            (SearchDifficulty::Easy, "easy", 2, 10, false),
+            (SearchDifficulty::Normal, "normal", 4, 20, false),
+            (SearchDifficulty::Advanced, "advanced", 6, 30, true),
+            (SearchDifficulty::Hard, "hard", 8, 40, true),
+        ] {
+            controller.set_difficulty(difficulty);
+            let params = controller.snapshot().params;
+            assert_eq!(params.difficulty, name);
+            assert_eq!(params.depth, depth);
+            assert_eq!(params.width, width);
+            assert_eq!(params.compute_vcf, tactical);
+            assert_eq!(params.compute_vct, tactical);
+        }
+    }
+
+    #[test]
+    fn difficulty_switch_is_rejected_while_searching() {
+        let mut controller = shallow_controller();
+        assert!(controller.new_game(WHITE, RuleSet::Freestyle));
+        let _task = controller.prepare_engine_search().unwrap();
+        controller.set_difficulty(SearchDifficulty::Easy);
+
+        let snapshot = controller.snapshot();
+        assert_eq!(snapshot.params.difficulty, "custom");
+        assert!(snapshot.error.unwrap().contains("暂不能切换难度"));
     }
 
     #[test]

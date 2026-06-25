@@ -36,6 +36,7 @@ function nativeRequest(payload) {
  * ===================================================================== */
 const BLACK = 1, WHITE = -1, EMPTY = 0;
 const GRID = 15;
+const UiLogic = window.GomokuUiLogic;
 const STARS = [[3, 3], [11, 3], [7, 7], [3, 11], [11, 11]];
 const COLORS = {
   board: "#d9a85f", line: "#33291d", black: "#191714", white: "#f7f5ef",
@@ -49,11 +50,19 @@ const ctx = canvas.getContext("2d");
 const statusMsg = document.getElementById("status-msg");
 const turnDot = document.getElementById("turn-dot");
 const toastEl = document.getElementById("toast");
+const difficultyNames = {
+  easy: "容易",
+  normal: "一般",
+  advanced: "进阶",
+  hard: "困难",
+  custom: "自定义",
+};
 
 let lastState = null;     // latest controller snapshot
 let ghost = null;         // pending stone awaiting same-point confirmation: {x,y}
 let busy = false;         // a native round-trip (incl. engine search) is running
 let showNumbers = false;  // render every move number vs. only the last marker
+let announcedResult = null;
 
 // Board geometry, recomputed on resize (CSS-pixel logical space).
 let size = 0, cell = 0, margin = 0;
@@ -63,12 +72,19 @@ let size = 0, cell = 0, margin = 0;
  * ===================================================================== */
 function resize() {
   const pad = 12; // #board-wrap padding (6px) * 2
-  const avail = Math.min(area.clientWidth, area.clientHeight);
-  size = Math.max(0, Math.floor(avail - pad));
+  const dimensions = UiLogic.boardDimensions(
+    area.clientWidth,
+    area.clientHeight,
+    window.innerWidth,
+    window.innerHeight,
+    pad,
+  );
+  const outerSize = dimensions.outerSize;
+  size = dimensions.canvasSize;
   if (size <= 0) return;
 
-  wrap.style.width = size + "px";
-  wrap.style.height = size + "px";
+  wrap.style.width = outerSize + "px";
+  wrap.style.height = outerSize + "px";
 
   const dpr = window.devicePixelRatio || 1;
   canvas.style.width = size + "px";
@@ -217,24 +233,58 @@ function render(state) {
   ruleChip.textContent = isRenju ? "有禁手" : "无禁手";
   ruleChip.classList.toggle("renju", isRenju);
   document.getElementById("meta-side").textContent = state.human_side === WHITE ? "你执白" : "你执黑";
+  document.getElementById("meta-difficulty").textContent =
+    difficultyNames[state.params.difficulty] || state.params.difficulty;
   document.getElementById("meta-moves").textContent = "第 " + state.move_count + " 手";
+  setSegmentValue("opt-side", state.human_side === WHITE ? "white" : "black");
+  setSegmentValue("opt-rule", state.params.rule);
+  setSegmentValue("opt-mode", state.params.profile);
+  if (state.params.difficulty !== "custom") {
+    setDifficultyValue(state.params.difficulty);
+  }
   // controls
-  document.getElementById("btn-undo").disabled = busy || state.engine_thinking || state.move_count === 0;
+  UiLogic.syncBusyControls(document, busy, state);
   // advanced panel
-  fillAdvanced(state.last_result);
+  fillAdvanced(state.last_result, state.params);
   draw();
+  showResultIfNeeded(state);
 }
 
-function fillAdvanced(res) {
+function fillAdvanced(res, params) {
   const set = (key, val) => {
     const el = document.querySelector(`[data-adv="${key}"]`);
     if (el) el.textContent = val;
   };
+  set("difficulty", difficultyNames[params.difficulty] || params.difficulty || "—");
   if (!res) { set("score", "—"); set("depth", "—"); set("nodes", "—"); set("ms", "—"); return; }
   set("score", res.score);
   set("depth", res.depth);
   set("nodes", res.nodes != null ? res.nodes.toLocaleString() : "—");
   set("ms", res.ms != null ? Math.round(res.ms) + " ms" : "—");
+}
+
+function setResultOpen(open) {
+  const dialog = document.getElementById("result-dialog");
+  const backdrop = document.getElementById("result-backdrop");
+  dialog.classList.toggle("open", open);
+  dialog.setAttribute("aria-hidden", String(!open));
+  backdrop.classList.toggle("open", open);
+  backdrop.setAttribute("aria-hidden", String(!open));
+}
+
+function showResultIfNeeded(state) {
+  const result = UiLogic.gameResult(state);
+  if (!result) {
+    announcedResult = null;
+    setResultOpen(false);
+    return;
+  }
+  if (announcedResult === result.key) return;
+  announcedResult = result.key;
+  document.getElementById("result-title").textContent = result.title;
+  document.getElementById("result-message").textContent = result.message;
+  document.getElementById("result-mark").className = result.tone;
+  setResultOpen(true);
 }
 
 /* ===================================================================== *
@@ -249,10 +299,12 @@ async function applyAndContinue(response) {
   let state = response.state;
   render(state);
   while (state.winner === EMPTY && state.side_to_move !== state.human_side) {
+    const settledState = state;
+    render(UiLogic.engineThinkingState(state));
     const moved = await nativeRequest({ op: "engine_move" });
     if (!moved.ok) {
-      statusMsg.textContent = (moved.error && moved.error.message) || "引擎落子失败";
-      statusMsg.classList.add("error");
+      const message = (moved.error && moved.error.message) || "引擎落子失败";
+      render({ ...settledState, engine_thinking: false, status: message, error: message });
       break;
     }
     state = moved.state;
@@ -261,11 +313,16 @@ async function applyAndContinue(response) {
 }
 
 async function guarded(fn) {
-  if (busy) return;
+  if (busy) {
+    toast("引擎思考中，请稍候");
+    return false;
+  }
   busy = true;
+  if (lastState) render(lastState);
   try { await fn(); }
   catch (err) { statusMsg.textContent = String(err); statusMsg.classList.add("error"); }
   finally { busy = false; if (lastState) render(lastState); }
+  return true;
 }
 
 function isForbidden(x, y) {
@@ -306,16 +363,19 @@ function onBoardTap(evt) {
  * Bottom sheets.
  * ===================================================================== */
 function openSheet(name) {
-  document.getElementById("sheet-" + name).classList.add("open");
-  document.querySelector(`.sheet-backdrop[data-backdrop="${name}"]`).classList.add("open");
+  UiLogic.setSheetOpen(document, name, true);
 }
 function closeSheet(name) {
-  document.getElementById("sheet-" + name).classList.remove("open");
-  document.querySelector(`.sheet-backdrop[data-backdrop="${name}"]`).classList.remove("open");
+  UiLogic.setSheetOpen(document, name, false);
 }
 
 function segValue(groupId) {
   return document.querySelector(`#${groupId} button[aria-pressed="true"]`).dataset.value;
+}
+function setSegmentValue(groupId, value) {
+  for (const button of document.querySelectorAll(`#${groupId} button`)) {
+    button.setAttribute("aria-pressed", String(button.dataset.value === value));
+  }
 }
 function bindSegmented(groupId) {
   const group = document.getElementById(groupId);
@@ -326,6 +386,25 @@ function bindSegmented(groupId) {
       b.setAttribute("aria-pressed", String(b === btn));
     }
   });
+}
+
+function setDifficultyOpen(open) {
+  const dialog = document.getElementById("difficulty-dialog");
+  const backdrop = document.getElementById("difficulty-backdrop");
+  dialog.classList.toggle("open", open);
+  dialog.setAttribute("aria-hidden", String(!open));
+  backdrop.classList.toggle("open", open);
+  backdrop.setAttribute("aria-hidden", String(!open));
+}
+
+function setDifficultyValue(value) {
+  const trigger = document.getElementById("opt-difficulty");
+  trigger.dataset.value = value;
+  document.getElementById("difficulty-summary").textContent =
+    difficultyNames[value] || value;
+  for (const button of document.querySelectorAll(".difficulty-option")) {
+    button.setAttribute("aria-pressed", String(button.dataset.value === value));
+  }
 }
 
 /* ===================================================================== *
@@ -339,8 +418,21 @@ function bindEvents() {
     await applyAndContinue(await nativeRequest({ op: "undo" }));
   }));
 
-  document.getElementById("btn-newgame").addEventListener("click", () => openSheet("newgame"));
+  document.getElementById("btn-newgame").addEventListener("click", () => {
+    if (busy || (lastState && lastState.engine_thinking)) {
+      toast("引擎思考中，请稍候");
+      return;
+    }
+    openSheet("newgame");
+  });
   document.getElementById("btn-more").addEventListener("click", () => openSheet("more"));
+  document.getElementById("btn-result-close").addEventListener("click", () => {
+    setResultOpen(false);
+  });
+  document.getElementById("btn-result-newgame").addEventListener("click", () => {
+    setResultOpen(false);
+    openSheet("newgame");
+  });
 
   for (const el of document.querySelectorAll("[data-close]")) {
     el.addEventListener("click", () => closeSheet(el.dataset.close));
@@ -352,15 +444,38 @@ function bindEvents() {
   bindSegmented("opt-side");
   bindSegmented("opt-rule");
   bindSegmented("opt-mode");
+  document.getElementById("opt-difficulty").addEventListener("click", () => {
+    if (!busy && !(lastState && lastState.engine_thinking)) {
+      setDifficultyOpen(true);
+    }
+  });
+  document.getElementById("btn-difficulty-close").addEventListener("click", () => {
+    setDifficultyOpen(false);
+  });
+  document.getElementById("difficulty-backdrop").addEventListener("click", () => {
+    setDifficultyOpen(false);
+  });
+  document.getElementById("difficulty-options").addEventListener("click", (event) => {
+    const button = event.target.closest(".difficulty-option");
+    if (!button) return;
+    setDifficultyValue(button.dataset.value);
+    setDifficultyOpen(false);
+  });
 
   document.getElementById("btn-start").addEventListener("click", () => {
+    if (busy || (lastState && lastState.engine_thinking)) {
+      toast("引擎思考中，请稍候");
+      return;
+    }
     const human_side = segValue("opt-side");
     const rule = segValue("opt-rule");
     const profile = segValue("opt-mode");
+    const difficulty = document.getElementById("opt-difficulty").dataset.value;
     closeSheet("newgame");
     guarded(async () => {
       ghost = null;
       await nativeRequest({ op: "set_profile", profile });
+      await nativeRequest({ op: "set_difficulty", difficulty });
       await applyAndContinue(await nativeRequest({ op: "new_game", human_side, rule }));
     });
   });

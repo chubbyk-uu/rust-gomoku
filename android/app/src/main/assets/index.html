@@ -13,6 +13,7 @@
       <div id="meta">
         <span class="chip" id="meta-rule">—</span>
         <span class="chip" id="meta-side">—</span>
+        <span class="chip" id="meta-difficulty">困难</span>
         <span class="chip" id="meta-moves">第 0 手</span>
       </div>
     </header>
@@ -33,39 +34,83 @@
   </div>
 
   <!-- New game sheet -->
-  <div class="sheet-backdrop" data-backdrop="newgame"></div>
-  <section class="sheet" id="sheet-newgame" aria-hidden="true">
-    <h2>新局</h2>
-    <div class="field">
-      <label>执棋</label>
-      <div class="segmented" id="opt-side">
-        <button data-value="black" aria-pressed="true">我执黑</button>
-        <button data-value="white" aria-pressed="false">我执白</button>
-      </div>
+  <div class="sheet-backdrop" data-backdrop="newgame" aria-hidden="true"></div>
+  <section class="sheet newgame-sheet" id="sheet-newgame" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="sheet-handle" aria-hidden="true"></div>
+    <div class="sheet-heading">
+      <h2>开始新对局</h2>
+      <button class="sheet-close" type="button" data-close="newgame" aria-label="关闭">×</button>
     </div>
-    <div class="field">
-      <label>规则</label>
-      <div class="segmented" id="opt-rule">
-        <button data-value="freestyle" aria-pressed="true">无禁手</button>
-        <button data-value="renju" aria-pressed="false">有禁手</button>
+    <div class="game-options">
+      <div class="option-row">
+        <label>执棋</label>
+        <div class="segmented compact" id="opt-side">
+          <button data-value="black" aria-pressed="true">执黑</button>
+          <button data-value="white" aria-pressed="false">执白</button>
+        </div>
       </div>
-    </div>
-    <div class="field">
-      <label>模式</label>
-      <div class="segmented" id="opt-mode">
-        <button data-value="base" aria-pressed="true">Base</button>
-        <button data-value="fast" aria-pressed="false">Fast</button>
+      <div class="option-row">
+        <label>规则</label>
+        <div class="segmented compact" id="opt-rule">
+          <button data-value="freestyle" aria-pressed="true">无禁手</button>
+          <button data-value="renju" aria-pressed="false">有禁手</button>
+        </div>
+      </div>
+      <div class="option-row">
+        <label>模式</label>
+        <div class="segmented compact" id="opt-mode">
+          <button data-value="base" aria-pressed="true">Base</button>
+          <button data-value="fast" aria-pressed="false">Fast</button>
+        </div>
+      </div>
+      <div class="option-row difficulty-row">
+        <label>难度</label>
+        <button id="opt-difficulty" class="option-link" type="button" data-value="hard">
+          <span id="difficulty-summary">困难</span>
+          <span class="chevron" aria-hidden="true"></span>
+        </button>
       </div>
     </div>
     <div class="sheet-actions">
-      <button data-close="newgame">取消</button>
       <button class="primary" id="btn-start">开始</button>
     </div>
   </section>
 
+  <!-- Difficulty picker -->
+  <div id="difficulty-backdrop" aria-hidden="true"></div>
+  <section id="difficulty-dialog" role="dialog" aria-modal="true" aria-labelledby="difficulty-title" aria-hidden="true">
+    <div class="sheet-handle" aria-hidden="true"></div>
+    <div class="sheet-heading">
+      <h2 id="difficulty-title">选择难度</h2>
+      <button class="sheet-close" type="button" id="btn-difficulty-close" aria-label="关闭">×</button>
+    </div>
+    <div id="difficulty-options">
+      <button class="difficulty-option" type="button" data-value="easy" aria-pressed="false">
+        <span class="strength-icon level-1" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span class="difficulty-copy"><strong>容易</strong><small>d2 / w10 · 无战术搜索</small></span>
+        <span class="difficulty-check" aria-hidden="true">✓</span>
+      </button>
+      <button class="difficulty-option" type="button" data-value="normal" aria-pressed="false">
+        <span class="strength-icon level-2" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span class="difficulty-copy"><strong>一般</strong><small>d4 / w20 · 无战术搜索</small></span>
+        <span class="difficulty-check" aria-hidden="true">✓</span>
+      </button>
+      <button class="difficulty-option" type="button" data-value="advanced" aria-pressed="false">
+        <span class="strength-icon level-3" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span class="difficulty-copy"><strong>进阶</strong><small>d6 / w30 · VCF / VCT</small></span>
+        <span class="difficulty-check" aria-hidden="true">✓</span>
+      </button>
+      <button class="difficulty-option" type="button" data-value="hard" aria-pressed="true">
+        <span class="strength-icon level-4" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span class="difficulty-copy"><strong>困难</strong><small>d8 / w40 · VCF / VCT</small></span>
+        <span class="difficulty-check" aria-hidden="true">✓</span>
+      </button>
+    </div>
+  </section>
+
   <!-- More / advanced sheet -->
-  <div class="sheet-backdrop" data-backdrop="more"></div>
-  <section class="sheet" id="sheet-more" aria-hidden="true">
+  <div class="sheet-backdrop" data-backdrop="more" aria-hidden="true"></div>
+  <section class="sheet" id="sheet-more" role="dialog" aria-modal="true" aria-hidden="true">
     <h2>更多</h2>
     <div class="toggle-row">
       <span>显示全部手数</span>
@@ -78,6 +123,7 @@
         <span class="k">深度</span><span class="v" data-adv="depth">—</span>
         <span class="k">节点</span><span class="v" data-adv="nodes">—</span>
         <span class="k">思考耗时</span><span class="v" data-adv="ms">—</span>
+        <span class="k">难度</span><span class="v" data-adv="difficulty">—</span>
       </div>
     </details>
     <div class="sheet-actions">
@@ -85,8 +131,20 @@
     </div>
   </section>
 
+  <div id="result-backdrop" aria-hidden="true"></div>
+  <section id="result-dialog" role="dialog" aria-modal="true" aria-labelledby="result-title" aria-hidden="true">
+    <div id="result-mark" aria-hidden="true"></div>
+    <h2 id="result-title">对局结束</h2>
+    <p id="result-message"></p>
+    <div class="result-actions">
+      <button id="btn-result-close">查看棋盘</button>
+      <button class="primary" id="btn-result-newgame">再来一局</button>
+    </div>
+  </section>
+
   <div id="toast" role="status"></div>
 
+  <script src="ui_logic.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

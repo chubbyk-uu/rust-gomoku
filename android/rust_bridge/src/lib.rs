@@ -9,7 +9,8 @@ use jni::objects::{JClass, JString};
 use jni::sys::{jlong, jstring};
 use jni::JNIEnv;
 use rust_gomoku::{
-    load_default_config, EngineProfile, GameController, RuleSet, BLACK, BOARD_SIZE, WHITE,
+    load_default_config, EngineProfile, GameController, RuleSet, SearchDifficulty, BLACK,
+    BOARD_SIZE, WHITE,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -34,6 +35,7 @@ enum BridgeRequest {
     Play { x: usize, y: usize },
     Undo,
     SetProfile { profile: String },
+    SetDifficulty { difficulty: String },
     EngineMove,
 }
 
@@ -130,6 +132,7 @@ fn parse_request(request_json: &str) -> Result<BridgeRequest, BridgeError> {
         "new_game" => &["op", "human_side", "rule"],
         "play" => &["op", "x", "y"],
         "set_profile" => &["op", "profile"],
+        "set_difficulty" => &["op", "difficulty"],
         _ => {
             return Err(BridgeError::invalid_request(format!(
                 "Unknown operation \"{operation}\"."
@@ -190,6 +193,14 @@ fn dispatch_request(
                 .set_profile(profile);
             snapshot_response(&controller)
         }
+        BridgeRequest::SetDifficulty { difficulty } => {
+            let difficulty = parse_difficulty(&difficulty)?;
+            controller
+                .lock()
+                .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
+                .set_difficulty(difficulty);
+            snapshot_response(&controller)
+        }
         BridgeRequest::EngineMove => {
             let task = controller
                 .lock()
@@ -238,6 +249,14 @@ fn parse_profile(value: &str) -> Result<EngineProfile, BridgeError> {
     value
         .parse()
         .map_err(|_| BridgeError::invalid_request("profile must be \"base\" or \"fast\"."))
+}
+
+fn parse_difficulty(value: &str) -> Result<SearchDifficulty, BridgeError> {
+    value.parse().map_err(|_| {
+        BridgeError::invalid_request(
+            "difficulty must be \"easy\", \"normal\", \"advanced\", or \"hard\".",
+        )
+    })
 }
 
 fn success_or_error(result: Result<Value, BridgeError>) -> String {
@@ -350,6 +369,17 @@ mod tests {
             r#"{"op":"set_profile","profile":"fast"}"#,
         );
         assert_eq!(profile["state"]["params"]["profile"], "fast");
+
+        let difficulty = response(
+            &registry,
+            handle,
+            r#"{"op":"set_difficulty","difficulty":"advanced"}"#,
+        );
+        assert_eq!(difficulty["state"]["params"]["difficulty"], "advanced");
+        assert_eq!(difficulty["state"]["params"]["depth"], 6);
+        assert_eq!(difficulty["state"]["params"]["width"], 30);
+        assert_eq!(difficulty["state"]["params"]["compute_vcf"], true);
+        assert_eq!(difficulty["state"]["params"]["compute_vct"], true);
     }
 
     #[test]
@@ -372,6 +402,10 @@ mod tests {
             (r#"{"op":"play","x":15,"y":0}"#, "invalid_request"),
             (
                 r#"{"op":"set_profile","profile":"turbo"}"#,
+                "invalid_request",
+            ),
+            (
+                r#"{"op":"set_difficulty","difficulty":"impossible"}"#,
                 "invalid_request",
             ),
         ] {

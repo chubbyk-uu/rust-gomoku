@@ -31,6 +31,9 @@ Implementation progress on `feature/android-app`:
 - Phase 4 Rust JNI bridge is complete.
 - Phase 5 Kotlin bridge and search thread are complete.
 - Phase 6 mobile UI is complete (pending the Phase 8 real-device pass).
+- Phase 7 automated validation is complete.
+- Phase 8 has an initial manual install/launch smoke on a phone; the full
+  gameplay, lifecycle, performance, and thermal checklist remains pending.
 - The desktop HTTP GUI now uses `GameController`.
 - Controller tests cover forbidden input, first-move search, undo, profile
   switching, invalid sides, and stale search completion.
@@ -53,7 +56,7 @@ Implementation progress on `feature/android-app`:
   never runs on the UI thread), and `MainActivity` exposes a narrow
   `@JavascriptInterface` command bridge whose responses are marshalled back to
   the WebView on the main thread. The packaged page now drives `state`,
-  `new_game`, `play`, `undo`, and `engine_move` end to end, renders stones, the
+  `new_game`, `play`, `undo`, `set_difficulty`, and `engine_move` end to end, renders stones, the
   last-move marker, and Renju forbidden crosses, and re-syncs through `state`
   after rotation recreates the page. The UI-thread, rotation, and stale-result
   behaviors are device-confirmed in Phase 8; stale protection is already covered
@@ -61,17 +64,28 @@ Implementation progress on `feature/android-app`:
 - Phase 6 mobile UI is in place as WebView assets (`index.html`, `app.css`,
   `app.js`): a status row, a JS-sized square board (kept square at
   `min(width, height)` and redrawn at `devicePixelRatio` for crisp lines), and a
-  bottom action bar, with a new-game sheet (side, rule, mode) and a "more" sheet
+  bottom action bar, with a new-game sheet (side, rule, mode, difficulty) and a "more" sheet
   holding the optional all-move-numbers switch and a collapsed advanced panel
   (score, depth, nodes, thinking time from the snapshot's `last_result`). The
   layout switches to board-left / panel-right in landscape. Stone placement uses
   tap-to-preview then tap-the-same-point-to-confirm to cut mis-taps; taps snap to
   the nearest intersection and are rejected beyond ~0.6 cell; forbidden points
   are rejected with a toast and a light vibration (new `VIBRATE` permission).
-- The Base/Fast control is labelled "模式" (mode), not difficulty; a difficulty
-  selector mapping to search depth/width is a separate, later feature.
+- Base/Fast remains a search-ordering mode. The separate four-level difficulty
+  selector maps Easy to `d2/w10` without VCF/VCT, Normal to `d4/w20` without
+  VCF/VCT, Advanced to `d6/w30` with VCF/VCT, and Hard to `d8/w40` with
+  VCF/VCT. Hard is the default.
 - Responsive verification at the target viewports and the touch/rotation/stale
-  behaviors are confirmed on a real device in Phase 8.
+  behaviors must be confirmed on a real device in Phase 8.
+- Mobile UI state logic is isolated in `ui_logic.js` and covered by Node tests
+  invoked through Gradle's `testMobileUi` task. The tests lock busy-state
+  control disabling, the immediate engine-thinking snapshot, and synchronized
+  sheet visibility/`aria-hidden` state.
+- Manual phone testing has confirmed portrait/landscape rotation, the visible
+  thinking state, disabled new-game controls during search, Renju forbidden
+  crosses, and forbidden-tap rejection. A subsequent visual pass tightened
+  both orientations, fixed the board-frame sizing, and added a game-result
+  dialog; that revised layout still needs phone confirmation.
 
 ## Goals
 
@@ -181,6 +195,7 @@ new_game
 play
 undo
 set_profile
+set_difficulty
 engine_move
 ```
 
@@ -192,6 +207,7 @@ Request examples:
 {"op":"play","x":7,"y":7}
 {"op":"undo"}
 {"op":"set_profile","profile":"base"}
+{"op":"set_difficulty","difficulty":"hard"}
 {"op":"engine_move"}
 ```
 
@@ -286,6 +302,7 @@ and must not resize when status text or engine state changes.
 - Play black or white.
 - Freestyle or Renju.
 - Base or Fast profile.
+- Easy, Normal, Advanced, or Hard difficulty.
 - Start game.
 
 Rule changes apply only to the new game, matching the desktop behavior.
@@ -484,6 +501,8 @@ Gate:
 
 ### Phase 7: Automated Validation
 
+Status: complete.
+
 Rust:
 
 ```bash
@@ -501,6 +520,9 @@ Android:
 ./gradlew assembleDebug
 ```
 
+`./gradlew test` includes the dependency-free Node mobile UI tests; Node.js
+must be available on `PATH`.
+
 APK inspection:
 
 - correct application id and version
@@ -511,6 +533,12 @@ APK inspection:
 - debug APK signature valid
 
 ### Phase 8: Real-Device Gate
+
+Status: in progress. Manual APK installation and application launch,
+portrait/landscape rotation, thinking feedback, search-time new-game locking,
+forbidden crosses, and forbidden-tap rejection have been confirmed. No ADB
+device is currently available. The revised compact layout and result dialog
+need a second manual visual pass.
 
 Manual checklist:
 
@@ -554,9 +582,7 @@ Stop and diagnose before proceeding when:
 
 ## Next Implementation Step
 
-Run Phase 7 automated validation (`cargo fmt`/`test`, `cargo ndk` cross-build,
-`./gradlew test lint assembleDebug`, APK inspection) and then the Phase 8
-real-device gate: confirm placement, forbidden marks, undo/restart/profile,
-rotation during search, backgrounding during search, and responsive framing at
-the target viewports on a phone, recording search duration. Use
-`android/gradlew-proxy` in place of `./gradlew` when the host proxy is required.
+Continue the Phase 8 real-device gate when a device is available: confirm both
+colors under both rules, forbidden marks and rejection, undo/restart/profile,
+rotation and backgrounding during search, responsive framing, sustained
+temperature, and representative search duration.

@@ -28,9 +28,8 @@ To shorten the perceived wait during manual GUI play, the GUI entry enables `ove
 Historical performance experiments and stop-loss conclusions are recorded in `docs/perf-log.md`; the README does not maintain a list of failed approaches.
 The Android architecture, mobile interface, JNI boundary, phased validation
 gates, and current implementation status are documented in
-`docs/android-app-design.md`. The current Android skeleton builds an ARM64
-debug APK and contains the tested Rust JNI gameplay bridge; Kotlin and the
-mobile page do not call that bridge yet.
+`docs/android-app-design.md`. The Android app builds an ARM64 debug APK and
+uses the shared Rust controller through the tested JNI bridge.
 
 ## Default Parameters
 
@@ -55,6 +54,19 @@ The main defaults live in `src/config.rs`.
 | `nonroot_vcf` | off |
 | `static_board` | on |
 | `dynamic_board_margin` | `4` |
+
+The desktop GUI and Android app expose four shared difficulty presets:
+
+| Difficulty | Search | VCF / VCT |
+|---|---:|---:|
+| Easy | `d2 / w10` | off |
+| Normal | `d4 / w20` | off |
+| Advanced | `d6 / w30` | on |
+| Hard | `d8 / w40` | on |
+
+Hard is the default and matches the engine's current fixed-search defaults.
+Difficulty is independent from the Base/Fast profile: difficulty controls
+depth, width, and tactical search, while Base/Fast controls ordering behavior.
 
 For strict diffs against the Python reference or reproducing reference experiments, `depth=6,width=20,root_vct_depth=4` is typically passed explicitly.
 
@@ -105,7 +117,7 @@ Launch the GUI:
 cargo run --release --bin gomoku_gui
 ```
 
-The GUI opens `http://127.0.0.1:18080` in the default browser automatically; pass `--no-open-browser` to disable that behavior. It supports playing black/white, freestyle or Renju rules, undo, restart, Base/Fast mode switching, async thinking, move number display, and a status panel; shortcuts: `U` to undo, `R` to restart. Rule selection applies only when starting a new game. During a Renju black turn, forbidden intersections are marked with red crosses and forbidden input is rejected without placing a stone. The Base/Fast switch is only allowed when the engine is idle, does not reset the current game, and only affects the next engine think.
+The GUI opens `http://127.0.0.1:18080` in the default browser automatically; pass `--no-open-browser` to disable that behavior. It supports playing black/white, freestyle or Renju rules, four difficulty levels, undo, restart, Base/Fast mode switching, async thinking, move number display, a result dialog, and a status panel; shortcuts: `U` to undo, `R` to restart. Rule selection applies only when starting a new game. During a Renju black turn, forbidden intersections are marked with red crosses and forbidden input is rejected without placing a stone. Difficulty and Base/Fast can only change while the engine is idle and affect the next engine think without resetting the board.
 
 Gomocup engine:
 

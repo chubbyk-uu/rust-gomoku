@@ -942,6 +942,11 @@ mod tests {
         expected: String,
     }
 
+    #[derive(serde::Deserialize)]
+    struct RootRegressionFixture {
+        moves: Vec<[usize; 2]>,
+    }
+
     fn fallback_fixture(name: &str) -> (Board, Move, String) {
         let raw = include_str!("../../cases/renju/forbidden_hand_cases.jsonl");
         let case = raw
@@ -1081,5 +1086,44 @@ mod tests {
             }),
         );
         assert_eq!(result.score, -INF);
+    }
+
+    #[test]
+    fn root_win_priority_selects_actual_winning_move_without_vcf_or_vct() {
+        let fixture: RootRegressionFixture =
+            serde_json::from_str(include_str!("../../cases/renju/gui_normal_blunder_31.json"))
+                .unwrap();
+
+        for rule in [RuleSet::Freestyle, RuleSet::Renju] {
+            for (move_count, expected_xy) in [(25, (5, 8)), (31, (8, 11))] {
+                let mut board = Board::new();
+                for &[x, y] in fixture.moves.iter().take(move_count) {
+                    board
+                        .play_for_rule(xy_to_move(x, y).unwrap(), None, rule)
+                        .unwrap();
+                }
+
+                let mut config = load_default_config();
+                config.rule_set = rule;
+                config.runtime.compute_vcf = false;
+                config.runtime.compute_vct = false;
+                let mut searcher = RootSearcher::new(config);
+                let result = searcher.search(
+                    &mut board,
+                    Some(SearchLimits {
+                        max_depth: 4,
+                        root_width: 20,
+                        ..SearchLimits::default()
+                    }),
+                );
+
+                assert_eq!(
+                    move_to_xy(result.move_).unwrap(),
+                    expected_xy,
+                    "wrong {rule:?} win-priority move after {move_count} moves"
+                );
+                assert_eq!(result.score, INF);
+            }
+        }
     }
 }

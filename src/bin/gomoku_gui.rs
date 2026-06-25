@@ -8,7 +8,9 @@ use std::thread;
 
 use serde::Serialize;
 
-use rust_gomoku::{load_default_config, GameController, RuleSet, Side, BLACK, WHITE};
+use rust_gomoku::{
+    load_default_config, GameController, RuleSet, SearchDifficulty, Side, BLACK, WHITE,
+};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:18080";
 
@@ -204,6 +206,19 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameController>>) {
             }
             json_response(&state.lock().expect("state lock").snapshot())
         }
+        ("POST", "/difficulty") => {
+            let difficulty = query_param(query, "value")
+                .and_then(|value| value.parse::<SearchDifficulty>().ok());
+            {
+                let mut game = state.lock().expect("state lock");
+                if let Some(difficulty) = difficulty {
+                    game.set_difficulty(difficulty);
+                } else {
+                    game.set_error("未知难度，请选择 easy、normal、advanced 或 hard。");
+                }
+            }
+            json_response(&state.lock().expect("state lock").snapshot())
+        }
         _ => text_response(404, "not found"),
     };
     let _ = stream.write_all(response.as_bytes());
@@ -279,6 +294,22 @@ mod tests {
         assert_eq!(browser_url("0.0.0.0:18080"), "http://127.0.0.1:18080");
         assert_eq!(browser_url("[::]:18080"), "http://[::1]:18080");
         assert_eq!(browser_url("127.0.0.1:18080"), "http://127.0.0.1:18080");
+    }
+
+    #[test]
+    fn desktop_gui_contains_difficulty_controls_and_result_dialog() {
+        for marker in [
+            "difficulty-select",
+            "容易 · d2 / w10 · 无战术搜索",
+            "困难 · d8 / w40 · VCF/VCT",
+            "result-backdrop",
+            "你赢了",
+            "引擎获胜",
+            "查看棋盘",
+            "再来一局",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing marker: {marker}");
+        }
     }
 }
 
@@ -359,7 +390,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .controls {
       display: grid;
       grid-template-columns: 1fr;
-      gap: 12px;
+      gap: 14px;
       margin: 20px 0;
     }
     .new-game {
@@ -370,12 +401,54 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .profile-switch, .rule-switch {
       display: grid;
       grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .settings {
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+      background: rgba(255, 253, 245, .66);
+      border: 1px solid rgba(70, 44, 18, .16);
+      border-radius: 12px;
+    }
+    .setting-row {
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr);
+      align-items: center;
       gap: 12px;
     }
+    .setting-label {
+      color: #6b5235;
+      font-size: 14px;
+      font-weight: 750;
+    }
+    .settings button {
+      padding: 10px 12px;
+      font-size: 15px;
+      box-shadow: none;
+    }
+    .settings button:hover {
+      box-shadow: 0 5px 12px rgba(37, 23, 9, .12);
+    }
+    select {
+      width: 100%;
+      min-height: 46px;
+      padding: 0 40px 0 14px;
+      color: #2a1b10;
+      font: inherit;
+      font-size: 15px;
+      font-weight: 700;
+      background: #fffdf5;
+      border: 1px solid rgba(78, 50, 20, .28);
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    select:disabled { opacity: .48; cursor: not-allowed; }
     .actions {
       display: grid;
       grid-template-columns: 1fr;
       gap: 12px;
+      padding-top: 2px;
     }
     button {
       border: 0;
@@ -434,6 +507,32 @@ const INDEX_HTML: &str = r#"<!doctype html>
       margin-top: -4px;
     }
     .error-text { color: var(--danger); margin-top: 10px; font-weight: 800; font-size: 16px; }
+    .result-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      display: none;
+      place-items: center;
+      padding: 24px;
+      background: rgba(24, 16, 8, .55);
+    }
+    .result-backdrop.open { display: grid; }
+    .result-dialog {
+      width: min(420px, 100%);
+      padding: 30px;
+      text-align: center;
+      background: #fffdf5;
+      border: 1px solid rgba(70, 44, 18, .22);
+      border-radius: 12px;
+      box-shadow: 0 24px 70px rgba(40, 26, 9, .32);
+    }
+    .result-dialog h2 { margin: 0; font-size: 30px; }
+    .result-dialog p { margin: 10px 0 24px; color: #6b5235; font-size: 17px; }
+    .result-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
     @media (max-width: 860px) {
       main { grid-template-columns: 1fr; margin-top: 14px; align-items: start; }
       .panel { min-height: auto; }
@@ -455,27 +554,55 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <button class="primary" onclick="newGame('black')">执黑</button>
           <button class="primary" onclick="newGame('white')">执白</button>
         </div>
-        <div class="rule-switch">
-          <button id="rule-freestyle" class="secondary" onclick="selectRule('freestyle')">无禁手</button>
-          <button id="rule-renju" class="secondary" onclick="selectRule('renju')">有禁手</button>
-        </div>
-        <div class="profile-switch">
-          <button id="profile-base" class="secondary" onclick="setProfile('base')">Base</button>
-          <button id="profile-fast" class="secondary" onclick="setProfile('fast')">Fast</button>
+        <div class="settings">
+          <div class="setting-row">
+            <span class="setting-label">规则</span>
+            <div class="rule-switch">
+              <button id="rule-freestyle" class="secondary" onclick="selectRule('freestyle')">无禁手</button>
+              <button id="rule-renju" class="secondary" onclick="selectRule('renju')">有禁手</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <span class="setting-label">模式</span>
+            <div class="profile-switch">
+              <button id="profile-base" class="secondary" onclick="setProfile('base')">Base</button>
+              <button id="profile-fast" class="secondary" onclick="setProfile('fast')">Fast</button>
+            </div>
+          </div>
+          <label class="setting-row" for="difficulty-select">
+            <span class="setting-label">难度</span>
+            <select id="difficulty-select" onchange="setDifficulty(this.value)">
+              <option value="easy">容易 · d2 / w10 · 无战术搜索</option>
+              <option value="normal">一般 · d4 / w20 · 无战术搜索</option>
+              <option value="advanced">进阶 · d6 / w30 · VCF/VCT</option>
+              <option value="hard" selected>困难 · d8 / w40 · VCF/VCT</option>
+            </select>
+          </label>
         </div>
         <div class="actions">
           <button class="warn" onclick="undo()">悔棋</button>
         </div>
-        <div class="hint">棋盘会自动刷新；规则只在新局生效，点击“执黑/执白”会按当前规则和颜色重新开局。Base/Fast 可在引擎未思考时切换，只影响下一次引擎思考。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
+        <div class="hint">棋盘会自动刷新；规则只在新局生效。难度控制深度、宽度和 VCF/VCT，Base/Fast 控制搜索排序；两者都在下一次引擎思考生效。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
       </div>
       <div class="kv" id="info"></div>
     </aside>
   </main>
+  <div id="result-backdrop" class="result-backdrop" aria-hidden="true">
+    <section class="result-dialog" role="dialog" aria-modal="true" aria-labelledby="result-title">
+      <h2 id="result-title">对局结束</h2>
+      <p id="result-message"></p>
+      <div class="result-actions">
+        <button class="secondary" onclick="closeResult()">查看棋盘</button>
+        <button class="primary" onclick="restartFromResult()">再来一局</button>
+      </div>
+    </section>
+  </div>
   <script>
     const canvas = document.getElementById('board');
     const ctx = canvas.getContext('2d');
     let state = null;
     let selectedRule = 'freestyle';
+    let announcedResult = null;
 
     async function api(path) {
       const res = await fetch(path, { method: path === '/state' ? 'GET' : 'POST' });
@@ -487,6 +614,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function refresh() { api('/state').catch(showError); }
     function newGame(side) { api('/new?side=' + side + '&rule=' + selectedRule).catch(showError); }
     function setProfile(profile) { api('/profile?value=' + profile).catch(showError); }
+    function setDifficulty(difficulty) { api('/difficulty?value=' + difficulty).catch(showError); }
     function selectRule(rule) {
       selectedRule = rule;
       renderRuleButtons();
@@ -496,6 +624,33 @@ const INDEX_HTML: &str = r#"<!doctype html>
       newGame(side);
     }
     function undo() { api('/undo').catch(showError); }
+    function closeResult() {
+      const backdrop = document.getElementById('result-backdrop');
+      backdrop.classList.remove('open');
+      backdrop.setAttribute('aria-hidden', 'true');
+    }
+    function restartFromResult() {
+      closeResult();
+      restartSameSide();
+    }
+    function renderResult() {
+      if (!state || state.winner === 0) {
+        announcedResult = null;
+        closeResult();
+        return;
+      }
+      const key = `${state.winner}:${state.move_count}`;
+      if (announcedResult === key) return;
+      announcedResult = key;
+      const humanWon = state.winner === state.human_side;
+      document.getElementById('result-title').textContent = humanWon ? '你赢了' : '引擎获胜';
+      document.getElementById('result-message').textContent = humanWon
+        ? `第 ${state.move_count} 手取胜。`
+        : `对局在第 ${state.move_count} 手结束。`;
+      const backdrop = document.getElementById('result-backdrop');
+      backdrop.classList.add('open');
+      backdrop.setAttribute('aria-hidden', 'false');
+    }
     function showError(err) {
       document.getElementById('error').textContent = String(err);
     }
@@ -630,6 +785,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
         baseButton.disabled = !!state.engine_thinking;
         fastButton.disabled = !!state.engine_thinking;
       }
+      const difficultySelect = document.getElementById('difficulty-select');
+      if (p.difficulty !== 'custom') difficultySelect.value = p.difficulty;
+      difficultySelect.disabled = !!state.engine_thinking;
       renderRuleButtons();
       const rows = [
         ['你执', sideName(state.human_side)],
@@ -638,6 +796,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
         ['手数', state.move_count],
         ['规则', p.rule === 'renju' ? '有禁手' : '无禁手'],
         ['引擎模式', `${p.profile === 'fast' ? 'Fast' : 'Base'}${p.fast_history_ordering ? ' / history+killer' : ''}`],
+        ['难度', {
+          easy: '容易',
+          normal: '一般',
+          advanced: '进阶',
+          hard: '困难',
+          custom: '自定义',
+        }[p.difficulty] || p.difficulty],
         ['搜索参数', `d${p.depth} / w${p.width}`],
         ['VCF/VCT', `${p.compute_vcf ? 'VCF' + p.root_vcf_depth : 'VCF off'} / ${p.compute_vct ? 'VCT' + p.root_vct_depth : 'VCT off'}`],
         ['Overlap VCT/AB', yesNo(p.overlap_vct_alphabeta)],
@@ -652,6 +817,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         ['Overlap 等待/TT', t ? `${t.overlap_wait_ms == null ? '-' : t.overlap_wait_ms.toFixed(3) + ' ms'} / ${t.tt_snapshot_ms == null ? '-' : t.tt_snapshot_ms.toFixed(3) + ' ms'}` : '-'],
       ];
       document.getElementById('info').innerHTML = rows.map(([k,v]) => `<div>${k}</div><div>${v}</div>`).join('');
+      renderResult();
     }
     setInterval(refresh, 500);
     refresh();

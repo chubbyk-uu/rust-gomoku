@@ -567,7 +567,7 @@ fn select_candidates(
     }
 
     if analysis.winpri && !candidates.is_empty() {
-        let candidate = best_forcing_candidate(&candidates, preserve_scan_order);
+        let candidate = best_forcing_candidate(&candidates);
         return CandidateGenerationResult {
             candidates: vec![candidate],
             single_forcing: false,
@@ -576,7 +576,7 @@ fn select_candidates(
         };
     }
     if analysis.sglflag > 0 && !candidates.is_empty() {
-        let candidate = best_forcing_candidate(&candidates, preserve_scan_order);
+        let candidate = best_forcing_candidate(&candidates);
         return CandidateGenerationResult {
             candidates: vec![candidate],
             single_forcing: true,
@@ -672,10 +672,7 @@ fn renju_black_candidate_needs_full_detector(caches: &EvalCaches, x: usize, y: u
     overlines > 0 || fours >= 2 || open_threes >= 2
 }
 
-fn best_forcing_candidate(candidates: &[Candidate], preserve_scan_order: bool) -> Candidate {
-    if preserve_scan_order {
-        return candidates[0];
-    }
+fn best_forcing_candidate(candidates: &[Candidate]) -> Candidate {
     candidates
         .iter()
         .copied()
@@ -892,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn best_forcing_candidate_matches_presort_order() {
+    fn best_forcing_candidate_ignores_scan_order() {
         let candidates = [
             Candidate {
                 move_: 12,
@@ -913,8 +910,7 @@ mod tests {
                 opp_attack: 0,
             },
         ];
-        assert_eq!(best_forcing_candidate(&candidates, false).move_, 3);
-        assert_eq!(best_forcing_candidate(&candidates, true).move_, 12);
+        assert_eq!(best_forcing_candidate(&candidates).move_, 3);
     }
 }
 

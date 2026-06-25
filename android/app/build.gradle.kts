@@ -74,6 +74,25 @@ tasks.named("preBuild").configure {
     dependsOn(buildRustArm64)
 }
 
+val testMobileUi by tasks.registering(Exec::class) {
+    val repositoryRoot = rootProject.projectDir.parentFile
+    val uiLogic = repositoryRoot.resolve("android/app/src/main/assets/ui_logic.js")
+    val appScript = repositoryRoot.resolve("android/app/src/main/assets/app.js")
+    val appStyles = repositoryRoot.resolve("android/app/src/main/assets/app.css")
+    val appPage = repositoryRoot.resolve("android/app/src/main/assets/index.html")
+    val uiTests = repositoryRoot.resolve("android/app/src/test/js/ui_logic.test.cjs")
+
+    workingDir(repositoryRoot)
+    inputs.files(uiLogic, appScript, appStyles, appPage, uiTests)
+    commandLine("node", uiTests.absolutePath)
+}
+
+tasks.configureEach {
+    if (name == "test" || name == "testDebugUnitTest") {
+        dependsOn(testMobileUi)
+    }
+}
+
 dependencies {
     implementation("androidx.webkit:webkit:1.16.0")
     implementation("androidx.activity:activity:1.9.3")
