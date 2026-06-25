@@ -28,6 +28,7 @@ Implementation progress on `feature/android-app`:
 - Phase 1 baseline is complete.
 - Phase 2 shared controller extraction is complete.
 - Phase 3 Android project skeleton is complete.
+- Phase 4 Rust JNI bridge is complete.
 - The desktop HTTP GUI now uses `GameController`.
 - Controller tests cover forbidden input, first-move search, undo, profile
   switching, invalid sides, and stale search completion.
@@ -36,11 +37,14 @@ Implementation progress on `feature/android-app`:
 - Gradle 9.4.1, Android Gradle Plugin 9.2.0, Kotlin Activity,
   `WebViewAssetLoader`, local assets, and the ARM64 Rust packaging task are in
   place.
-- `test`, `lint`, and `assembleDebug` pass. The resulting 1.6 MiB debug APK
+- `test`, `lint`, and `assembleDebug` pass. The resulting 2.3 MiB debug APK
   contains only `arm64-v8a`, has no `INTERNET` permission, and has a valid
   debug signature.
-- The APK currently displays a placeholder mobile board. JNI gameplay wiring
-  starts in Phase 4.
+- The bridge implements native create/request/destroy handles, strict JSON
+  command validation, lock-free search execution, stale-result protection
+  through `GameController`, and structured errors.
+- The APK currently displays a placeholder mobile board. Kotlin and WebView
+  gameplay wiring starts in Phase 5.
 
 ## Goals
 
@@ -152,6 +156,23 @@ undo
 set_profile
 engine_move
 ```
+
+Request examples:
+
+```json
+{"op":"state"}
+{"op":"new_game","human_side":"black","rule":"renju"}
+{"op":"play","x":7,"y":7}
+{"op":"undo"}
+{"op":"set_profile","profile":"base"}
+{"op":"engine_move"}
+```
+
+Successful requests return `{"ok":true,"state":...}`. Bridge-level validation,
+handle, and internal failures return
+`{"ok":false,"error":{"code":"...","message":"..."}}`. Legal game rejections,
+such as tapping a forbidden point, remain part of the returned controller
+state so the UI can display the existing user-facing message.
 
 Rules:
 
@@ -378,7 +399,7 @@ Gate:
 
 ### Phase 4: Rust JNI Bridge
 
-Status: next.
+Status: complete.
 
 1. Replace the placeholder export in the `android/rust_bridge` `cdylib` with
    the JNI contract.
@@ -389,9 +410,16 @@ Status: next.
 
 Gate:
 
-- JNI library is an AArch64 Android ELF shared object.
-- Invalid requests do not panic.
-- Controller tests and desktop GUI tests still pass.
+- JNI library is an AArch64 Android ELF shared object and all three expected
+  JNI symbols are present in the stripped APK copy.
+- Invalid JSON, operations, fields, coordinates, sides, rules, profiles, and
+  destroyed handles return structured errors.
+- Requests are capped at 64 KiB and Rust panics are contained before crossing
+  the FFI boundary.
+- Search runs outside the controller mutex. Destroying a handle invalidates
+  future requests while an in-flight request retains its `Arc`.
+- Bridge debug/release tests, Clippy, full Rust tests, ARM64 cross-build,
+  Android test/lint, and APK assembly pass.
 
 ### Phase 5: Kotlin Bridge And Search Thread
 
@@ -495,6 +523,6 @@ Stop and diagnose before proceeding when:
 
 ## Next Implementation Step
 
-Implement Phase 4 on `feature/android-app`: connect the Rust bridge to
-`GameController`, add handle lifecycle and JSON request dispatch, contain
-panics, and cross-build the tested JNI library for `arm64-v8a`.
+Implement Phase 5 on `feature/android-app`: add `NativeBridge`,
+`GameViewModel`, and a single-thread executor; connect the packaged page to the
+JNI request protocol without running search on the Android main thread.

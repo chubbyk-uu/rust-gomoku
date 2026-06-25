@@ -29,7 +29,8 @@ Historical performance experiments and stop-loss conclusions are recorded in `do
 The Android architecture, mobile interface, JNI boundary, phased validation
 gates, and current implementation status are documented in
 `docs/android-app-design.md`. The current Android skeleton builds an ARM64
-debug APK; gameplay wiring is not implemented yet.
+debug APK and contains the tested Rust JNI gameplay bridge; Kotlin and the
+mobile page do not call that bridge yet.
 
 ## Default Parameters
 
