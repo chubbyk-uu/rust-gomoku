@@ -3,6 +3,7 @@
 //! The current phase focuses on the deterministic base layer:
 //! constants, shared types, move encoding, board state, and zobrist hashing.
 
+pub mod app;
 pub mod board;
 pub mod config;
 pub mod constants;
@@ -15,6 +16,11 @@ pub mod threats;
 pub mod types;
 pub mod zobrist;
 
+pub use app::{
+    EngineSearchCompletion, EngineSearchTask, ForbiddenPointSnapshot, GameController,
+    GameMoveSnapshot, GameParamsSnapshot, GameStateSnapshot, SearchResultSnapshot,
+    SearchTraceSnapshot,
+};
 pub use board::{move_to_rc, move_to_xy, rc_to_move, xy_to_move, Board, BoardError};
 pub use config::{
     adjust_loaded_parameters, apply_engine_profile, default_eval_para, load_config_for_profile,

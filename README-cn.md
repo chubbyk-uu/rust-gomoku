@@ -24,6 +24,8 @@
 
 GUI 入口为了降低手动对局体感等待，默认单独开启 `overlap_vct_alphabeta`；Gomocup、diff、case probe 和库默认仍保持关闭。
 历史性能实验和止损结论记录在 `docs/perf-log.md`，README 不重复维护失败方案清单。
+Android 架构、手机界面、JNI 边界和分阶段验证门槛记录在
+`docs/android-app-design.md`；Android 版本尚未实现。
 
 ## 默认参数
 

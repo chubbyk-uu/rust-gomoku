@@ -26,6 +26,9 @@ Optional diagnostics / experiments:
 
 To shorten the perceived wait during manual GUI play, the GUI entry enables `overlap_vct_alphabeta` by default; Gomocup, diff, case probe, and the library still keep it off.
 Historical performance experiments and stop-loss conclusions are recorded in `docs/perf-log.md`; the README does not maintain a list of failed approaches.
+The planned Android architecture, mobile interface, JNI boundary, and phased
+validation gates are documented in `docs/android-app-design.md`; Android is not
+implemented yet.
 
 ## Default Parameters
 

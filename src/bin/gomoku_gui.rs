@@ -5,15 +5,10 @@ use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
 
 use serde::Serialize;
 
-use rust_gomoku::{
-    apply_engine_profile, load_default_config, move_to_xy, xy_to_move, Board, EngineConfig,
-    EngineProfile, ForbiddenKind, RootSearcher, RootTrace, RuleSet, SearchLimits, SearchResult,
-    Side, BLACK, BOARD_SIZE, EMPTY, WHITE,
-};
+use rust_gomoku::{load_default_config, GameController, RuleSet, Side, BLACK, WHITE};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:18080";
 
@@ -31,7 +26,7 @@ fn main() {
         config.root_search.wide = width;
         config.root_search.timed_max_wide = width;
     }
-    let state = Arc::new(Mutex::new(GameState::new(config)));
+    let state = Arc::new(Mutex::new(GameController::new(config)));
     let addr = args.addr;
     let listener = TcpListener::bind(&addr).expect("GUI server binds to local address");
     let url = browser_url(&addr);
@@ -141,290 +136,7 @@ fn open_browser(_url: &str) -> std::io::Result<()> {
     ))
 }
 
-#[derive(Clone)]
-struct GameState {
-    config: EngineConfig,
-    board: Board,
-    human_side: Side,
-    engine_thinking: bool,
-    status: String,
-    error: Option<String>,
-    last_mark: Option<(usize, usize)>,
-    last_result: Option<SearchResult>,
-    last_trace: Option<RootTrace>,
-    last_search_ms: Option<f64>,
-    game_id: u64,
-}
-
-impl GameState {
-    fn new(config: EngineConfig) -> Self {
-        Self {
-            config,
-            board: Board::new(),
-            human_side: BLACK,
-            engine_thinking: false,
-            status: "请选择执黑或执白，然后开始对局。".to_string(),
-            error: None,
-            last_mark: None,
-            last_result: None,
-            last_trace: None,
-            last_search_ms: None,
-            game_id: 0,
-        }
-    }
-
-    fn reset(&mut self, human_side: Side, rule: RuleSet) {
-        self.game_id = self.game_id.wrapping_add(1);
-        self.board.reset();
-        self.config.rule_set = rule;
-        self.human_side = human_side;
-        self.engine_thinking = false;
-        let rule_name = match rule {
-            RuleSet::Freestyle => "无禁手",
-            RuleSet::Renju => "有禁手",
-        };
-        self.status = if human_side == BLACK {
-            format!("新局开始（{rule_name}）：你执黑，请落子。")
-        } else {
-            format!("新局开始（{rule_name}）：你执白，引擎执黑思考中。")
-        };
-        self.error = None;
-        self.last_mark = None;
-        self.last_result = None;
-        self.last_trace = None;
-        self.last_search_ms = None;
-    }
-
-    fn board_cells(&self) -> Vec<i8> {
-        let mut cells = Vec::with_capacity(BOARD_SIZE * BOARD_SIZE);
-        for y in 0..BOARD_SIZE {
-            for x in 0..BOARD_SIZE {
-                cells.push(self.board.at(x, y).expect("coordinates stay in range"));
-            }
-        }
-        cells
-    }
-
-    fn can_human_play(&self) -> bool {
-        !self.engine_thinking
-            && self.board.winner() == EMPTY
-            && self.board.side_to_move() == self.human_side
-    }
-
-    fn search_limits(&self) -> SearchLimits {
-        SearchLimits::fixed_from_config(&self.config)
-    }
-
-    fn set_profile(&mut self, profile: EngineProfile) {
-        apply_engine_profile(&mut self.config, profile);
-        self.error = None;
-        self.last_result = None;
-        self.last_trace = None;
-        self.last_search_ms = None;
-        self.status = format!(
-            "已切换到 {} 模式，当前棋局不变，下一次引擎思考生效。",
-            match profile {
-                EngineProfile::Base => "Base",
-                EngineProfile::Fast => "Fast",
-            }
-        );
-    }
-}
-
-#[derive(Serialize)]
-struct StateResponse {
-    board_size: usize,
-    cells: Vec<i8>,
-    moves: Vec<MoveResponse>,
-    forbidden_points: Vec<ForbiddenPointResponse>,
-    human_side: i8,
-    side_to_move: i8,
-    winner: i8,
-    move_count: usize,
-    can_play: bool,
-    engine_thinking: bool,
-    status: String,
-    error: Option<String>,
-    last_mark: Option<[usize; 2]>,
-    last_result: Option<ResultResponse>,
-    last_trace: Option<TraceResponse>,
-    params: ParamsResponse,
-}
-
-#[derive(Serialize)]
-struct MoveResponse {
-    x: usize,
-    y: usize,
-    side: i8,
-    number: usize,
-}
-
-#[derive(Debug, PartialEq, Serialize)]
-struct ForbiddenPointResponse {
-    x: usize,
-    y: usize,
-    kind: &'static str,
-}
-
-#[derive(Serialize)]
-struct ResultResponse {
-    move_xy: [usize; 2],
-    score: i32,
-    depth: i32,
-    nodes: usize,
-    ms: Option<f64>,
-}
-
-#[derive(Serialize)]
-struct TraceResponse {
-    used_vcf: bool,
-    vcf_found: bool,
-    used_vct: bool,
-    vct_triggered: bool,
-    vct_ms: Option<f64>,
-    vct_found: bool,
-    vct_accepted: bool,
-    vct_reject_reason: Option<&'static str>,
-    alphabeta_ms: Option<f64>,
-    overlap_used: bool,
-    overlap_ab_ms: Option<f64>,
-    overlap_ab_cancelled: bool,
-    overlap_wait_ms: Option<f64>,
-    tt_snapshot_ms: Option<f64>,
-    fast_history_ordering: bool,
-    killer_hits: usize,
-    history_hits: usize,
-}
-
-#[derive(Serialize)]
-struct ParamsResponse {
-    profile: &'static str,
-    depth: i32,
-    width: usize,
-    compute_vcf: bool,
-    root_vcf_depth: i32,
-    opponent_vcf_depth: i32,
-    compute_vct: bool,
-    root_vct_depth: i32,
-    overlap_vct_alphabeta: bool,
-    fast_history_ordering: bool,
-    static_board: bool,
-    dynamic_board_margin: i32,
-    rule: &'static str,
-}
-
-fn snapshot_state(state: &GameState) -> StateResponse {
-    let last_result = state.last_result.map(|result| {
-        let (x, y) = move_to_xy(result.move_).expect("engine move stays valid");
-        ResultResponse {
-            move_xy: [x, y],
-            score: result.score,
-            depth: result.depth,
-            nodes: result.nodes,
-            ms: state.last_search_ms,
-        }
-    });
-    let last_trace = state.last_trace.as_ref().map(|trace| TraceResponse {
-        used_vcf: trace.used_vcf,
-        vcf_found: trace.vcf_found,
-        used_vct: trace.used_vct,
-        vct_triggered: trace.vct_triggered,
-        vct_ms: trace.vct_ms,
-        vct_found: trace.vct_found,
-        vct_accepted: trace.vct_accepted,
-        vct_reject_reason: trace.vct_reject_reason,
-        alphabeta_ms: trace.alphabeta_ms,
-        overlap_used: trace.overlap_used,
-        overlap_ab_ms: trace.overlap_ab_ms,
-        overlap_ab_cancelled: trace.overlap_ab_cancelled,
-        overlap_wait_ms: trace.overlap_wait_ms,
-        tt_snapshot_ms: trace.tt_snapshot_ms,
-        fast_history_ordering: trace.fast_history_ordering,
-        killer_hits: trace.killer_hits,
-        history_hits: trace.history_hits,
-    });
-    let limits = state.search_limits();
-    StateResponse {
-        board_size: BOARD_SIZE,
-        cells: state.board_cells(),
-        moves: state
-            .board
-            .move_history()
-            .iter()
-            .enumerate()
-            .filter_map(|(index, played)| {
-                let (x, y) = move_to_xy(played.move_).ok()?;
-                Some(MoveResponse {
-                    x,
-                    y,
-                    side: played.side,
-                    number: index + 1,
-                })
-            })
-            .collect(),
-        forbidden_points: visible_forbidden_points(state),
-        human_side: state.human_side,
-        side_to_move: state.board.side_to_move(),
-        winner: state.board.winner(),
-        move_count: state.board.move_count(),
-        can_play: state.can_human_play(),
-        engine_thinking: state.engine_thinking,
-        status: state.status.clone(),
-        error: state.error.clone(),
-        last_mark: state.last_mark.map(|(x, y)| [x, y]),
-        last_result,
-        last_trace,
-        params: ParamsResponse {
-            profile: state.config.profile.as_str(),
-            depth: limits.max_depth,
-            width: limits.root_width,
-            compute_vcf: state.config.runtime.compute_vcf,
-            root_vcf_depth: state.config.runtime.root_vcf_depth,
-            opponent_vcf_depth: state.config.runtime.opponent_vcf_depth,
-            compute_vct: state.config.runtime.compute_vct,
-            root_vct_depth: state.config.runtime.root_vct_depth,
-            overlap_vct_alphabeta: state.config.runtime.overlap_vct_alphabeta,
-            fast_history_ordering: state.config.runtime.fast_history_ordering,
-            static_board: state.config.runtime.static_board,
-            dynamic_board_margin: state.config.runtime.dynamic_board_margin,
-            rule: state.config.rule_set.as_str(),
-        },
-    }
-}
-
-fn visible_forbidden_points(state: &GameState) -> Vec<ForbiddenPointResponse> {
-    if state.config.rule_set != RuleSet::Renju
-        || state.board.side_to_move() != BLACK
-        || state.board.winner() != EMPTY
-    {
-        return Vec::new();
-    }
-
-    let mut points = Vec::new();
-    for y in 0..BOARD_SIZE {
-        for x in 0..BOARD_SIZE {
-            let Some(move_) = xy_to_move(x, y).ok() else {
-                continue;
-            };
-            let Ok(kind) = state
-                .board
-                .forbidden_kind_for_rule(move_, BLACK, RuleSet::Renju)
-            else {
-                continue;
-            };
-            if kind.is_forbidden() {
-                points.push(ForbiddenPointResponse {
-                    x,
-                    y,
-                    kind: forbidden_code(kind),
-                });
-            }
-        }
-    }
-    points
-}
-
-fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameState>>) {
+fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameController>>) {
     let mut buffer = [0_u8; 8192];
     let Ok(read) = stream.read(&mut buffer) else {
         return;
@@ -442,7 +154,7 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameState>>) {
     let (path, query) = split_target(target);
     let response = match (method, path) {
         ("GET", "/") => html_response(INDEX_HTML),
-        ("GET", "/state") => json_response(&snapshot_state(&state.lock().expect("state lock"))),
+        ("GET", "/state") => json_response(&state.lock().expect("state lock").snapshot()),
         ("POST", "/new") => {
             let side = query_param(query, "side")
                 .and_then(parse_side)
@@ -452,86 +164,45 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameState>>) {
                 .unwrap_or(RuleSet::Freestyle);
             {
                 let mut game = state.lock().expect("state lock");
-                game.reset(side, rule);
+                game.new_game(side, rule);
             }
             if side == WHITE {
                 maybe_start_engine(Arc::clone(&state));
             }
-            json_response(&snapshot_state(&state.lock().expect("state lock")))
+            json_response(&state.lock().expect("state lock").snapshot())
         }
         ("POST", "/play") => {
             let x = query_param(query, "x").and_then(|value| value.parse::<usize>().ok());
             let y = query_param(query, "y").and_then(|value| value.parse::<usize>().ok());
-            let mut should_engine_move = false;
-            {
+            let should_engine_move = {
                 let mut game = state.lock().expect("state lock");
-                game.error = None;
-                if !game.can_human_play() {
-                    game.error = Some("现在不能落子。".to_string());
-                } else if let (Some(x), Some(y)) = (x, y) {
-                    let move_ = xy_to_move(x, y);
-                    let forbidden = move_.ok().and_then(|move_| {
-                        game.board
-                            .forbidden_kind_for_rule(move_, game.human_side, game.config.rule_set)
-                            .ok()
-                            .filter(|kind| kind.is_forbidden())
-                    });
-                    if let Some(kind) = forbidden {
-                        game.error = Some(format!(
-                            "黑棋禁手：{}，不能落在这里。",
-                            forbidden_name(kind)
-                        ));
-                    } else {
-                        let rule = game.config.rule_set;
-                        match move_.and_then(|move_| game.board.play_for_rule(move_, None, rule)) {
-                            Ok(_) => {
-                                game.last_mark = Some((x, y));
-                                if game.board.winner() == game.human_side {
-                                    game.status = "你赢了。".to_string();
-                                } else {
-                                    game.status = "你已落子，引擎思考中。".to_string();
-                                    should_engine_move = true;
-                                }
-                            }
-                            Err(err) => {
-                                game.error = Some(format!("非法落子：{err:?}"));
-                            }
-                        }
-                    }
+                if let (Some(x), Some(y)) = (x, y) {
+                    game.play_human(x, y)
                 } else {
-                    game.error = Some("缺少坐标。".to_string());
+                    game.set_error("缺少坐标。");
+                    false
                 }
-            }
+            };
             if should_engine_move {
                 maybe_start_engine(Arc::clone(&state));
             }
-            json_response(&snapshot_state(&state.lock().expect("state lock")))
+            json_response(&state.lock().expect("state lock").snapshot())
         }
         ("POST", "/undo") => {
-            {
-                let mut game = state.lock().expect("state lock");
-                if game.engine_thinking {
-                    game.error = Some("引擎思考中，暂不能悔棋。".to_string());
-                } else {
-                    game.error = None;
-                    undo_turn(&mut game);
-                }
-            }
-            json_response(&snapshot_state(&state.lock().expect("state lock")))
+            state.lock().expect("state lock").undo_turn();
+            json_response(&state.lock().expect("state lock").snapshot())
         }
         ("POST", "/profile") => {
             let profile = query_param(query, "value").and_then(|value| value.parse().ok());
             {
                 let mut game = state.lock().expect("state lock");
-                if game.engine_thinking {
-                    game.error = Some("引擎思考中，暂不能切换模式。".to_string());
-                } else if let Some(profile) = profile {
+                if let Some(profile) = profile {
                     game.set_profile(profile);
                 } else {
-                    game.error = Some("未知模式，请选择 base 或 fast。".to_string());
+                    game.set_error("未知模式，请选择 base 或 fast。");
                 }
             }
-            json_response(&snapshot_state(&state.lock().expect("state lock")))
+            json_response(&state.lock().expect("state lock").snapshot())
         }
         _ => text_response(404, "not found"),
     };
@@ -559,119 +230,18 @@ fn parse_side(value: &str) -> Option<Side> {
     }
 }
 
-fn forbidden_name(kind: ForbiddenKind) -> &'static str {
-    match kind {
-        ForbiddenKind::None => "无",
-        ForbiddenKind::DoubleThree => "三三禁手",
-        ForbiddenKind::DoubleFour => "四四禁手",
-        ForbiddenKind::Overline => "长连禁手",
-    }
-}
-
-fn forbidden_code(kind: ForbiddenKind) -> &'static str {
-    match kind {
-        ForbiddenKind::None => "none",
-        ForbiddenKind::DoubleThree => "double_three",
-        ForbiddenKind::DoubleFour => "double_four",
-        ForbiddenKind::Overline => "overline",
-    }
-}
-
-fn undo_turn(game: &mut GameState) {
-    if game.board.move_count() == 0 {
-        game.error = Some("当前没有可悔棋步。".to_string());
+fn maybe_start_engine(state: Arc<Mutex<GameController>>) {
+    let task = { state.lock().expect("state lock").prepare_engine_search() };
+    let Some(task) = task else {
         return;
-    }
-    let mut undone = 0;
-    while game.board.move_count() > 0 && undone < 2 {
-        if game.board.undo().is_ok() {
-            undone += 1;
-        }
-        if game.board.side_to_move() == game.human_side {
-            break;
-        }
-    }
-    game.last_mark = last_move_xy(&game.board);
-    game.last_result = None;
-    game.last_trace = None;
-    game.last_search_ms = None;
-    game.status = if game.board.side_to_move() == game.human_side {
-        "已悔棋，请继续落子。".to_string()
-    } else if game.board.move_count() == 0 && game.human_side == WHITE {
-        "已撤回引擎首手；点击“我执白”可重新让引擎开局。".to_string()
-    } else {
-        "已悔棋，当前不是你的回合。".to_string()
-    };
-}
-
-fn last_move_xy(board: &Board) -> Option<(usize, usize)> {
-    board
-        .move_history()
-        .last()
-        .and_then(|played| move_to_xy(played.move_).ok())
-}
-
-fn maybe_start_engine(state: Arc<Mutex<GameState>>) {
-    let (board, config, limits, game_id) = {
-        let mut game = state.lock().expect("state lock");
-        if game.engine_thinking
-            || game.board.winner() != EMPTY
-            || game.board.side_to_move() == game.human_side
-        {
-            return;
-        }
-        game.engine_thinking = true;
-        game.error = None;
-        game.status = "引擎思考中...".to_string();
-        (
-            game.board.clone(),
-            game.config.clone(),
-            game.search_limits(),
-            game.game_id,
-        )
     };
 
     thread::spawn(move || {
-        let mut board_for_search = board;
-        let mut searcher = RootSearcher::new(config);
-        let start = Instant::now();
-        let result = searcher.search(&mut board_for_search, Some(limits));
-        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let trace = searcher.last_trace.clone();
-        let mut game = state.lock().expect("state lock");
-        if game.game_id != game_id {
-            return;
-        }
-        if game.board.winner() == EMPTY && game.board.side_to_move() != game.human_side {
-            if !game.board.is_legal_move_for_rule(
-                result.move_,
-                game.board.side_to_move(),
-                game.config.rule_set,
-            ) {
-                game.error = Some("引擎返回禁手或非法落子。".to_string());
-                game.status = "引擎落子失败。".to_string();
-            } else {
-                let rule = game.config.rule_set;
-                match game.board.play_for_rule(result.move_, None, rule) {
-                    Ok(_) => {
-                        game.last_mark = move_to_xy(result.move_).ok();
-                        game.last_result = Some(result);
-                        game.last_trace = trace;
-                        game.last_search_ms = Some((elapsed_ms * 1000.0).round() / 1000.0);
-                        game.status = if game.board.winner() == EMPTY {
-                            "引擎已落子，轮到你。".to_string()
-                        } else {
-                            "引擎获胜。".to_string()
-                        };
-                    }
-                    Err(err) => {
-                        game.error = Some(format!("引擎返回非法落子：{err:?}"));
-                        game.status = "引擎落子失败。".to_string();
-                    }
-                }
-            }
-        }
-        game.engine_thinking = false;
+        let completion = task.run();
+        state
+            .lock()
+            .expect("state lock")
+            .commit_engine_search(completion);
     });
 }
 
@@ -709,66 +279,6 @@ mod tests {
         assert_eq!(browser_url("0.0.0.0:18080"), "http://127.0.0.1:18080");
         assert_eq!(browser_url("[::]:18080"), "http://[::1]:18080");
         assert_eq!(browser_url("127.0.0.1:18080"), "http://127.0.0.1:18080");
-    }
-
-    fn double_three_state(rule: RuleSet) -> GameState {
-        let mut config = load_default_config();
-        config.rule_set = rule;
-        let mut state = GameState::new(config);
-        for (x, y) in [
-            (6, 7),
-            (0, 0),
-            (8, 7),
-            (0, 1),
-            (7, 6),
-            (0, 2),
-            (7, 8),
-            (0, 3),
-        ] {
-            state
-                .board
-                .play_for_rule(xy_to_move(x, y).unwrap(), None, rule)
-                .unwrap();
-        }
-        state
-    }
-
-    #[test]
-    fn renju_black_turn_exposes_forbidden_points() {
-        let mut state = double_three_state(RuleSet::Renju);
-        let points = visible_forbidden_points(&state);
-
-        assert!(points.contains(&ForbiddenPointResponse {
-            x: 7,
-            y: 7,
-            kind: "double_three",
-        }));
-        let move_count = state.board.move_count();
-        assert!(state
-            .board
-            .play_for_rule(xy_to_move(7, 7).unwrap(), None, RuleSet::Renju)
-            .is_err());
-        assert_eq!(state.board.move_count(), move_count);
-    }
-
-    #[test]
-    fn freestyle_does_not_expose_forbidden_points() {
-        let state = double_three_state(RuleSet::Freestyle);
-        assert!(visible_forbidden_points(&state).is_empty());
-    }
-
-    #[test]
-    fn renju_white_turn_does_not_expose_forbidden_points() {
-        let mut config = load_default_config();
-        config.rule_set = RuleSet::Renju;
-        let mut state = GameState::new(config);
-        state
-            .board
-            .play_for_rule(xy_to_move(7, 7).unwrap(), Some(BLACK), RuleSet::Renju)
-            .unwrap();
-
-        assert_eq!(state.board.side_to_move(), WHITE);
-        assert!(visible_forbidden_points(&state).is_empty());
     }
 }
 
