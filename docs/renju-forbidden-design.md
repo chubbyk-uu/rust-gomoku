@@ -1691,6 +1691,23 @@ time fell to avg 1148 ms (Renju, from 1469 ms) and avg 839 ms (Freestyle, from
 contended end-to-end figures, not single-process microbenchmarks; the clean
 per-node deltas are in `docs/perf-log.md`.
 
+### Forced-move selection parity fix (tactical search off)
+
+A latent search bug surfaced while adding the difficulty presets: with tactical
+search disabled (Easy/Normal), the root win-priority and single-forcing branches
+returned the first candidate in scan order instead of the strongest forcing
+move, so the engine could miss an immediately available win. The bug is
+rule-independent (present in both freestyle and Renju) and was mirrored from the
+Python reference, which had the same defect; SlowRenju was already correct.
+
+The fix selects the highest-`order_score` candidate (lowest move on ties), which
+equals the presorted order, and was applied to the Rust engine
+(`src/search/movegen.rs`) and to `pygomoku` in lockstep so the diff harness
+stays bit-identical. It only changed behavior at the root, where the candidate
+list is intentionally left in scan order. Regressions guard the path with
+VCF/VCT off: `cases/diff/root_win_priority_no_tactics_31.json` (Rust-vs-reference
+parity), `src/search/root.rs` (Rust), and `tests/test_search.py` (pygomoku).
+
 ## Fixture Format Proposal
 
 Use JSONL so cases are easy to append:
