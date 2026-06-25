@@ -609,6 +609,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let announcedResult = null;
     let soundOn = true;
     let prevMoveCount = null;
+    let suppressNextSound = false; // human move already played optimistically on click
 
     // Stone-placement sound, synthesized via Web Audio (no asset file).
     let audioCtx = null;
@@ -659,7 +660,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function maybePlayStoneSound() {
       if (!state) return;
       if (prevMoveCount !== null && state.move_count === prevMoveCount + 1) {
-        playStoneSound();
+        // engine replies play here; the human's own move was already played on
+        // click (suppressNextSound) to avoid the HTTP round-trip latency
+        if (!suppressNextSound) playStoneSound();
+        suppressNextSound = false;
       }
       prevMoveCount = state.move_count;
     }
@@ -731,6 +735,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const x = Math.round(((event.clientX - rect.left) / rect.width * canvas.width - p.margin) / p.cell);
       const y = Math.round(((event.clientY - rect.top) / rect.height * canvas.height - p.margin) / p.cell);
       if (x >= 0 && y >= 0 && x < state.board_size && y < state.board_size) {
+        // play immediately on click for a legal-looking point so the click feels
+        // instant; maybePlayStoneSound() then skips this move's server echo
+        const idx = y * state.board_size + x;
+        const empty = !state.cells || state.cells[idx] === 0;
+        const forbidden = (state.forbidden_points || []).some((pt) => pt.x === x && pt.y === y);
+        if (empty && !forbidden) {
+          playStoneSound();
+          suppressNextSound = true;
+        }
         api(`/play?x=${x}&y=${y}`).catch(showError);
       }
     });
