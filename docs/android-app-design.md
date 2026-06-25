@@ -30,6 +30,7 @@ Implementation progress on `feature/android-app`:
 - Phase 3 Android project skeleton is complete.
 - Phase 4 Rust JNI bridge is complete.
 - Phase 5 Kotlin bridge and search thread are complete.
+- Phase 6 mobile UI is complete (pending the Phase 8 real-device pass).
 - The desktop HTTP GUI now uses `GameController`.
 - Controller tests cover forbidden input, first-move search, undo, profile
   switching, invalid sides, and stale search completion.
@@ -57,8 +58,20 @@ Implementation progress on `feature/android-app`:
   after rotation recreates the page. The UI-thread, rotation, and stale-result
   behaviors are device-confirmed in Phase 8; stale protection is already covered
   by the `GameController` generation tests.
-- The mobile page is still a functional placeholder; the polished phone layout,
-  diagnostics sheet, and responsive viewport work begin in Phase 6.
+- Phase 6 mobile UI is in place as WebView assets (`index.html`, `app.css`,
+  `app.js`): a status row, a JS-sized square board (kept square at
+  `min(width, height)` and redrawn at `devicePixelRatio` for crisp lines), and a
+  bottom action bar, with a new-game sheet (side, rule, mode) and a "more" sheet
+  holding the optional all-move-numbers switch and a collapsed advanced panel
+  (score, depth, nodes, thinking time from the snapshot's `last_result`). The
+  layout switches to board-left / panel-right in landscape. Stone placement uses
+  tap-to-preview then tap-the-same-point-to-confirm to cut mis-taps; taps snap to
+  the nearest intersection and are rejected beyond ~0.6 cell; forbidden points
+  are rejected with a toast and a light vibration (new `VIBRATE` permission).
+- The Base/Fast control is labelled "模式" (mode), not difficulty; a difficulty
+  selector mapping to search depth/width is a separate, later feature.
+- Responsive verification at the target viewports and the touch/rotation/stale
+  behaviors are confirmed on a real device in Phase 8.
 
 ## Goals
 
@@ -454,6 +467,8 @@ Gate:
 
 ### Phase 6: Mobile UI
 
+Status: complete (real-device pass pending in Phase 8).
+
 1. Extract reusable board rendering and game commands from the desktop page.
 2. Add a mobile-specific layout and transport adapter.
 3. Implement the new-game sheet and compact status/actions.
@@ -539,8 +554,9 @@ Stop and diagnose before proceeding when:
 
 ## Next Implementation Step
 
-Implement Phase 6 on `feature/android-app`: extract reusable board rendering and
-game commands from the desktop page into the mobile layout, add the new-game
-sheet and compact status/actions, move desktop diagnostics into an advanced
-sheet, and verify the responsive rules at the target viewports. The Phase 5
-bridge, executor, and JNI transport are already in place to build on.
+Run Phase 7 automated validation (`cargo fmt`/`test`, `cargo ndk` cross-build,
+`./gradlew test lint assembleDebug`, APK inspection) and then the Phase 8
+real-device gate: confirm placement, forbidden marks, undo/restart/profile,
+rotation during search, backgrounding during search, and responsive framing at
+the target viewports on a phone, recording search duration. Use
+`android/gradlew-proxy` in place of `./gradlew` when the host proxy is required.

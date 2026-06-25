@@ -1,0 +1,229 @@
+:root {
+  color-scheme: light;
+  --ink: #191714;
+  --muted: #6a645c;
+  --paper: #f3f1eb;
+  --card: #ffffff;
+  --board: #d9a85f;
+  --line: #33291d;
+  --accent: #176b55;
+  --danger: #b3331f;
+  --hairline: #d6d1c7;
+  --shadow: 0 6px 24px rgba(25, 23, 20, 0.18);
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: system-ui, "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  overscroll-behavior: none;
+}
+body { user-select: none; -webkit-user-select: none; }
+
+/* ---- App shell: status / board / actions ------------------------------- */
+#app {
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: clamp(6px, 1.6vw, 12px);
+  padding:
+    max(10px, env(safe-area-inset-top))
+    max(10px, env(safe-area-inset-right))
+    max(10px, env(safe-area-inset-bottom))
+    max(10px, env(safe-area-inset-left));
+}
+
+#statusbar {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px;
+}
+#turn-dot {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--ink);
+}
+#turn-dot.white { background: #f7f5ef; }
+#turn-dot.thinking { background: var(--accent); border-color: var(--accent); animation: pulse 1s ease-in-out infinite; }
+#turn-dot.none { background: transparent; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+#status-msg {
+  font-size: clamp(13px, 3.6vw, 16px);
+  line-height: 1.25;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#status-msg.error { color: var(--danger); }
+
+#board-area {
+  min-height: 0;
+  display: grid;
+  place-items: center;
+}
+#board-wrap {
+  padding: 6px;
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  /* size set in JS to a square of min(area-w, area-h) */
+}
+canvas#board {
+  display: block;
+  background: var(--board);
+  border-radius: 4px;
+  touch-action: none;
+}
+
+#actionbar {
+  display: flex;
+  gap: 8px;
+}
+#actionbar button { flex: 1; }
+
+/* ---- Buttons ----------------------------------------------------------- */
+button {
+  min-height: 48px;
+  padding: 0 16px;
+  font-size: 15px;
+  border-radius: 10px;
+  border: 1px solid var(--hairline);
+  background: var(--card);
+  color: var(--ink);
+}
+button:active { filter: brightness(0.96); }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.warn { color: var(--danger); border-color: var(--danger); }
+button:disabled { opacity: 0.45; }
+
+/* ---- Bottom sheets ----------------------------------------------------- */
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(25, 23, 20, 0.4);
+  display: none;
+  z-index: 10;
+}
+.sheet-backdrop.open { display: block; }
+.sheet {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  z-index: 11;
+  background: var(--paper);
+  border-radius: 16px 16px 0 0;
+  box-shadow: var(--shadow);
+  padding:
+    18px
+    max(16px, env(safe-area-inset-right))
+    max(18px, env(safe-area-inset-bottom))
+    max(16px, env(safe-area-inset-left));
+  transform: translateY(100%);
+  transition: transform 0.22s ease;
+  max-width: 640px;
+  margin: 0 auto;
+}
+.sheet.open { transform: translateY(0); }
+.sheet h2 { margin: 0 0 14px; font-size: 17px; }
+.field { margin-bottom: 16px; }
+.field > label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+
+/* segmented option group */
+.segmented { display: flex; gap: 8px; }
+.segmented button { flex: 1; }
+.segmented button[aria-pressed="true"] {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.sheet-actions { display: flex; gap: 8px; margin-top: 4px; }
+.sheet-actions button { flex: 1; }
+
+/* advanced collapsible */
+details.advanced { border-top: 1px solid var(--hairline); padding-top: 10px; margin-top: 6px; }
+details.advanced > summary {
+  cursor: pointer;
+  font-size: 15px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+.kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  font-size: 14px;
+  padding: 6px 2px 2px;
+}
+.kv .k { color: var(--muted); }
+.kv .v { text-align: right; font-variant-numeric: tabular-nums; }
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 48px;
+}
+.toggle-row span { font-size: 15px; }
+
+/* ---- Toast ------------------------------------------------------------- */
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: max(84px, calc(env(safe-area-inset-bottom) + 84px));
+  transform: translateX(-50%) translateY(8px);
+  background: rgba(25, 23, 20, 0.92);
+  color: #fff;
+  font-size: 14px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  z-index: 20;
+  max-width: 80vw;
+  text-align: center;
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ---- Landscape / tablet: board left, panel right ----------------------- */
+@media (orientation: landscape) {
+  #app {
+    grid-template-rows: 1fr;
+    grid-template-columns: minmax(0, 1fr) clamp(200px, 30vw, 280px);
+    grid-template-areas: "board side";
+    align-items: stretch;
+  }
+  #board-area { grid-area: board; }
+  #statusbar {
+    grid-area: side;
+    align-self: start;
+    align-items: flex-start;
+  }
+  #actionbar {
+    grid-area: side;
+    align-self: end;
+    flex-direction: column;
+  }
+  /* stack status at top and actions at bottom of the side column */
+  #app {
+    grid-template-rows: auto 1fr auto;
+    grid-template-columns: minmax(0, 1fr) clamp(200px, 30vw, 280px);
+    grid-template-areas:
+      "board status"
+      "board ."
+      "board actions";
+  }
+  #statusbar { grid-area: status; }
+  #actionbar { grid-area: actions; }
+  #board-area { grid-area: board; grid-row: 1 / -1; }
+}

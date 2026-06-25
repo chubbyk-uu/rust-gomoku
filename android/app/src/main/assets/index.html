@@ -2,283 +2,83 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>rust_gomoku</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --ink: #191714;
-      --muted: #6a645c;
-      --paper: #f3f1eb;
-      --board: #d9a85f;
-      --line: #33291d;
-      --accent: #176b55;
-      --danger: #b3331f;
-    }
-    * { box-sizing: border-box; }
-    html, body {
-      margin: 0;
-      min-height: 100%;
-      background: var(--paper);
-      color: var(--ink);
-      font-family: system-ui, "Noto Sans SC", "Microsoft YaHei", sans-serif;
-    }
-    body {
-      min-height: 100dvh;
-      padding:
-        max(12px, env(safe-area-inset-top))
-        max(12px, env(safe-area-inset-right))
-        max(12px, env(safe-area-inset-bottom))
-        max(12px, env(safe-area-inset-left));
-      display: grid;
-      place-items: center;
-    }
-    main {
-      width: min(100%, 720px);
-      display: grid;
-      gap: 12px;
-    }
-    header {
-      min-height: 48px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-    }
-    h1 { margin: 0; font-size: 20px; line-height: 1.2; }
-    #status { color: var(--muted); font-size: 14px; text-align: right; }
-    #status.error { color: var(--danger); }
-    .board-shell {
-      width: 100%;
-      aspect-ratio: 1;
-      padding: 8px;
-      background: #fff;
-      border: 1px solid #d6d1c7;
-      border-radius: 8px;
-    }
-    canvas {
-      display: block;
-      width: 100%;
-      height: 100%;
-      background: var(--board);
-      touch-action: manipulation;
-    }
-    .actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      align-items: center;
-    }
-    button, select {
-      min-height: 44px;
-      padding: 0 14px;
-      font-size: 15px;
-      border-radius: 8px;
-      border: 1px solid #c8c2b6;
-      background: #fff;
-      color: var(--ink);
-    }
-    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-    button:disabled { opacity: 0.5; }
-    @media (orientation: landscape) and (max-height: 600px) {
-      body { place-items: stretch center; }
-      main {
-        width: min(100%, 980px);
-        grid-template-columns: minmax(0, 1fr) 240px;
-        align-items: start;
-      }
-      header { grid-column: 2; flex-direction: column; align-items: flex-start; }
-      #status { text-align: left; }
-      .board-shell { grid-column: 1; grid-row: 1 / span 3; max-height: calc(100dvh - 24px); }
-      .actions { grid-column: 2; flex-direction: column; align-items: stretch; }
-    }
-  </style>
+  <link rel="stylesheet" href="app.css">
 </head>
 <body>
-  <main>
-    <header>
-      <h1>rust_gomoku</h1>
-      <div id="status">准备连接引擎…</div>
+  <div id="app">
+    <header id="statusbar">
+      <span id="turn-dot" class="none" aria-hidden="true"></span>
+      <span id="status-msg">准备连接引擎…</span>
     </header>
-    <section class="board-shell">
-      <canvas id="board" width="720" height="720" aria-label="15路五子棋棋盘"></canvas>
-    </section>
-    <div class="actions">
-      <select id="side">
-        <option value="black">我执黑</option>
-        <option value="white">我执白</option>
-      </select>
-      <select id="rule">
-        <option value="renju">有禁手</option>
-        <option value="freestyle">无禁手</option>
-      </select>
-      <button id="new-game" class="primary">新局</button>
-      <button id="undo">悔棋</button>
+    <main id="board-area">
+      <div id="board-wrap">
+        <canvas id="board" aria-label="15路五子棋棋盘"></canvas>
+      </div>
+    </main>
+    <nav id="actionbar">
+      <button id="btn-undo" class="warn">悔棋</button>
+      <button id="btn-newgame" class="primary">新局</button>
+      <button id="btn-more">更多</button>
+    </nav>
+  </div>
+
+  <!-- New game sheet -->
+  <div class="sheet-backdrop" data-backdrop="newgame"></div>
+  <section class="sheet" id="sheet-newgame" aria-hidden="true">
+    <h2>新局</h2>
+    <div class="field">
+      <label>执棋</label>
+      <div class="segmented" id="opt-side">
+        <button data-value="black" aria-pressed="true">我执黑</button>
+        <button data-value="white" aria-pressed="false">我执白</button>
+      </div>
     </div>
-  </main>
-  <script>
-    "use strict";
+    <div class="field">
+      <label>规则</label>
+      <div class="segmented" id="opt-rule">
+        <button data-value="renju" aria-pressed="true">有禁手</button>
+        <button data-value="freestyle" aria-pressed="false">无禁手</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>模式</label>
+      <div class="segmented" id="opt-mode">
+        <button data-value="base" aria-pressed="true">Base</button>
+        <button data-value="fast" aria-pressed="false">Fast</button>
+      </div>
+    </div>
+    <div class="sheet-actions">
+      <button data-close="newgame">取消</button>
+      <button class="primary" id="btn-start">开始</button>
+    </div>
+  </section>
 
-    // ---- Native transport: promise wrapper over the @JavascriptInterface bridge.
-    const pending = new Map();
-    let nextCallId = 0;
+  <!-- More / advanced sheet -->
+  <div class="sheet-backdrop" data-backdrop="more"></div>
+  <section class="sheet" id="sheet-more" aria-hidden="true">
+    <h2>更多</h2>
+    <div class="toggle-row">
+      <span>显示全部手数</span>
+      <button id="opt-numbers" aria-pressed="false">关</button>
+    </div>
+    <details class="advanced">
+      <summary>高级 / 引擎信息</summary>
+      <div class="kv" id="adv-kv">
+        <span class="k">分数</span><span class="v" data-adv="score">—</span>
+        <span class="k">深度</span><span class="v" data-adv="depth">—</span>
+        <span class="k">节点</span><span class="v" data-adv="nodes">—</span>
+        <span class="k">思考耗时</span><span class="v" data-adv="ms">—</span>
+      </div>
+    </details>
+    <div class="sheet-actions">
+      <button data-close="more">关闭</button>
+    </div>
+  </section>
 
-    window.__onNativeResult = function (callbackId, responseJson) {
-      const entry = pending.get(callbackId);
-      if (!entry) return;
-      pending.delete(callbackId);
-      try {
-        entry.resolve(JSON.parse(responseJson));
-      } catch (err) {
-        entry.reject(err);
-      }
-    };
+  <div id="toast" role="status"></div>
 
-    function nativeRequest(payload) {
-      return new Promise((resolve, reject) => {
-        if (!window.AndroidBridge || typeof window.AndroidBridge.request !== "function") {
-          reject(new Error("native bridge unavailable"));
-          return;
-        }
-        const id = "c" + (nextCallId++);
-        pending.set(id, { resolve, reject });
-        window.AndroidBridge.request(JSON.stringify(payload), id);
-      });
-    }
-
-    // ---- Board rendering.
-    const BLACK = 1, WHITE = -1, EMPTY = 0;
-    const canvas = document.getElementById("board");
-    const ctx = canvas.getContext("2d");
-    const SIZE = 720, MARGIN = 42, GRID = 15;
-    const CELL = (SIZE - MARGIN * 2) / (GRID - 1);
-    const statusEl = document.getElementById("status");
-
-    let lastState = null;
-    let busy = false;
-
-    function pointPx(i) { return MARGIN + i * CELL; }
-
-    function draw(state) {
-      ctx.fillStyle = "#d9a85f";
-      ctx.fillRect(0, 0, SIZE, SIZE);
-      ctx.strokeStyle = "#33291d";
-      ctx.lineWidth = 2;
-      for (let i = 0; i < GRID; i += 1) {
-        const p = pointPx(i);
-        ctx.beginPath(); ctx.moveTo(MARGIN, p); ctx.lineTo(SIZE - MARGIN, p); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(p, MARGIN); ctx.lineTo(p, SIZE - MARGIN); ctx.stroke();
-      }
-      ctx.fillStyle = "#33291d";
-      for (const [x, y] of [[3, 3], [11, 3], [7, 7], [3, 11], [11, 11]]) {
-        ctx.beginPath(); ctx.arc(pointPx(x), pointPx(y), 5, 0, Math.PI * 2); ctx.fill();
-      }
-      if (!state) return;
-
-      // Forbidden crosses (Renju black turn only; provided by the controller).
-      ctx.strokeStyle = "#b3331f";
-      ctx.lineWidth = 3;
-      for (const fp of state.forbidden_points || []) {
-        const cx = pointPx(fp.x), cy = pointPx(fp.y), r = CELL * 0.28;
-        ctx.beginPath(); ctx.moveTo(cx - r, cy - r); ctx.lineTo(cx + r, cy + r);
-        ctx.moveTo(cx + r, cy - r); ctx.lineTo(cx - r, cy + r); ctx.stroke();
-      }
-
-      // Stones.
-      const cells = state.cells || [];
-      const r = CELL * 0.42;
-      for (let y = 0; y < GRID; y += 1) {
-        for (let x = 0; x < GRID; x += 1) {
-          const v = cells[y * GRID + x];
-          if (v === EMPTY) continue;
-          ctx.beginPath(); ctx.arc(pointPx(x), pointPx(y), r, 0, Math.PI * 2);
-          ctx.fillStyle = v === BLACK ? "#191714" : "#f7f5ef";
-          ctx.fill();
-          ctx.lineWidth = 1; ctx.strokeStyle = "#33291d"; ctx.stroke();
-        }
-      }
-
-      // Last-move marker.
-      if (state.last_mark) {
-        const [mx, my] = state.last_mark;
-        ctx.beginPath(); ctx.arc(pointPx(mx), pointPx(my), 4, 0, Math.PI * 2);
-        ctx.fillStyle = "#176b55"; ctx.fill();
-      }
-    }
-
-    function render(state) {
-      lastState = state;
-      draw(state);
-      const msg = state.error || state.status || "";
-      statusEl.textContent = msg;
-      statusEl.classList.toggle("error", Boolean(state.error));
-    }
-
-    // Apply a response, then let the engine reply if it is its turn.
-    async function applyAndContinue(response) {
-      if (!response.ok) {
-        statusEl.textContent = (response.error && response.error.message) || "请求失败";
-        statusEl.classList.add("error");
-        return;
-      }
-      let state = response.state;
-      render(state);
-      while (state.winner === EMPTY && state.side_to_move !== state.human_side) {
-        const moved = await nativeRequest({ op: "engine_move" });
-        if (!moved.ok) {
-          statusEl.textContent = (moved.error && moved.error.message) || "引擎落子失败";
-          statusEl.classList.add("error");
-          break;
-        }
-        state = moved.state;
-        render(state);
-      }
-    }
-
-    async function guarded(fn) {
-      if (busy) return;
-      busy = true;
-      try { await fn(); }
-      catch (err) { statusEl.textContent = String(err); statusEl.classList.add("error"); }
-      finally { busy = false; }
-    }
-
-    function canvasToCell(evt) {
-      const rect = canvas.getBoundingClientRect();
-      const scale = SIZE / rect.width;
-      const px = (evt.clientX - rect.left) * scale;
-      const py = (evt.clientY - rect.top) * scale;
-      const x = Math.round((px - MARGIN) / CELL);
-      const y = Math.round((py - MARGIN) / CELL);
-      if (x < 0 || y < 0 || x >= GRID || y >= GRID) return null;
-      return { x, y };
-    }
-
-    canvas.addEventListener("click", (evt) => guarded(async () => {
-      if (!lastState || !lastState.can_play) return;
-      const cell = canvasToCell(evt);
-      if (!cell) return;
-      const played = await nativeRequest({ op: "play", x: cell.x, y: cell.y });
-      await applyAndContinue(played);
-    }));
-
-    document.getElementById("new-game").addEventListener("click", () => guarded(async () => {
-      const human_side = document.getElementById("side").value;
-      const rule = document.getElementById("rule").value;
-      const started = await nativeRequest({ op: "new_game", human_side, rule });
-      await applyAndContinue(started);
-    }));
-
-    document.getElementById("undo").addEventListener("click", () => guarded(async () => {
-      const undone = await nativeRequest({ op: "undo" });
-      await applyAndContinue(undone);
-    }));
-
-    // Initial sync (also re-runs after rotation recreates the page).
-    guarded(async () => {
-      const state = await nativeRequest({ op: "state" });
-      await applyAndContinue(state);
-    });
-  </script>
+  <script src="app.js"></script>
 </body>
 </html>
