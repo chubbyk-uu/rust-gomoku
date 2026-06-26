@@ -14,7 +14,7 @@
 - 连珠 oracle、定向密集压测、一维穷举、候选诊断、性能测试和规则感知对局裁判工具。
 - 非 root 候选排序成本优化：保持原排序 key 不变，减少 `getmi` 和候选复制开销。
 - fast profile 默认开启第三版 history/killer ordering：只在静态排序同组内调整安静着法顺序，base 不受影响。
-- 仓库内保留 `opponent/zhou` 作为轻量对手；完整 Python reference 不随仓库提交。
+- SlowRenju、Rapfi 等外部参考引擎按需从本地 checkout 使用；仓库不再提交轻量对手或完整 Python reference。
 
 可选诊断/实验：
 
@@ -216,7 +216,6 @@ cases/diff/          root 差分 case
 cases/match/         对战和 benchmark 前缀局面
 cases/renju/         禁手、战术、候选诊断和棋力前缀 case
 data/static/         从 reference 提取的静态矩阵
-opponent/zhou/       zhou 基线对手
 scripts/             差分、对战、benchmark、case 抽取脚本
 tests/               Rust 自动测试
 ```
