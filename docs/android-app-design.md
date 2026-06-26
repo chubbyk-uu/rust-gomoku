@@ -33,6 +33,7 @@ Implementation progress on `feature/android-app`:
 - Phase 6 mobile UI is complete and device-confirmed by the Phase 8 pass.
 - Phase 7 automated validation is complete.
 - Phase 8 real-device validation is complete.
+- Phase 9 GitHub distribution is complete for `v0.1.2`.
 - The desktop HTTP GUI now uses `GameController`.
 - Controller tests cover forbidden input, first-move search, undo, profile
   switching, invalid sides, and stale search completion.
@@ -564,9 +565,9 @@ and validate its playing strength separately.
 
 ### Phase 9: Distribution
 
-Status: in progress. Release signing is configured through a repository-external
-properties file, and signed release APK/AAB builds pass locally. GitHub Release
-upload is the remaining distribution step.
+Status: complete. Release signing is configured through a repository-external
+properties file, signed release APK/AAB builds pass locally, and the first
+Android release artifacts are attached to GitHub Release `v0.1.2`.
 
 1. Produce `app-debug.apk` for initial manual installation: complete.
 2. After the real-device gate, create a release signing key outside the
@@ -574,7 +575,7 @@ upload is the remaining distribution step.
 3. Configure release signing through local/CI secrets: complete for local
    builds.
 4. Produce signed release APK and AAB: complete.
-5. Attach the APK to a GitHub Release: pending.
+5. Attach the APK to a GitHub Release: complete for `v0.1.2`.
 6. Consider Play publication only after signing, privacy, screenshots, version
    upgrades, and device compatibility are stable.
 
@@ -603,6 +604,10 @@ Expected local outputs:
 
 The first signed Android distribution version is `versionName = "0.1.2"` and
 `versionCode = 3`.
+
+GitHub Release:
+
+- <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.2>
 
 ## Stop Conditions
 
