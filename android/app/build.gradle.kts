@@ -1,7 +1,25 @@
 import org.gradle.api.tasks.Exec
+import java.util.Properties
 
 plugins {
     id("com.android.application")
+}
+
+val releaseSigningPropertiesFile = file(
+    System.getenv("RUST_GOMOKU_ANDROID_SIGNING_PROPERTIES")
+        ?: "${System.getProperty("user.home")}/.android/rust-gomoku-release.properties"
+)
+val releaseSigningProperties = Properties()
+val hasReleaseSigning = releaseSigningPropertiesFile.isFile
+val releaseSigningPropertiesPath = releaseSigningPropertiesFile.absolutePath
+
+if (hasReleaseSigning) {
+    releaseSigningPropertiesFile.inputStream().use { releaseSigningProperties.load(it) }
+}
+
+fun releaseSigningProperty(name: String): String {
+    return releaseSigningProperties.getProperty(name)
+        ?: throw GradleException("Missing `$name` in ${releaseSigningPropertiesFile.absolutePath}")
 }
 
 android {
@@ -14,17 +32,31 @@ android {
         applicationId = "io.github.chubbykuu.rustgomoku"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "0.1.2"
 
         ndk {
             abiFilters += "arm64-v8a"
         }
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(releaseSigningProperty("storeFile"))
+                storePassword = releaseSigningProperty("storePassword")
+                keyAlias = releaseSigningProperty("keyAlias")
+                keyPassword = releaseSigningProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -72,6 +104,25 @@ val buildRustArm64 by tasks.registering(Exec::class) {
 
 tasks.named("preBuild").configure {
     dependsOn(buildRustArm64)
+}
+
+val verifyReleaseSigning by tasks.registering {
+    inputs.property("hasReleaseSigning", hasReleaseSigning)
+    inputs.property("releaseSigningPropertiesPath", releaseSigningPropertiesPath)
+
+    doLast {
+        if (inputs.properties["hasReleaseSigning"] != true) {
+            val path = inputs.properties["releaseSigningPropertiesPath"]
+            throw GradleException(
+                "Release signing is not configured. Create $path " +
+                    "or set RUST_GOMOKU_ANDROID_SIGNING_PROPERTIES to a signing properties file."
+            )
+        }
+    }
+}
+
+tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }.configureEach {
+    dependsOn(verifyReleaseSigning)
 }
 
 val testMobileUi by tasks.registering(Exec::class) {

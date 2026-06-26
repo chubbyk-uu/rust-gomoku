@@ -28,8 +28,9 @@ To shorten the perceived wait during manual GUI play, the GUI entry enables `ove
 Historical performance experiments and stop-loss conclusions are recorded in `docs/perf-log.md`; the README does not maintain a list of failed approaches.
 The Android architecture, mobile interface, JNI boundary, phased validation
 gates, and current implementation status are documented in
-`docs/android-app-design.md`. The Android app builds an ARM64 debug APK and
-uses the shared Rust controller through the tested JNI bridge.
+`docs/android-app-design.md`. The Android app builds ARM64 debug and signed
+release artifacts and uses the shared Rust controller through the tested JNI
+bridge.
 
 ## Default Parameters
 
@@ -103,6 +104,18 @@ cargo build --release
 cargo test --quiet
 python3 scripts/run_diff.py --jobs 10
 ```
+
+Android debug/release gates:
+
+```bash
+cd android
+./gradlew test lint assembleDebug
+./gradlew test lint assembleRelease bundleRelease
+```
+
+Release signing reads `~/.android/rust-gomoku-release.properties` by default;
+see `docs/android-app-design.md` for the local signing file format and override
+environment variable.
 
 Gomocup smoke:
 

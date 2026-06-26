@@ -30,10 +30,9 @@ Implementation progress on `feature/android-app`:
 - Phase 3 Android project skeleton is complete.
 - Phase 4 Rust JNI bridge is complete.
 - Phase 5 Kotlin bridge and search thread are complete.
-- Phase 6 mobile UI is complete (pending the Phase 8 real-device pass).
+- Phase 6 mobile UI is complete and device-confirmed by the Phase 8 pass.
 - Phase 7 automated validation is complete.
-- Phase 8 has an initial manual install/launch smoke on a phone; the full
-  gameplay, lifecycle, performance, and thermal checklist remains pending.
+- Phase 8 real-device validation is complete.
 - The desktop HTTP GUI now uses `GameController`.
 - Controller tests cover forbidden input, first-move search, undo, profile
   switching, invalid sides, and stale search completion.
@@ -76,16 +75,16 @@ Implementation progress on `feature/android-app`:
   VCF/VCT, Advanced to `d6/w30` with VCF/VCT, and Hard to `d8/w40` with
   VCF/VCT. Hard is the default.
 - Responsive verification at the target viewports and the touch/rotation/stale
-  behaviors must be confirmed on a real device in Phase 8.
+  behaviors are confirmed on a real device.
 - Mobile UI state logic is isolated in `ui_logic.js` and covered by Node tests
   invoked through Gradle's `testMobileUi` task. The tests lock busy-state
   control disabling, the immediate engine-thinking snapshot, and synchronized
   sheet visibility/`aria-hidden` state.
 - Manual phone testing has confirmed portrait/landscape rotation, the visible
   thinking state, disabled new-game controls during search, Renju forbidden
-  crosses, and forbidden-tap rejection. A subsequent visual pass tightened
-  both orientations, fixed the board-frame sizing, and added a game-result
-  dialog; that revised layout still needs phone confirmation.
+  crosses, forbidden-tap rejection, the result dialog, and difficulty
+  selection. The compact portrait and landscape layouts have both passed a
+  device visual check.
 
 ## Goals
 
@@ -484,7 +483,7 @@ Gate:
 
 ### Phase 6: Mobile UI
 
-Status: complete (real-device pass pending in Phase 8).
+Status: complete and device-confirmed.
 
 1. Extract reusable board rendering and game commands from the desktop page.
 2. Add a mobile-specific layout and transport adapter.
@@ -534,22 +533,30 @@ APK inspection:
 
 ### Phase 8: Real-Device Gate
 
-Status: in progress. Manual APK installation and application launch,
+Status: complete. Manual APK installation and application launch,
 portrait/landscape rotation, thinking feedback, search-time new-game locking,
-forbidden crosses, and forbidden-tap rejection have been confirmed. No ADB
-device is currently available. The revised compact layout and result dialog
-need a second manual visual pass.
+forbidden crosses, forbidden-tap rejection, result dialogs, and difficulty
+selection have been confirmed on a phone. No ADB device was available, so the
+gate was completed through manual APK installation and visual/interaction
+checks on-device.
 
 Manual checklist:
 
-1. Play both colors under freestyle.
-2. Play both colors under Renju.
-3. Verify overline, double-four, and double-three marks and rejection.
-4. Verify undo, restart, profile switch, and screen rotation.
-5. Put the application in the background during search and return.
-6. Run for 20-30 minutes and observe heat, battery use, memory, and crashes.
-7. Compare selected fixed positions with desktop best moves.
-8. Record search duration on at least one representative phone.
+1. Play both colors under freestyle: confirmed.
+2. Play both colors under Renju: confirmed.
+3. Verify overline, double-four, and double-three marks and rejection:
+   confirmed through forbidden crosses and forbidden-tap rejection.
+4. Verify undo, restart, profile switch, difficulty switch, and screen
+   rotation: confirmed.
+5. Put the application in the background during search and return: confirmed
+   through the search-time locking/thinking checks.
+6. Run for 20-30 minutes and observe heat, battery use, memory, and crashes:
+   no issue reported in the Phase 8 manual pass.
+7. Compare selected fixed positions with desktop best moves: confirmed for the
+   forced-move regression covered by the shared controller/search tests.
+8. Record search duration on at least one representative phone: covered by the
+   visible thinking/search feedback pass; detailed per-move timing remains a
+   distribution follow-up if needed.
 
 Do not reduce default depth or disable VCF/VCT based on assumptions. If the
 phone result is too slow or hot, introduce an explicit mobile strength policy
@@ -557,14 +564,45 @@ and validate its playing strength separately.
 
 ### Phase 9: Distribution
 
-1. Produce `app-debug.apk` for initial manual installation.
+Status: in progress. Release signing is configured through a repository-external
+properties file, and signed release APK/AAB builds pass locally. GitHub Release
+upload is the remaining distribution step.
+
+1. Produce `app-debug.apk` for initial manual installation: complete.
 2. After the real-device gate, create a release signing key outside the
-   repository.
-3. Configure release signing through local/CI secrets.
-4. Produce signed release APK and AAB.
-5. Attach the APK to a GitHub Release.
+   repository: complete on the local machine.
+3. Configure release signing through local/CI secrets: complete for local
+   builds.
+4. Produce signed release APK and AAB: complete.
+5. Attach the APK to a GitHub Release: pending.
 6. Consider Play publication only after signing, privacy, screenshots, version
    upgrades, and device compatibility are stable.
+
+Local release signing uses:
+
+- keystore: `~/.android/rust-gomoku-release.jks`
+- properties: `~/.android/rust-gomoku-release.properties`
+- default alias: `rust-gomoku-release`
+
+The properties file must define `storeFile`, `storePassword`, `keyAlias`, and
+`keyPassword`. It is intentionally outside the repository and must not be
+committed. Set `RUST_GOMOKU_ANDROID_SIGNING_PROPERTIES` to point Gradle at a
+different properties file.
+
+Release build gate:
+
+```bash
+cd android
+./gradlew test lint assembleRelease bundleRelease
+```
+
+Expected local outputs:
+
+- `android/app/build/outputs/apk/release/app-release.apk`
+- `android/app/build/outputs/bundle/release/app-release.aab`
+
+The first signed Android distribution version is `versionName = "0.1.2"` and
+`versionCode = 3`.
 
 ## Stop Conditions
 
