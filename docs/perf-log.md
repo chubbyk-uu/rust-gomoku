@@ -177,8 +177,8 @@ returns immediately):
 - Freestyle: 404,959 nodes, 1293 ms, **3193 ns/node**.
 - Renju: 480,808 nodes, 3125 ms, **6499 ns/node**.
 - So the Renju gap is ~1.19x node count but ~2.04x per-node cost: the slowdown
-  is per-node work, not extra nodes. Worst single position (`zhou_g3`,
-  tactical) hit 2.9x per node.
+  is per-node work, not extra nodes. The worst single tactical prefix hit 2.9x
+  per node.
 
 CPU profile (WSL2 has no hardware PMU; sampled with software `task-clock` at
 997 Hz, `--call-graph dwarf`, 4493 samples, Freestyle+Renju mixed):

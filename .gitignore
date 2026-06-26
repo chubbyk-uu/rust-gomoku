@@ -11,14 +11,7 @@
 /.codex
 /.codex/
 /reference/
-/opponent/__pycache__/
-/opponent/*.json
-/opponent/run_pygomoku_vs_zhou.py
-/opponent/zhou/build/
-/opponent/zhou/.build/
-/opponent/zhou/src/*.egg-info/
-/opponent/zhou/src/gomoku/ai/_eval_kernels.c
-/opponent/zhou/src/gomoku/ai/*.so
+/opponent/
 __pycache__/
 *.pyc
 flamegraph.svg

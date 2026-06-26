@@ -16,7 +16,8 @@ Completed:
 - Renju oracle, dense-stress, exhaustive-line, candidate-diagnostic, performance, and rule-aware match-referee tooling.
 - Non-root candidate ordering cost optimization: keeps the original ordering key while reducing `getmi` and candidate copy overhead.
 - Fast profile enables third-generation history/killer ordering by default: only reorders quiet moves within the same static-ordering group; base is unaffected.
-- `opponent/zhou` is kept in the repo as a lightweight opponent; the full Python reference is not committed.
+- External reference engines such as SlowRenju and Rapfi are used from local
+  checkouts when needed; bundled lightweight opponents are no longer committed.
 
 Optional diagnostics / experiments:
 
@@ -234,7 +235,6 @@ cases/diff/          root diff cases
 cases/match/         match and benchmark prefix positions
 cases/renju/         forbidden, tactical, diagnostic, and strength fixtures
 data/static/         static matrices extracted from the reference
-opponent/zhou/       zhou baseline opponent
 scripts/             diff, match, benchmark, and case extraction scripts
 tests/               Rust automated tests
 ```
