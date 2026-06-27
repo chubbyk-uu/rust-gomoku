@@ -33,7 +33,8 @@ Implementation progress on `feature/android-app`:
 - Phase 6 mobile UI is complete and device-confirmed by the Phase 8 pass.
 - Phase 7 automated validation is complete.
 - Phase 8 real-device validation is complete.
-- Phase 9 GitHub distribution is complete for `v0.1.2`.
+- Phase 9 GitHub distribution is complete; the latest published package is
+  `v0.1.3`.
 - The desktop HTTP GUI now uses `GameController`.
 - Controller tests cover forbidden input, first-move search, undo, profile
   switching, invalid sides, and stale search completion.
@@ -567,8 +568,9 @@ and validate its playing strength separately.
 ### Phase 9: Distribution
 
 Status: complete. Release signing is configured through a repository-external
-properties file, signed release APK/AAB builds pass locally, and the first
-Android release artifacts are attached to GitHub Release `v0.1.2`.
+properties file, signed release APK/AAB builds pass locally, and Android
+release artifacts are attached to GitHub Releases. The latest published package
+is `v0.1.3`.
 
 1. Produce `app-debug.apk` for initial manual installation: complete.
 2. After the real-device gate, create a release signing key outside the
@@ -576,7 +578,7 @@ Android release artifacts are attached to GitHub Release `v0.1.2`.
 3. Configure release signing through local/CI secrets: complete for local
    builds.
 4. Produce signed release APK and AAB: complete.
-5. Attach the APK to a GitHub Release: complete for `v0.1.2`.
+5. Attach the APK to a GitHub Release: complete through `v0.1.3`.
 6. Consider Play publication only after signing, privacy, screenshots, version
    upgrades, and device compatibility are stable.
 
@@ -603,12 +605,13 @@ Expected local outputs:
 - `android/app/build/outputs/apk/release/app-release.apk`
 - `android/app/build/outputs/bundle/release/app-release.aab`
 
-The first signed Android distribution version is `versionName = "0.1.2"` and
-`versionCode = 3`.
+The first signed Android distribution version was `versionName = "0.1.2"` and
+`versionCode = 3`. The current published Android version is
+`versionName = "0.1.3"` and `versionCode = 4`.
 
 GitHub Release:
 
-- <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.2>
+- <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.3>
 
 ## Stop Conditions
 
