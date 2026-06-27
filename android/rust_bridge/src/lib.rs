@@ -72,7 +72,9 @@ impl BridgeError {
 impl BridgeRegistry {
     fn create(&self) -> Result<i64, BridgeError> {
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed) + 1;
-        let controller = Arc::new(Mutex::new(GameController::new(load_default_config())));
+        let mut config = load_default_config();
+        SearchDifficulty::default().apply_to_config(&mut config);
+        let controller = Arc::new(Mutex::new(GameController::new(config)));
         self.controllers
             .lock()
             .map_err(|_| BridgeError::internal("Native handle registry is unavailable."))?
@@ -254,7 +256,7 @@ fn parse_profile(value: &str) -> Result<EngineProfile, BridgeError> {
 fn parse_difficulty(value: &str) -> Result<SearchDifficulty, BridgeError> {
     value.parse().map_err(|_| {
         BridgeError::invalid_request(
-            "difficulty must be \"easy\", \"normal\", \"advanced\", or \"hard\".",
+            "difficulty must be \"beginner\", \"junior\", \"intermediate\", \"senior\", or \"master\".",
         )
     })
 }
@@ -347,6 +349,11 @@ mod tests {
         let initial = response(&registry, handle, r#"{"op":"state"}"#);
         assert_eq!(initial["ok"], true);
         assert_eq!(initial["state"]["move_count"], 0);
+        assert_eq!(initial["state"]["params"]["difficulty"], "intermediate");
+        assert_eq!(initial["state"]["params"]["depth"], 4);
+        assert_eq!(initial["state"]["params"]["width"], 20);
+        assert_eq!(initial["state"]["params"]["compute_vcf"], false);
+        assert_eq!(initial["state"]["params"]["compute_vct"], false);
 
         let new_game = response(
             &registry,
@@ -373,9 +380,9 @@ mod tests {
         let difficulty = response(
             &registry,
             handle,
-            r#"{"op":"set_difficulty","difficulty":"advanced"}"#,
+            r#"{"op":"set_difficulty","difficulty":"senior"}"#,
         );
-        assert_eq!(difficulty["state"]["params"]["difficulty"], "advanced");
+        assert_eq!(difficulty["state"]["params"]["difficulty"], "senior");
         assert_eq!(difficulty["state"]["params"]["depth"], 6);
         assert_eq!(difficulty["state"]["params"]["width"], 30);
         assert_eq!(difficulty["state"]["params"]["compute_vcf"], true);

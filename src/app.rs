@@ -12,50 +12,75 @@ use crate::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchDifficulty {
-    Easy,
-    Normal,
-    Advanced,
-    Hard,
+    Beginner,
+    Junior,
+    Intermediate,
+    Senior,
+    Master,
 }
 
 impl SearchDifficulty {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Easy => "easy",
-            Self::Normal => "normal",
-            Self::Advanced => "advanced",
-            Self::Hard => "hard",
+            Self::Beginner => "beginner",
+            Self::Junior => "junior",
+            Self::Intermediate => "intermediate",
+            Self::Senior => "senior",
+            Self::Master => "master",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Self::Easy => "容易",
-            Self::Normal => "一般",
-            Self::Advanced => "进阶",
-            Self::Hard => "困难",
+            Self::Beginner => "入门",
+            Self::Junior => "初级",
+            Self::Intermediate => "中级",
+            Self::Senior => "高级",
+            Self::Master => "大师",
         }
     }
 
     fn settings(self) -> (i32, i32, bool) {
         match self {
-            Self::Easy => (2, 10, false),
-            Self::Normal => (4, 20, false),
-            Self::Advanced => (6, 30, true),
-            Self::Hard => (8, 40, true),
+            Self::Beginner => (1, 10, false),
+            Self::Junior => (2, 10, false),
+            Self::Intermediate => (4, 20, false),
+            Self::Senior => (6, 30, true),
+            Self::Master => (8, 40, true),
         }
     }
 
+    pub fn apply_to_config(self, config: &mut EngineConfig) {
+        let (depth, width, tactical) = self.settings();
+        config.root_search.depth = depth;
+        config.root_search.wide = width;
+        config.root_search.timed_max_wide = width;
+        config.runtime.compute_vcf = tactical;
+        config.runtime.compute_vct = tactical;
+    }
+
     fn detect(config: &EngineConfig) -> Option<Self> {
-        [Self::Easy, Self::Normal, Self::Advanced, Self::Hard]
-            .into_iter()
-            .find(|difficulty| {
-                let (depth, width, tactical) = difficulty.settings();
-                config.root_search.depth == depth
-                    && config.root_search.wide == width
-                    && config.runtime.compute_vcf == tactical
-                    && config.runtime.compute_vct == tactical
-            })
+        [
+            Self::Beginner,
+            Self::Junior,
+            Self::Intermediate,
+            Self::Senior,
+            Self::Master,
+        ]
+        .into_iter()
+        .find(|difficulty| {
+            let (depth, width, tactical) = difficulty.settings();
+            config.root_search.depth == depth
+                && config.root_search.wide == width
+                && config.runtime.compute_vcf == tactical
+                && config.runtime.compute_vct == tactical
+        })
+    }
+}
+
+impl Default for SearchDifficulty {
+    fn default() -> Self {
+        Self::Intermediate
     }
 }
 
@@ -64,10 +89,11 @@ impl std::str::FromStr for SearchDifficulty {
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw.to_ascii_lowercase().as_str() {
-            "easy" => Ok(Self::Easy),
-            "normal" | "medium" => Ok(Self::Normal),
-            "advanced" => Ok(Self::Advanced),
-            "hard" => Ok(Self::Hard),
+            "beginner" | "intro" => Ok(Self::Beginner),
+            "junior" | "easy" => Ok(Self::Junior),
+            "intermediate" | "normal" | "medium" => Ok(Self::Intermediate),
+            "senior" | "advanced" => Ok(Self::Senior),
+            "master" | "hard" => Ok(Self::Master),
             _ => Err(format!("unknown search difficulty: {raw}")),
         }
     }
@@ -343,11 +369,7 @@ impl GameController {
             return;
         }
         let (depth, width, tactical) = difficulty.settings();
-        self.config.root_search.depth = depth;
-        self.config.root_search.wide = width;
-        self.config.root_search.timed_max_wide = width;
-        self.config.runtime.compute_vcf = tactical;
-        self.config.runtime.compute_vct = tactical;
+        difficulty.apply_to_config(&mut self.config);
         self.difficulty = Some(difficulty);
         self.error = None;
         self.last_result = None;
@@ -708,13 +730,14 @@ mod tests {
     #[test]
     fn difficulty_presets_update_search_and_tactical_settings() {
         let mut controller = GameController::new(load_default_config());
-        assert_eq!(controller.snapshot().params.difficulty, "hard");
+        assert_eq!(controller.snapshot().params.difficulty, "master");
 
         for (difficulty, name, depth, width, tactical) in [
-            (SearchDifficulty::Easy, "easy", 2, 10, false),
-            (SearchDifficulty::Normal, "normal", 4, 20, false),
-            (SearchDifficulty::Advanced, "advanced", 6, 30, true),
-            (SearchDifficulty::Hard, "hard", 8, 40, true),
+            (SearchDifficulty::Beginner, "beginner", 1, 10, false),
+            (SearchDifficulty::Junior, "junior", 2, 10, false),
+            (SearchDifficulty::Intermediate, "intermediate", 4, 20, false),
+            (SearchDifficulty::Senior, "senior", 6, 30, true),
+            (SearchDifficulty::Master, "master", 8, 40, true),
         ] {
             controller.set_difficulty(difficulty);
             let params = controller.snapshot().params;
@@ -731,7 +754,7 @@ mod tests {
         let mut controller = shallow_controller();
         assert!(controller.new_game(WHITE, RuleSet::Freestyle));
         let _task = controller.prepare_engine_search().unwrap();
-        controller.set_difficulty(SearchDifficulty::Easy);
+        controller.set_difficulty(SearchDifficulty::Junior);
 
         let snapshot = controller.snapshot();
         assert_eq!(snapshot.params.difficulty, "custom");

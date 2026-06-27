@@ -20,6 +20,7 @@ fn main() {
     }
     let args = parse_args();
     let mut config = load_default_config();
+    SearchDifficulty::default().apply_to_config(&mut config);
     config.runtime.overlap_vct_alphabeta = true;
     if let Some(depth) = args.depth {
         config.root_search.depth = depth;
@@ -214,7 +215,9 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameController>>) {
                 if let Some(difficulty) = difficulty {
                     game.set_difficulty(difficulty);
                 } else {
-                    game.set_error("未知难度，请选择 easy、normal、advanced 或 hard。");
+                    game.set_error(
+                        "未知难度，请选择 beginner、junior、intermediate、senior 或 master。",
+                    );
                 }
             }
             json_response(&state.lock().expect("state lock").snapshot())
@@ -300,8 +303,9 @@ mod tests {
     fn desktop_gui_contains_difficulty_controls_and_result_dialog() {
         for marker in [
             "difficulty-select",
-            "容易 · d2 / w10 · 无战术搜索",
-            "困难 · d8 / w40 · VCF/VCT",
+            "入门 · d1 / w10 · 无战术搜索",
+            "中级 · d4 / w20 · 无战术搜索",
+            "大师 · d8 / w40 · VCF/VCT",
             "result-backdrop",
             "你赢了",
             "引擎获胜",
@@ -572,10 +576,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <label class="setting-row" for="difficulty-select">
             <span class="setting-label">难度</span>
             <select id="difficulty-select" onchange="setDifficulty(this.value)">
-              <option value="easy">容易 · d2 / w10 · 无战术搜索</option>
-              <option value="normal">一般 · d4 / w20 · 无战术搜索</option>
-              <option value="advanced">进阶 · d6 / w30 · VCF/VCT</option>
-              <option value="hard" selected>困难 · d8 / w40 · VCF/VCT</option>
+              <option value="beginner">入门 · d1 / w10 · 无战术搜索</option>
+              <option value="junior">初级 · d2 / w10 · 无战术搜索</option>
+              <option value="intermediate" selected>中级 · d4 / w20 · 无战术搜索</option>
+              <option value="senior">高级 · d6 / w30 · VCF/VCT</option>
+              <option value="master">大师 · d8 / w40 · VCF/VCT</option>
             </select>
           </label>
           <div class="setting-row">
@@ -880,10 +885,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
         ['规则', p.rule === 'renju' ? '有禁手' : '无禁手'],
         ['引擎模式', `${p.profile === 'fast' ? 'Fast' : 'Base'}${p.fast_history_ordering ? ' / history+killer' : ''}`],
         ['难度', {
-          easy: '容易',
-          normal: '一般',
-          advanced: '进阶',
-          hard: '困难',
+          beginner: '入门',
+          junior: '初级',
+          intermediate: '中级',
+          senior: '高级',
+          master: '大师',
           custom: '自定义',
         }[p.difficulty] || p.difficulty],
         ['搜索参数', `d${p.depth} / w${p.width}`],

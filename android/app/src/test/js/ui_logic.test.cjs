@@ -182,10 +182,10 @@ test("the packaged page wires all tested UI helpers before app startup", () => {
   assert.match(appScript, /setDifficultyValue\(state\.params\.difficulty\)/);
   assert.match(page, /id="opt-difficulty"/);
   assert.match(page, /id="difficulty-dialog"/);
-  assert.match(page, /class="strength-icon level-4"/);
+  assert.match(page, /class="strength-icon level-5"/);
   assert.match(page, /id="meta-difficulty"/);
   assert.match(appScript, /getElementById\("meta-difficulty"\)/);
-  for (const difficulty of ["easy", "normal", "advanced", "hard"]) {
+  for (const difficulty of ["beginner", "junior", "intermediate", "senior", "master"]) {
     assert.match(page, new RegExp(`data-value="${difficulty}"`));
   }
   assert.ok(page.indexOf('src="ui_logic.js"') < page.indexOf('src="app.js"'));

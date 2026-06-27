@@ -51,10 +51,11 @@ const statusMsg = document.getElementById("status-msg");
 const turnDot = document.getElementById("turn-dot");
 const toastEl = document.getElementById("toast");
 const difficultyNames = {
-  easy: "容易",
-  normal: "一般",
-  advanced: "进阶",
-  hard: "困难",
+  beginner: "入门",
+  junior: "初级",
+  intermediate: "中级",
+  senior: "高级",
+  master: "大师",
   custom: "自定义",
 };
 

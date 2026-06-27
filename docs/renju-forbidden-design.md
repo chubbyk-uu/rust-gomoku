@@ -1694,7 +1694,7 @@ per-node deltas are in `docs/perf-log.md`.
 ### Forced-move selection parity fix (tactical search off)
 
 A latent search bug surfaced while adding the difficulty presets: with tactical
-search disabled (Easy/Normal), the root win-priority and single-forcing branches
+search disabled (Beginner/Junior/Intermediate), the root win-priority and single-forcing branches
 returned the first candidate in scan order instead of the strongest forcing
 move, so the engine could miss an immediately available win. The bug is
 rule-independent (present in both freestyle and Renju) and was mirrored from the

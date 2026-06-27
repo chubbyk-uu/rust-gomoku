@@ -510,11 +510,11 @@ details.advanced > summary {
 }
 .difficulty-option[aria-pressed="true"] .difficulty-check { opacity: 1; }
 .strength-icon {
-  width: 30px;
+  width: 34px;
   height: 28px;
   display: flex;
   align-items: flex-end;
-  gap: 3px;
+  gap: 2px;
 }
 .strength-icon i {
   width: 5px;
@@ -524,11 +524,13 @@ details.advanced > summary {
 .strength-icon i:nth-child(1) { height: 7px; }
 .strength-icon i:nth-child(2) { height: 12px; }
 .strength-icon i:nth-child(3) { height: 18px; }
-.strength-icon i:nth-child(4) { height: 25px; }
+.strength-icon i:nth-child(4) { height: 23px; }
+.strength-icon i:nth-child(5) { height: 28px; }
 .strength-icon.level-1 i:nth-child(-n+1),
 .strength-icon.level-2 i:nth-child(-n+2),
 .strength-icon.level-3 i:nth-child(-n+3),
-.strength-icon.level-4 i:nth-child(-n+4) {
+.strength-icon.level-4 i:nth-child(-n+4),
+.strength-icon.level-5 i:nth-child(-n+5) {
   background: var(--accent);
 }
 

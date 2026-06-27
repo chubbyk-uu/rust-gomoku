@@ -71,10 +71,11 @@ Implementation progress on `feature/android-app`:
   tap-to-preview then tap-the-same-point-to-confirm to cut mis-taps; taps snap to
   the nearest intersection and are rejected beyond ~0.6 cell; forbidden points
   are rejected with a toast and a light vibration (new `VIBRATE` permission).
-- Base/Fast remains a search-ordering mode. The separate four-level difficulty
-  selector maps Easy to `d2/w10` without VCF/VCT, Normal to `d4/w20` without
-  VCF/VCT, Advanced to `d6/w30` with VCF/VCT, and Hard to `d8/w40` with
-  VCF/VCT. Hard is the default.
+- Base/Fast remains a search-ordering mode. The separate five-level difficulty
+  selector maps Beginner to `d1/w10` without VCF/VCT, Junior to `d2/w10`
+  without VCF/VCT, Intermediate to `d4/w20` without VCF/VCT, Senior to
+  `d6/w30` with VCF/VCT, and Master to `d8/w40` with VCF/VCT. Intermediate is
+  the default.
 - Responsive verification at the target viewports and the touch/rotation/stale
   behaviors are confirmed on a real device.
 - Mobile UI state logic is isolated in `ui_logic.js` and covered by Node tests
@@ -207,7 +208,7 @@ Request examples:
 {"op":"play","x":7,"y":7}
 {"op":"undo"}
 {"op":"set_profile","profile":"base"}
-{"op":"set_difficulty","difficulty":"hard"}
+{"op":"set_difficulty","difficulty":"master"}
 {"op":"engine_move"}
 ```
 
@@ -302,7 +303,7 @@ and must not resize when status text or engine state changes.
 - Play black or white.
 - Freestyle or Renju.
 - Base or Fast profile.
-- Easy, Normal, Advanced, or Hard difficulty.
+- Beginner, Junior, Intermediate, Senior, or Master difficulty.
 - Start game.
 
 Rule changes apply only to the new game, matching the desktop behavior.

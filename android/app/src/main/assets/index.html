@@ -13,7 +13,7 @@
       <div id="meta">
         <span class="chip" id="meta-rule">—</span>
         <span class="chip" id="meta-side">—</span>
-        <span class="chip" id="meta-difficulty">困难</span>
+        <span class="chip" id="meta-difficulty">中级</span>
         <span class="chip" id="meta-moves">第 0 手</span>
       </div>
     </header>
@@ -65,8 +65,8 @@
       </div>
       <div class="option-row difficulty-row">
         <label>难度</label>
-        <button id="opt-difficulty" class="option-link" type="button" data-value="hard">
-          <span id="difficulty-summary">困难</span>
+        <button id="opt-difficulty" class="option-link" type="button" data-value="intermediate">
+          <span id="difficulty-summary">中级</span>
           <span class="chevron" aria-hidden="true"></span>
         </button>
       </div>
@@ -85,24 +85,29 @@
       <button class="sheet-close" type="button" id="btn-difficulty-close" aria-label="关闭">×</button>
     </div>
     <div id="difficulty-options">
-      <button class="difficulty-option" type="button" data-value="easy" aria-pressed="false">
-        <span class="strength-icon level-1" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-        <span class="difficulty-copy"><strong>容易</strong><small>d2 / w10 · 无战术搜索</small></span>
+      <button class="difficulty-option" type="button" data-value="beginner" aria-pressed="false">
+        <span class="strength-icon level-1" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        <span class="difficulty-copy"><strong>入门</strong><small>d1 / w10 · 无战术搜索</small></span>
         <span class="difficulty-check" aria-hidden="true">✓</span>
       </button>
-      <button class="difficulty-option" type="button" data-value="normal" aria-pressed="false">
-        <span class="strength-icon level-2" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-        <span class="difficulty-copy"><strong>一般</strong><small>d4 / w20 · 无战术搜索</small></span>
+      <button class="difficulty-option" type="button" data-value="junior" aria-pressed="false">
+        <span class="strength-icon level-2" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        <span class="difficulty-copy"><strong>初级</strong><small>d2 / w10 · 无战术搜索</small></span>
         <span class="difficulty-check" aria-hidden="true">✓</span>
       </button>
-      <button class="difficulty-option" type="button" data-value="advanced" aria-pressed="false">
-        <span class="strength-icon level-3" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-        <span class="difficulty-copy"><strong>进阶</strong><small>d6 / w30 · VCF / VCT</small></span>
+      <button class="difficulty-option" type="button" data-value="intermediate" aria-pressed="true">
+        <span class="strength-icon level-3" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        <span class="difficulty-copy"><strong>中级</strong><small>d4 / w20 · 无战术搜索</small></span>
         <span class="difficulty-check" aria-hidden="true">✓</span>
       </button>
-      <button class="difficulty-option" type="button" data-value="hard" aria-pressed="true">
-        <span class="strength-icon level-4" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-        <span class="difficulty-copy"><strong>困难</strong><small>d8 / w40 · VCF / VCT</small></span>
+      <button class="difficulty-option" type="button" data-value="senior" aria-pressed="false">
+        <span class="strength-icon level-4" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        <span class="difficulty-copy"><strong>高级</strong><small>d6 / w30 · VCF / VCT</small></span>
+        <span class="difficulty-check" aria-hidden="true">✓</span>
+      </button>
+      <button class="difficulty-option" type="button" data-value="master" aria-pressed="false">
+        <span class="strength-icon level-5" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        <span class="difficulty-copy"><strong>大师</strong><small>d8 / w40 · VCF / VCT</small></span>
         <span class="difficulty-check" aria-hidden="true">✓</span>
       </button>
     </div>
