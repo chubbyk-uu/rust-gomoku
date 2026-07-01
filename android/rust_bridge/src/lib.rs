@@ -9,7 +9,7 @@ use jni::objects::{JClass, JString};
 use jni::sys::{jlong, jstring};
 use jni::JNIEnv;
 use rust_gomoku::{
-    load_default_config, EngineProfile, GameController, RuleSet, SearchDifficulty, BLACK,
+    load_default_config, EngineProfile, GameController, GameMode, RuleSet, SearchDifficulty, BLACK,
     BOARD_SIZE, WHITE,
 };
 use serde::Deserialize;
@@ -31,7 +31,11 @@ struct BridgeRegistry {
 #[serde(tag = "op", rename_all = "snake_case")]
 enum BridgeRequest {
     State,
-    NewGame { human_side: String, rule: String },
+    NewGame {
+        human_side: String,
+        rule: String,
+        mode: Option<String>,
+    },
     Play { x: usize, y: usize },
     Undo,
     SetProfile { profile: String },
@@ -131,7 +135,7 @@ fn parse_request(request_json: &str) -> Result<BridgeRequest, BridgeError> {
         .ok_or_else(|| BridgeError::invalid_request("Request field \"op\" must be a string."))?;
     let allowed_fields: &[&str] = match operation {
         "state" | "undo" | "engine_move" => &["op"],
-        "new_game" => &["op", "human_side", "rule"],
+        "new_game" => &["op", "human_side", "rule", "mode"],
         "play" => &["op", "x", "y"],
         "set_profile" => &["op", "profile"],
         "set_difficulty" => &["op", "difficulty"],
@@ -159,13 +163,18 @@ fn dispatch_request(
 ) -> Result<Value, BridgeError> {
     match request {
         BridgeRequest::State => snapshot_response(&controller),
-        BridgeRequest::NewGame { human_side, rule } => {
+        BridgeRequest::NewGame {
+            human_side,
+            rule,
+            mode,
+        } => {
             let side = parse_side(&human_side)?;
             let rule = parse_rule(&rule)?;
+            let mode = parse_mode(mode.as_deref())?;
             controller
                 .lock()
                 .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
-                .new_game(side, rule);
+                .new_game(side, rule, mode);
             snapshot_response(&controller)
         }
         BridgeRequest::Play { x, y } => {
@@ -237,6 +246,16 @@ fn parse_side(value: &str) -> Result<i8, BridgeError> {
         "white" => Ok(WHITE),
         _ => Err(BridgeError::invalid_request(
             "human_side must be \"black\" or \"white\".",
+        )),
+    }
+}
+
+fn parse_mode(value: Option<&str>) -> Result<GameMode, BridgeError> {
+    match value {
+        None | Some("vs_engine") => Ok(GameMode::VsEngine),
+        Some("two_player") => Ok(GameMode::TwoPlayer),
+        Some(_) => Err(BridgeError::invalid_request(
+            "mode must be \"vs_engine\" or \"two_player\".",
         )),
     }
 }
@@ -390,6 +409,36 @@ mod tests {
     }
 
     #[test]
+    fn two_player_mode_alternates_without_engine() {
+        let registry = BridgeRegistry::default();
+        let handle = registry.create().unwrap();
+
+        let new_game = response(
+            &registry,
+            handle,
+            r#"{"op":"new_game","human_side":"black","rule":"renju","mode":"two_player"}"#,
+        );
+        assert_eq!(new_game["state"]["params"]["mode"], "two_player");
+
+        // Black then white are both placed by humans; the engine cannot move.
+        let black = response(&registry, handle, r#"{"op":"play","x":7,"y":7}"#);
+        assert_eq!(black["state"]["side_to_move"], WHITE);
+        assert_eq!(black["state"]["can_play"], true);
+
+        let engine = response(&registry, handle, r#"{"op":"engine_move"}"#);
+        assert_eq!(engine["ok"], false);
+
+        let white = response(&registry, handle, r#"{"op":"play","x":8,"y":8}"#);
+        assert_eq!(white["state"]["move_count"], 2);
+        assert_eq!(white["state"]["side_to_move"], BLACK);
+
+        // A single undo hands the turn back to white.
+        let undone = response(&registry, handle, r#"{"op":"undo"}"#);
+        assert_eq!(undone["state"]["move_count"], 1);
+        assert_eq!(undone["state"]["side_to_move"], WHITE);
+    }
+
+    #[test]
     fn invalid_requests_have_stable_structured_errors() {
         let registry = BridgeRegistry::default();
         let handle = registry.create().unwrap();
@@ -404,6 +453,10 @@ mod tests {
             ),
             (
                 r#"{"op":"new_game","human_side":"black","rule":"standard"}"#,
+                "invalid_request",
+            ),
+            (
+                r#"{"op":"new_game","human_side":"black","rule":"renju","mode":"solo"}"#,
                 "invalid_request",
             ),
             (r#"{"op":"play","x":15,"y":0}"#, "invalid_request"),

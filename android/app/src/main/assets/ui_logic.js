@@ -44,7 +44,7 @@
     document_.getElementById("btn-newgame").disabled = busy || engineThinking;
     document_.getElementById("btn-start").disabled = busy || engineThinking;
     for (const button of document_.querySelectorAll(
-      "#opt-side button, #opt-rule button, #opt-mode button",
+      "#opt-gamemode button, #opt-side button, #opt-rule button, #opt-mode button",
     )) {
       button.disabled = busy || engineThinking;
     }
@@ -65,6 +65,16 @@
 
   function gameResult(state) {
     if (!state || state.winner === 0) return null;
+    if (state.params && state.params.mode === "two_player") {
+      // BLACK is 1, WHITE is -1; announce the winning side, no human/engine.
+      const winnerName = state.winner === 1 ? "黑方" : "白方";
+      return {
+        key: `${state.winner}:${state.move_count}`,
+        title: `${winnerName}胜`,
+        message: `${winnerName}在第 ${state.move_count} 手取胜。`,
+        tone: "win",
+      };
+    }
     const humanWon = state.winner === state.human_side;
     return {
       key: `${state.winner}:${state.move_count}`,

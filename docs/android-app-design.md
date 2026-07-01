@@ -65,7 +65,9 @@ Implementation progress on `feature/android-app`:
 - Phase 6 mobile UI is in place as WebView assets (`index.html`, `app.css`,
   `app.js`): a status row, a JS-sized square board (kept square at
   `min(width, height)` and redrawn at `devicePixelRatio` for crisp lines), and a
-  bottom action bar, with a new-game sheet (side, rule, mode, difficulty) and a "more" sheet
+  bottom action bar, with a new-game sheet (match mode vs-engine/two-player,
+  side, rule, Base/Fast profile, difficulty; the side/profile/difficulty rows
+  hide in two-player mode) and a "more" sheet
   holding the optional all-move-numbers switch and a collapsed advanced panel
   (score, depth, nodes, thinking time from the snapshot's `last_result`). The
   layout switches to board-left / panel-right in landscape. Stone placement uses
@@ -206,12 +208,18 @@ Request examples:
 ```json
 {"op":"state"}
 {"op":"new_game","human_side":"black","rule":"renju"}
+{"op":"new_game","human_side":"black","rule":"renju","mode":"two_player"}
 {"op":"play","x":7,"y":7}
 {"op":"undo"}
 {"op":"set_profile","profile":"base"}
 {"op":"set_difficulty","difficulty":"master"}
 {"op":"engine_move"}
 ```
+
+`new_game` accepts an optional `mode` of `vs_engine` (default) or `two_player`.
+In two-player mode both sides are placed by humans, `engine_move` is rejected,
+`undo` reverts a single ply, and the returned state carries `params.mode`;
+Renju forbidden points are still computed and enforced against the side to move.
 
 Successful requests return `{"ok":true,"state":...}`. Bridge-level validation,
 handle, and internal failures return

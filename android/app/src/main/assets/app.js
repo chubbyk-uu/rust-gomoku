@@ -233,7 +233,12 @@ function playStoneSound() {
   unlockAudio();
   if (!audioCtx || audioCtx.state !== "running") return;
   const ctx = audioCtx;
-  const now = ctx.currentTime;
+  // Schedule ~20ms ahead: Android WebView's audio callback latency is large and
+  // jittery, so starting at ctx.currentTime lets the clock advance past the
+  // envelope's attack before it renders, truncating a variable amount of it and
+  // making the click sound randomly loud or soft. A small lookahead keeps every
+  // scheduled event in the future so the full envelope plays consistently.
+  const now = ctx.currentTime + 0.02;
   // Sharp filtered noise burst — the wooden "clack".
   const dur = 0.05;
   const frames = Math.max(1, Math.floor(ctx.sampleRate * dur));
@@ -250,7 +255,7 @@ function playStoneSound() {
   bandpass.frequency.value = 1900;
   bandpass.Q.value = 0.9;
   const noiseGain = ctx.createGain();
-  noiseGain.gain.value = 0.5;
+  noiseGain.gain.setValueAtTime(0.5, now);
   noise.connect(bandpass);
   bandpass.connect(noiseGain);
   noiseGain.connect(ctx.destination);
@@ -298,10 +303,16 @@ function render(state) {
   const ruleChip = document.getElementById("meta-rule");
   ruleChip.textContent = isRenju ? "有禁手" : "无禁手";
   ruleChip.classList.toggle("renju", isRenju);
-  document.getElementById("meta-side").textContent = state.human_side === WHITE ? "你执白" : "你执黑";
-  document.getElementById("meta-difficulty").textContent =
+  const twoPlayer = state.params.mode === "two_player";
+  const sideChip = document.getElementById("meta-side");
+  sideChip.textContent = twoPlayer ? "双人对弈" : (state.human_side === WHITE ? "你执白" : "你执黑");
+  const difficultyChip = document.getElementById("meta-difficulty");
+  difficultyChip.hidden = twoPlayer;
+  difficultyChip.textContent =
     difficultyNames[state.params.difficulty] || state.params.difficulty;
   document.getElementById("meta-moves").textContent = "第 " + state.move_count + " 手";
+  setSegmentValue("opt-gamemode", state.params.mode);
+  syncNewGameMode();
   setSegmentValue("opt-side", state.human_side === WHITE ? "white" : "black");
   setSegmentValue("opt-rule", state.params.rule);
   setSegmentValue("opt-mode", state.params.profile);
@@ -364,7 +375,8 @@ async function applyAndContinue(response) {
   }
   let state = response.state;
   render(state);
-  while (state.winner === EMPTY && state.side_to_move !== state.human_side) {
+  // In two-player mode the engine never moves; humans alternate on both sides.
+  while (state.params.mode !== "two_player" && state.winner === EMPTY && state.side_to_move !== state.human_side) {
     const settledState = state;
     render(UiLogic.engineThinkingState(state));
     const moved = await nativeRequest({ op: "engine_move" });
@@ -454,6 +466,14 @@ function bindSegmented(groupId) {
   });
 }
 
+// Engine-only new-game rows (执棋 / 模式 / 难度) are irrelevant in two-player mode.
+function syncNewGameMode() {
+  const twoPlayer = segValue("opt-gamemode") === "two_player";
+  for (const row of document.querySelectorAll("[data-engine-only]")) {
+    row.hidden = twoPlayer;
+  }
+}
+
 function setDifficultyOpen(open) {
   const dialog = document.getElementById("difficulty-dialog");
   const backdrop = document.getElementById("difficulty-backdrop");
@@ -507,6 +527,10 @@ function bindEvents() {
     el.addEventListener("click", () => closeSheet(el.dataset.backdrop));
   }
 
+  bindSegmented("opt-gamemode");
+  document.getElementById("opt-gamemode").addEventListener("click", (e) => {
+    if (e.target.closest("button")) syncNewGameMode();
+  });
   bindSegmented("opt-side");
   bindSegmented("opt-rule");
   bindSegmented("opt-mode");
@@ -533,6 +557,7 @@ function bindEvents() {
       toast("引擎思考中，请稍候");
       return;
     }
+    const mode = segValue("opt-gamemode");
     const human_side = segValue("opt-side");
     const rule = segValue("opt-rule");
     const profile = segValue("opt-mode");
@@ -540,9 +565,12 @@ function bindEvents() {
     closeSheet("newgame");
     guarded(async () => {
       ghost = null;
-      await nativeRequest({ op: "set_profile", profile });
-      await nativeRequest({ op: "set_difficulty", difficulty });
-      await applyAndContinue(await nativeRequest({ op: "new_game", human_side, rule }));
+      // Engine settings only matter when the engine plays.
+      if (mode !== "two_player") {
+        await nativeRequest({ op: "set_profile", profile });
+        await nativeRequest({ op: "set_difficulty", difficulty });
+      }
+      await applyAndContinue(await nativeRequest({ op: "new_game", human_side, rule, mode }));
     });
   });
 

@@ -9,7 +9,7 @@ use std::thread;
 use serde::Serialize;
 
 use rust_gomoku::{
-    load_default_config, GameController, RuleSet, SearchDifficulty, Side, BLACK, WHITE,
+    load_default_config, GameController, GameMode, RuleSet, SearchDifficulty, Side, BLACK, WHITE,
 };
 
 const DEFAULT_ADDR: &str = "127.0.0.1:18080";
@@ -165,11 +165,15 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameController>>) {
             let rule = query_param(query, "rule")
                 .and_then(|value| value.parse::<RuleSet>().ok())
                 .unwrap_or(RuleSet::Freestyle);
+            let mode = match query_param(query, "mode") {
+                Some("two_player") => GameMode::TwoPlayer,
+                _ => GameMode::VsEngine,
+            };
             {
                 let mut game = state.lock().expect("state lock");
-                game.new_game(side, rule);
+                game.new_game(side, rule, mode);
             }
-            if side == WHITE {
+            if mode == GameMode::VsEngine && side == WHITE {
                 maybe_start_engine(Arc::clone(&state));
             }
             json_response(&state.lock().expect("state lock").snapshot())
@@ -311,6 +315,9 @@ mod tests {
             "引擎获胜",
             "查看棋盘",
             "再来一局",
+            "start-two-player",
+            "开始双人对局",
+            "selectMode('two_player')",
         ] {
             assert!(INDEX_HTML.contains(marker), "missing marker: {marker}");
         }
@@ -397,12 +404,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
       gap: 14px;
       margin: 20px 0;
     }
+    /* The hidden attribute must win over the explicit display on these rows. */
+    [hidden] { display: none !important; }
     .new-game {
+      display: grid;
+      gap: 12px;
+    }
+    #start-vs-engine {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 12px;
     }
-    .profile-switch, .rule-switch {
+    .profile-switch, .rule-switch, .mode-switch {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 8px;
@@ -554,11 +567,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <div id="status" class="status">加载中...</div>
       <div id="error" class="error-text"></div>
       <div class="controls">
-        <div class="new-game">
-          <button class="primary" onclick="newGame('black')">执黑</button>
-          <button class="primary" onclick="newGame('white')">执白</button>
-        </div>
         <div class="settings">
+          <div class="setting-row">
+            <span class="setting-label">对战</span>
+            <div class="mode-switch">
+              <button id="mode-engine" class="secondary" onclick="selectMode('vs_engine')">人机</button>
+              <button id="mode-two" class="secondary" onclick="selectMode('two_player')">双人</button>
+            </div>
+          </div>
           <div class="setting-row">
             <span class="setting-label">规则</span>
             <div class="rule-switch">
@@ -566,14 +582,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <button id="rule-renju" class="secondary" onclick="selectRule('renju')">有禁手</button>
             </div>
           </div>
-          <div class="setting-row">
-            <span class="setting-label">模式</span>
+          <div class="setting-row" id="row-profile">
+            <span class="setting-label">引擎</span>
             <div class="profile-switch">
               <button id="profile-base" class="secondary" onclick="setProfile('base')">Base</button>
               <button id="profile-fast" class="secondary" onclick="setProfile('fast')">Fast</button>
             </div>
           </div>
-          <label class="setting-row" for="difficulty-select">
+          <label class="setting-row" id="row-difficulty" for="difficulty-select">
             <span class="setting-label">难度</span>
             <select id="difficulty-select" onchange="setDifficulty(this.value)">
               <option value="beginner">入门 · d1 / w10 · 无战术搜索</option>
@@ -588,8 +604,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <button id="sound-toggle" class="secondary" onclick="toggleSound()">开</button>
           </div>
         </div>
+        <div class="new-game">
+          <div id="start-vs-engine">
+            <button class="primary" onclick="newGame('black')">执黑</button>
+            <button class="primary" onclick="newGame('white')">执白</button>
+          </div>
+          <button id="start-two-player" class="primary" onclick="startTwoPlayer()" hidden>开始双人对局</button>
+        </div>
         <div class="actions">
-          <button class="warn" onclick="undo()">悔棋</button>
+          <button id="undo-btn" class="warn" onclick="undo()">悔棋</button>
         </div>
         <div class="hint">棋盘会自动刷新；规则只在新局生效。难度控制深度、宽度和 VCF/VCT，Base/Fast 控制搜索排序；两者都在下一次引擎思考生效。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
       </div>
@@ -611,6 +634,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const ctx = canvas.getContext('2d');
     let state = null;
     let selectedRule = 'freestyle';
+    let selectedMode = 'vs_engine';
     let announcedResult = null;
     let soundOn = true;
     let prevMoveCount = null;
@@ -691,14 +715,39 @@ const INDEX_HTML: &str = r#"<!doctype html>
       renderInfo();
     }
     function refresh() { api('/state').catch(showError); }
-    function newGame(side) { api('/new?side=' + side + '&rule=' + selectedRule).catch(showError); }
+    function newGame(side) { api('/new?side=' + side + '&rule=' + selectedRule + '&mode=' + selectedMode).catch(showError); }
+    function startTwoPlayer() { newGame('black'); }
     function setProfile(profile) { api('/profile?value=' + profile).catch(showError); }
     function setDifficulty(difficulty) { api('/difficulty?value=' + difficulty).catch(showError); }
     function selectRule(rule) {
       selectedRule = rule;
       renderRuleButtons();
     }
+    function selectMode(mode) {
+      selectedMode = mode;
+      renderModeButtons();
+    }
+    function renderModeButtons() {
+      const twoPlayer = selectedMode === 'two_player';
+      const engineButton = document.getElementById('mode-engine');
+      const twoButton = document.getElementById('mode-two');
+      if (engineButton && twoButton) {
+        engineButton.className = 'secondary' + (twoPlayer ? '' : ' active');
+        twoButton.className = 'secondary' + (twoPlayer ? ' active' : '');
+      }
+      document.getElementById('start-vs-engine').hidden = twoPlayer;
+      document.getElementById('start-two-player').hidden = !twoPlayer;
+      // Engine-only settings are meaningless in two-player mode.
+      document.getElementById('row-profile').hidden = twoPlayer;
+      document.getElementById('row-difficulty').hidden = twoPlayer;
+    }
     function restartSameSide() {
+      if (state && state.params && state.params.mode === 'two_player') {
+        selectedMode = 'two_player';
+        renderModeButtons();
+        startTwoPlayer();
+        return;
+      }
       const side = state && state.human_side === -1 ? 'white' : 'black';
       newGame(side);
     }
@@ -721,11 +770,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const key = `${state.winner}:${state.move_count}`;
       if (announcedResult === key) return;
       announcedResult = key;
-      const humanWon = state.winner === state.human_side;
-      document.getElementById('result-title').textContent = humanWon ? '你赢了' : '引擎获胜';
-      document.getElementById('result-message').textContent = humanWon
-        ? `第 ${state.move_count} 手取胜。`
-        : `对局在第 ${state.move_count} 手结束。`;
+      const twoPlayer = state.params && state.params.mode === 'two_player';
+      if (twoPlayer) {
+        const winnerName = sideName(state.winner);
+        document.getElementById('result-title').textContent = `${winnerName}胜`;
+        document.getElementById('result-message').textContent = `${winnerName}在第 ${state.move_count} 手取胜。`;
+      } else {
+        const humanWon = state.winner === state.human_side;
+        document.getElementById('result-title').textContent = humanWon ? '你赢了' : '引擎获胜';
+        document.getElementById('result-message').textContent = humanWon
+          ? `第 ${state.move_count} 手取胜。`
+          : `对局在第 ${state.move_count} 手结束。`;
+      }
       const backdrop = document.getElementById('result-backdrop');
       backdrop.classList.add('open');
       backdrop.setAttribute('aria-hidden', 'false');
@@ -876,7 +932,21 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const difficultySelect = document.getElementById('difficulty-select');
       if (p.difficulty !== 'custom') difficultySelect.value = p.difficulty;
       difficultySelect.disabled = !!state.engine_thinking;
+      // Undo is rejected server-side while the engine thinks; disable it to match.
+      document.getElementById('undo-btn').disabled = !!state.engine_thinking;
       renderRuleButtons();
+      if (p.mode === 'two_player') {
+        const rows = [
+          ['对战', '双人对弈'],
+          ['轮到', sideName(state.side_to_move)],
+          ['胜者', sideName(state.winner)],
+          ['手数', state.move_count],
+          ['规则', p.rule === 'renju' ? '有禁手' : '无禁手'],
+        ];
+        document.getElementById('info').innerHTML = rows.map(([k,v]) => `<div>${k}</div><div>${v}</div>`).join('');
+        renderResult();
+        return;
+      }
       const rows = [
         ['你执', sideName(state.human_side)],
         ['轮到', sideName(state.side_to_move)],
@@ -908,6 +978,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       document.getElementById('info').innerHTML = rows.map(([k,v]) => `<div>${k}</div><div>${v}</div>`).join('');
       renderResult();
     }
+    renderModeButtons();
     setInterval(refresh, 500);
     refresh();
   </script>

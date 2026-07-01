@@ -17,7 +17,7 @@ pub mod types;
 pub mod zobrist;
 
 pub use app::{
-    EngineSearchCompletion, EngineSearchTask, ForbiddenPointSnapshot, GameController,
+    EngineSearchCompletion, EngineSearchTask, ForbiddenPointSnapshot, GameController, GameMode,
     GameMoveSnapshot, GameParamsSnapshot, GameStateSnapshot, SearchDifficulty,
     SearchResultSnapshot, SearchTraceSnapshot,
 };

@@ -10,6 +10,25 @@ use crate::{
     BOARD_SIZE, EMPTY, WHITE,
 };
 
+/// Who controls the two sides of the board.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GameMode {
+    /// One human side, the engine plays the other.
+    #[default]
+    VsEngine,
+    /// Two humans alternate on the same device; the engine never moves.
+    TwoPlayer,
+}
+
+impl GameMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GameMode::VsEngine => "vs_engine",
+            GameMode::TwoPlayer => "two_player",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchDifficulty {
     Beginner,
@@ -104,6 +123,7 @@ pub struct GameController {
     config: EngineConfig,
     board: Board,
     human_side: Side,
+    mode: GameMode,
     engine_thinking: bool,
     status: String,
     error: Option<String>,
@@ -198,6 +218,7 @@ pub struct SearchTraceSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct GameParamsSnapshot {
+    pub mode: &'static str,
     pub profile: &'static str,
     pub difficulty: &'static str,
     pub depth: i32,
@@ -221,6 +242,7 @@ impl GameController {
             config,
             board: Board::new(),
             human_side: BLACK,
+            mode: GameMode::VsEngine,
             engine_thinking: false,
             status: "请选择执黑或执白，然后开始对局。".to_string(),
             error: None,
@@ -241,7 +263,7 @@ impl GameController {
         &self.config
     }
 
-    pub fn new_game(&mut self, human_side: Side, rule: RuleSet) -> bool {
+    pub fn new_game(&mut self, human_side: Side, rule: RuleSet, mode: GameMode) -> bool {
         if human_side != BLACK && human_side != WHITE {
             self.error = Some("执棋方必须是黑方或白方。".to_string());
             return false;
@@ -250,15 +272,20 @@ impl GameController {
         self.board.reset();
         self.config.rule_set = rule;
         self.human_side = human_side;
+        self.mode = mode;
         self.engine_thinking = false;
         let rule_name = match rule {
             RuleSet::Freestyle => "无禁手",
             RuleSet::Renju => "有禁手",
         };
-        self.status = if human_side == BLACK {
-            format!("新局开始（{rule_name}）：你执黑，请落子。")
-        } else {
-            format!("新局开始（{rule_name}）：你执白，引擎执黑思考中。")
+        self.status = match mode {
+            GameMode::TwoPlayer => format!("新局开始（双人 / {rule_name}）：黑方先行。"),
+            GameMode::VsEngine if human_side == BLACK => {
+                format!("新局开始（{rule_name}）：你执黑，请落子。")
+            }
+            GameMode::VsEngine => {
+                format!("新局开始（{rule_name}）：你执白，引擎执黑思考中。")
+            }
         };
         self.error = None;
         self.last_mark = None;
@@ -279,9 +306,15 @@ impl GameController {
             self.error = Some("缺少坐标或坐标超出棋盘。".to_string());
             return false;
         };
+        // In two-player mode the side to move alternates, so judge forbidden
+        // points against whoever is on turn; vs-engine judges the human side.
+        let judged_side = match self.mode {
+            GameMode::TwoPlayer => self.board.side_to_move(),
+            GameMode::VsEngine => self.human_side,
+        };
         let forbidden = self
             .board
-            .forbidden_kind_for_rule(move_, self.human_side, self.config.rule_set)
+            .forbidden_kind_for_rule(move_, judged_side, self.config.rule_set)
             .ok()
             .filter(|kind| kind.is_forbidden());
         if let Some(kind) = forbidden {
@@ -295,12 +328,31 @@ impl GameController {
         match self.board.play_for_rule(move_, None, self.config.rule_set) {
             Ok(_) => {
                 self.last_mark = Some((x, y));
-                if self.board.winner() == self.human_side {
-                    self.status = "你赢了。".to_string();
-                    false
-                } else {
-                    self.status = "你已落子，引擎思考中。".to_string();
-                    true
+                match self.mode {
+                    GameMode::TwoPlayer => {
+                        // The engine never moves; report the result / next turn
+                        // and always return false so no engine search starts.
+                        let winner = self.board.winner();
+                        self.status = if winner == BLACK {
+                            "黑方胜。".to_string()
+                        } else if winner == WHITE {
+                            "白方胜。".to_string()
+                        } else if self.board.side_to_move() == BLACK {
+                            "轮到黑方落子。".to_string()
+                        } else {
+                            "轮到白方落子。".to_string()
+                        };
+                        false
+                    }
+                    GameMode::VsEngine => {
+                        if self.board.winner() == self.human_side {
+                            self.status = "你赢了。".to_string();
+                            false
+                        } else {
+                            self.status = "你已落子，引擎思考中。".to_string();
+                            true
+                        }
+                    }
                 }
             }
             Err(err) => {
@@ -322,6 +374,21 @@ impl GameController {
         }
 
         self.generation = self.generation.wrapping_add(1);
+        if self.mode == GameMode::TwoPlayer {
+            // Two humans alternate, so a single undo hands the turn back.
+            let _ = self.board.undo();
+            self.last_mark = last_move_xy(&self.board);
+            self.last_result = None;
+            self.last_trace = None;
+            self.last_search_ms = None;
+            self.status = if self.board.side_to_move() == BLACK {
+                "已悔棋，轮到黑方落子。".to_string()
+            } else {
+                "已悔棋，轮到白方落子。".to_string()
+            };
+            return;
+        }
+
         let mut undone = 0;
         while self.board.move_count() > 0 && undone < 2 {
             if self.board.undo().is_ok() {
@@ -387,7 +454,8 @@ impl GameController {
     }
 
     pub fn prepare_engine_search(&mut self) -> Option<EngineSearchTask> {
-        if self.engine_thinking
+        if self.mode == GameMode::TwoPlayer
+            || self.engine_thinking
             || self.board.winner() != EMPTY
             || self.board.side_to_move() == self.human_side
         {
@@ -506,6 +574,7 @@ impl GameController {
             last_result,
             last_trace,
             params: GameParamsSnapshot {
+                mode: self.mode.as_str(),
                 profile: self.config.profile.as_str(),
                 difficulty: self
                     .difficulty
@@ -538,9 +607,14 @@ impl GameController {
     }
 
     fn can_human_play(&self) -> bool {
-        !self.engine_thinking
-            && self.board.winner() == EMPTY
-            && self.board.side_to_move() == self.human_side
+        if self.engine_thinking || self.board.winner() != EMPTY {
+            return false;
+        }
+        match self.mode {
+            // Either side may be placed by a human on the same device.
+            GameMode::TwoPlayer => true,
+            GameMode::VsEngine => self.board.side_to_move() == self.human_side,
+        }
     }
 
     fn search_limits(&self) -> SearchLimits {
@@ -677,7 +751,7 @@ mod tests {
             .is_empty());
 
         let mut controller = shallow_controller();
-        assert!(controller.new_game(BLACK, RuleSet::Renju));
+        assert!(controller.new_game(BLACK, RuleSet::Renju, GameMode::VsEngine));
         assert!(controller.play_human(7, 7));
         assert!(controller.snapshot().forbidden_points.is_empty());
     }
@@ -685,9 +759,9 @@ mod tests {
     #[test]
     fn stale_search_completion_does_not_mutate_new_game() {
         let mut controller = shallow_controller();
-        assert!(controller.new_game(WHITE, RuleSet::Freestyle));
+        assert!(controller.new_game(WHITE, RuleSet::Freestyle, GameMode::VsEngine));
         let task = controller.prepare_engine_search().unwrap();
-        assert!(controller.new_game(BLACK, RuleSet::Renju));
+        assert!(controller.new_game(BLACK, RuleSet::Renju, GameMode::VsEngine));
 
         assert!(!controller.commit_engine_search(task.run()));
         let snapshot = controller.snapshot();
@@ -700,7 +774,7 @@ mod tests {
     #[test]
     fn engine_search_round_trip_plays_center_for_white_human() {
         let mut controller = shallow_controller();
-        assert!(controller.new_game(WHITE, RuleSet::Renju));
+        assert!(controller.new_game(WHITE, RuleSet::Renju, GameMode::VsEngine));
         let completion = controller.prepare_engine_search().unwrap().run();
 
         assert!(controller.commit_engine_search(completion));
@@ -714,7 +788,7 @@ mod tests {
     #[test]
     fn undo_and_profile_switch_keep_controller_consistent() {
         let mut controller = shallow_controller();
-        assert!(controller.new_game(BLACK, RuleSet::Freestyle));
+        assert!(controller.new_game(BLACK, RuleSet::Freestyle, GameMode::VsEngine));
         assert!(controller.play_human(7, 7));
         let completion = controller.prepare_engine_search().unwrap().run();
         assert!(controller.commit_engine_search(completion));
@@ -752,7 +826,7 @@ mod tests {
     #[test]
     fn difficulty_switch_is_rejected_while_searching() {
         let mut controller = shallow_controller();
-        assert!(controller.new_game(WHITE, RuleSet::Freestyle));
+        assert!(controller.new_game(WHITE, RuleSet::Freestyle, GameMode::VsEngine));
         let _task = controller.prepare_engine_search().unwrap();
         controller.set_difficulty(SearchDifficulty::Junior);
 
@@ -764,14 +838,82 @@ mod tests {
     #[test]
     fn invalid_human_side_does_not_reset_the_game() {
         let mut controller = shallow_controller();
-        assert!(controller.new_game(BLACK, RuleSet::Freestyle));
+        assert!(controller.new_game(BLACK, RuleSet::Freestyle, GameMode::VsEngine));
         assert!(controller.play_human(7, 7));
         let move_count = controller.board.move_count();
 
-        assert!(!controller.new_game(0, RuleSet::Renju));
+        assert!(!controller.new_game(0, RuleSet::Renju, GameMode::VsEngine));
         let snapshot = controller.snapshot();
         assert_eq!(snapshot.move_count, move_count);
         assert_eq!(snapshot.params.rule, "freestyle");
         assert!(snapshot.error.unwrap().contains("黑方或白方"));
+    }
+
+    #[test]
+    fn two_player_alternates_without_engine_and_reports_mode() {
+        let mut controller = shallow_controller();
+        assert!(controller.new_game(BLACK, RuleSet::Freestyle, GameMode::TwoPlayer));
+        assert_eq!(controller.snapshot().params.mode, "two_player");
+
+        // Black plays: turn passes to white, engine never starts.
+        assert!(!controller.play_human(7, 7));
+        let snapshot = controller.snapshot();
+        assert_eq!(snapshot.move_count, 1);
+        assert_eq!(snapshot.side_to_move, WHITE);
+        assert!(!snapshot.engine_thinking);
+        assert!(snapshot.can_play);
+        assert!(controller.prepare_engine_search().is_none());
+
+        // White may also be placed by a human on the same device.
+        assert!(!controller.play_human(8, 8));
+        assert_eq!(controller.snapshot().side_to_move, BLACK);
+    }
+
+    #[test]
+    fn two_player_renju_exposes_and_rejects_black_forbidden_points() {
+        let mut controller = double_three_controller(RuleSet::Renju);
+        controller.mode = GameMode::TwoPlayer;
+        controller.human_side = WHITE; // irrelevant in two-player; forbidden judged by turn
+        let snapshot = controller.snapshot();
+
+        assert!(snapshot.forbidden_points.contains(&ForbiddenPointSnapshot {
+            x: 7,
+            y: 7,
+            kind: "double_three",
+        }));
+        let move_count = controller.board.move_count();
+        assert!(!controller.play_human(7, 7));
+        assert_eq!(controller.board.move_count(), move_count);
+        assert!(controller.snapshot().error.unwrap().contains("三三禁手"));
+    }
+
+    #[test]
+    fn two_player_undo_reverts_single_ply() {
+        let mut controller = shallow_controller();
+        assert!(controller.new_game(BLACK, RuleSet::Freestyle, GameMode::TwoPlayer));
+        assert!(!controller.play_human(7, 7));
+        assert!(!controller.play_human(8, 8));
+        assert_eq!(controller.board.move_count(), 2);
+
+        controller.undo_turn();
+        let snapshot = controller.snapshot();
+        assert_eq!(snapshot.move_count, 1);
+        assert_eq!(snapshot.side_to_move, WHITE);
+    }
+
+    #[test]
+    fn two_player_declares_the_winning_side() {
+        let mut controller = shallow_controller();
+        assert!(controller.new_game(BLACK, RuleSet::Freestyle, GameMode::TwoPlayer));
+        // Black builds a horizontal five while white plays out of the way.
+        for x in 0..4 {
+            assert!(!controller.play_human(x, 0)); // black
+            assert!(!controller.play_human(x, 5)); // white
+        }
+        assert!(!controller.play_human(4, 0)); // black completes five-in-a-row
+        let snapshot = controller.snapshot();
+        assert_eq!(snapshot.winner, BLACK);
+        assert_eq!(snapshot.status, "黑方胜。");
+        assert!(!snapshot.can_play);
     }
 }

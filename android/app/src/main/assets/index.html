@@ -43,6 +43,13 @@
     </div>
     <div class="game-options">
       <div class="option-row">
+        <label>对战</label>
+        <div class="segmented compact" id="opt-gamemode">
+          <button data-value="vs_engine" aria-pressed="true">人机</button>
+          <button data-value="two_player" aria-pressed="false">双人</button>
+        </div>
+      </div>
+      <div class="option-row" data-engine-only>
         <label>执棋</label>
         <div class="segmented compact" id="opt-side">
           <button data-value="black" aria-pressed="true">执黑</button>
@@ -56,14 +63,14 @@
           <button data-value="renju" aria-pressed="false">有禁手</button>
         </div>
       </div>
-      <div class="option-row">
+      <div class="option-row" data-engine-only>
         <label>模式</label>
         <div class="segmented compact" id="opt-mode">
           <button data-value="base" aria-pressed="true">Base</button>
           <button data-value="fast" aria-pressed="false">Fast</button>
         </div>
       </div>
-      <div class="option-row difficulty-row">
+      <div class="option-row difficulty-row" data-engine-only>
         <label>难度</label>
         <button id="opt-difficulty" class="option-link" type="button" data-value="intermediate">
           <span id="difficulty-summary">中级</span>

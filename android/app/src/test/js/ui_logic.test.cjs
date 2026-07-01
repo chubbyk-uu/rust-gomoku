@@ -71,7 +71,7 @@ function fakeDocument() {
     querySelectorAll: (selector) => {
       assert.equal(
         selector,
-        "#opt-side button, #opt-rule button, #opt-mode button",
+        "#opt-gamemode button, #opt-side button, #opt-rule button, #opt-mode button",
       );
       return options;
     },
@@ -161,6 +161,27 @@ test("game result distinguishes the human outcome", () => {
   );
 });
 
+test("game result announces the winning side in two-player mode", () => {
+  assert.deepEqual(
+    gameResult({ winner: 1, human_side: -1, move_count: 9, params: { mode: "two_player" } }),
+    {
+      key: "1:9",
+      title: "黑方胜",
+      message: "黑方在第 9 手取胜。",
+      tone: "win",
+    },
+  );
+  assert.deepEqual(
+    gameResult({ winner: -1, human_side: 1, move_count: 12, params: { mode: "two_player" } }),
+    {
+      key: "-1:12",
+      title: "白方胜",
+      message: "白方在第 12 手取胜。",
+      tone: "win",
+    },
+  );
+});
+
 test("the packaged page wires all tested UI helpers before app startup", () => {
   const repositoryRoot = path.resolve(__dirname, "../../../../..");
   const appScript = fs.readFileSync(
@@ -181,6 +202,10 @@ test("the packaged page wires all tested UI helpers before app startup", () => {
   assert.match(appScript, /op: "set_difficulty", difficulty/);
   assert.match(appScript, /setDifficultyValue\(state\.params\.difficulty\)/);
   assert.match(page, /id="opt-difficulty"/);
+  assert.match(page, /id="opt-gamemode"/);
+  assert.match(page, /data-value="two_player"/);
+  assert.match(page, /data-engine-only/);
+  assert.match(appScript, /op: "new_game", human_side, rule, mode/);
   assert.match(page, /id="difficulty-dialog"/);
   assert.match(page, /class="strength-icon level-5"/);
   assert.match(page, /id="meta-difficulty"/);

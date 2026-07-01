@@ -132,7 +132,7 @@ Launch the GUI:
 cargo run --release --bin gomoku_gui
 ```
 
-The GUI opens `http://127.0.0.1:18080` in the default browser automatically; pass `--no-open-browser` to disable that behavior. It supports playing black/white, freestyle or Renju rules, five difficulty levels, undo, restart, Base/Fast mode switching, async thinking, move number display, a result dialog, and a status panel; shortcuts: `U` to undo, `R` to restart. Rule selection applies only when starting a new game. During a Renju black turn, forbidden intersections are marked with red crosses and forbidden input is rejected without placing a stone. Difficulty and Base/Fast can only change while the engine is idle and affect the next engine think without resetting the board.
+The GUI opens `http://127.0.0.1:18080` in the default browser automatically; pass `--no-open-browser` to disable that behavior. It supports a vs-engine mode (playing black/white) and a two-player mode (two humans alternating on the same board with no engine), freestyle or Renju rules, five difficulty levels, undo, restart, Base/Fast mode switching, async thinking, move number display, a result dialog, and a status panel; shortcuts: `U` to undo, `R` to restart. The engine-only controls (side, Base/Fast, difficulty) are hidden in two-player mode. Rule selection applies only when starting a new game. During a Renju black turn, forbidden intersections are marked with red crosses and forbidden input is rejected without placing a stone (this holds in both modes). Difficulty and Base/Fast can only change while the engine is idle and affect the next engine think without resetting the board.
 
 Gomocup engine:
 
