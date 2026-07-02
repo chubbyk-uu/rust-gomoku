@@ -577,8 +577,8 @@ and validate its playing strength separately.
 
 Status: complete. Release signing is configured through a repository-external
 properties file, signed release APK/AAB builds pass locally, and Android
-release artifacts are attached to GitHub Releases. The latest published package
-is `v0.1.5`.
+release artifacts are attached to GitHub Releases. The latest published Android
+package is `v0.1.5`; `v0.1.6` is a Windows-only desktop GUI update.
 
 1. Produce `app-debug.apk` for initial manual installation: complete.
 2. After the real-device gate, create a release signing key outside the
@@ -620,6 +620,7 @@ The first signed Android distribution version was `versionName = "0.1.2"` and
 GitHub Release:
 
 - <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.5>
+- <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.6> (Windows-only)
 
 ## Stop Conditions
 
