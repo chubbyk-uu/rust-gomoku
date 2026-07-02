@@ -263,9 +263,10 @@ impl ThreatLine {
             }
             if shape == 0x1D {
                 if i <= BOARD_SIZE - 7
-                    && self.cells[i + 5] == x0
+                    && self.cells[i + 5] == i32::from(EMPTY)
                     && self.cells[i + 6] == x0
                     && self.cells[i + 7] == x0
+                    && self.cells[i + 8] == x0
                     && p == i + 4
                     && self.cells[i + 3] == i32::from(EMPTY)
                 {
@@ -1225,6 +1226,76 @@ pub fn forcing_threat_moves_for_rule(board: &Board, side: Side, rule: RuleSet) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Oracle: every point `broken_four_legal_replies_for_side` returns for a
+    // black stone must, when black plays it, actually complete a five. A reply
+    // that does not is a spurious five point (e.g. a mis-detected jump four).
+    #[test]
+    fn broken_four_replies_are_real_five_completions() {
+        let mut state = 0x1234_5678_9abc_def0_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for _ in 0..4000 {
+            let mut board = Board::new();
+            let n = 6 + (next() % 12) as usize;
+            for _ in 0..n {
+                let x = (next() % BOARD_SIZE as u64) as usize;
+                let y = (next() % BOARD_SIZE as u64) as usize;
+                if board.grid_rows()[y][x] == EMPTY {
+                    board.grid_rows_mut()[y][x] = if next() % 5 == 0 { WHITE } else { BLACK };
+                }
+            }
+            let view = ThreatBoardView::from_board(board.clone());
+            for x in 0..BOARD_SIZE {
+                for y in 0..BOARD_SIZE {
+                    if board.grid_rows()[y][x] != BLACK {
+                        continue;
+                    }
+                    let replies = view.broken_four_legal_replies_for_side(x, y, BLACK);
+                    for &r in replies.as_slice() {
+                        let (rx, ry) = move_to_xy(r).expect("reply stays valid");
+                        let mut probe = ThreatBoardView::from_board(board.clone());
+                        probe.play(r, BLACK);
+                        assert!(
+                            probe.has_a5(rx, ry),
+                            "reply ({rx},{ry}) for stone ({x},{y}) does not complete five; board={:?}",
+                            board.grid_rows()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Deterministic Case B: row 7 holds X X X _ X _ X X (columns 3,4,5,7,9,10
+    // black; 6,8,11 empty). Anchor (7,7) sits between the two gaps. Only (6,7)
+    // completes a five (3..7). Filling (8,7) yields 7,8,9,10 — four in a row,
+    // not five — because column 11 is empty. A correct b4p must not return
+    // (8,7); a jump-four second five needs the full X X X on cols 9,10,11.
+    #[test]
+    fn b4p_does_not_report_incomplete_jump_four_second_five() {
+        let mut board = Board::new();
+        for x in [3, 4, 5, 7, 9, 10] {
+            board.grid_rows_mut()[7][x] = BLACK;
+        }
+        let view = ThreatBoardView::from_board(board.clone());
+        let replies = view.broken_four_legal_replies_for_side(7, 7, BLACK);
+        for &r in replies.as_slice() {
+            let (rx, ry) = move_to_xy(r).expect("reply stays valid");
+            let mut probe = ThreatBoardView::from_board(board.clone());
+            probe.play(r, BLACK);
+            assert!(
+                probe.has_a5(rx, ry),
+                "spurious reply ({rx},{ry}); replies={:?}",
+                replies.as_slice()
+            );
+        }
+    }
 
     // Black 3,4,5,6 and 8 on row 7, with white blocking (2,7): every black
     // "four" on this line is fake under Renju. The board four 3..6 can only

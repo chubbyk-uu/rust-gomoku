@@ -299,7 +299,7 @@ fn broken_four_reply_wrapper_matches_view() {
 }
 
 #[test]
-fn broken_four_legal_reply_uses_composite_alternate_when_primary_is_occupied() {
+fn broken_four_reply_skips_occupied_composite_primary() {
     let mut board = Board::new();
     let moves = [
         (4, 4),
@@ -348,8 +348,8 @@ fn broken_four_legal_reply_uses_composite_alternate_when_primary_is_occupied() {
     let mut view = ThreatBoardView::from_board(board);
     view.play(xy_to_move(8, 7).unwrap(), -1);
     let raw_reply = view.broken_four_reply(8, 7).expect("raw reply exists");
-    assert_eq!(move_to_xy(raw_reply).unwrap(), (8, 8));
-    assert!(!view.board.is_legal_move(raw_reply));
+    assert_eq!(move_to_xy(raw_reply).unwrap(), (8, 6));
+    assert!(view.board.is_legal_move(raw_reply));
     let legal_reply = view
         .broken_four_legal_reply(8, 7)
         .expect("alternate legal reply exists");
@@ -377,6 +377,81 @@ fn broken_four_legal_replies_collects_both_open_four_ends() {
     assert!(replies.as_slice().contains(&xy_to_move(4, 7).unwrap()));
     assert!(replies.as_slice().contains(&xy_to_move(9, 7).unwrap()));
     assert_eq!(replies.len(), 2);
+}
+
+#[test]
+fn broken_four_legal_replies_collects_split_bridge_completions() {
+    let mut board = Board::new();
+    let moves = [
+        (3, 7),
+        (0, 0),
+        (4, 7),
+        (2, 1),
+        (5, 7),
+        (4, 2),
+        (7, 7),
+        (6, 3),
+        (9, 7),
+        (8, 4),
+        (10, 7),
+        (10, 5),
+        (11, 7),
+    ];
+    for (x, y) in moves {
+        board.play(xy_to_move(x, y).unwrap(), None).unwrap();
+    }
+
+    let view = ThreatBoardView::from_board(board);
+    let replies = view.broken_four_legal_replies_for_side(7, 7, 1);
+    assert!(replies.as_slice().contains(&xy_to_move(6, 7).unwrap()));
+    assert!(replies.as_slice().contains(&xy_to_move(8, 7).unwrap()));
+    assert_eq!(replies.len(), 2);
+}
+
+#[test]
+fn broken_four_reply_ignores_occupied_bridge_point() {
+    let mut board = Board::new();
+    let moves = [
+        (3, 7),
+        (0, 0),
+        (4, 7),
+        (2, 1),
+        (5, 7),
+        (4, 2),
+        (7, 7),
+        (6, 3),
+        (8, 7),
+        (8, 4),
+        (9, 7),
+        (10, 5),
+        (10, 7),
+    ];
+    for (x, y) in moves {
+        board.play(xy_to_move(x, y).unwrap(), None).unwrap();
+    }
+
+    let view = ThreatBoardView::from_board(board.clone());
+    let occupied = xy_to_move(8, 7).unwrap();
+    let only_empty_completion = xy_to_move(6, 7).unwrap();
+    let (reply, ambiguous) = view.broken_four_reply_with_ambiguity(7, 7);
+    assert_eq!(reply, Some(only_empty_completion));
+    assert!(!ambiguous);
+    assert!(!view
+        .broken_four_legal_replies_for_side(7, 7, 1)
+        .as_slice()
+        .contains(&occupied));
+
+    let result = VCFSearcher::default().search(&board, 1, 2);
+    assert_ne!(result.move_, Some(occupied));
+    assert!(board.is_legal_move_for_rule(result.move_.unwrap(), 1, RuleSet::Freestyle));
+    assert!(
+        matches!(
+            result.move_.and_then(|m| move_to_xy(m).ok()),
+            Some((6, 7) | (11, 7))
+        ),
+        "VCF should choose an empty winning completion, got {:?}",
+        result.move_.and_then(|m| move_to_xy(m).ok())
+    );
 }
 
 #[test]

@@ -856,9 +856,10 @@ impl Line {
             }
             if shape == 0x1D {
                 if i <= BOARD_SIZE - 7
-                    && self.cells[i + 5] == x0
+                    && self.cells[i + 5] == i32::from(EMPTY)
                     && self.cells[i + 6] == x0
                     && self.cells[i + 7] == x0
+                    && self.cells[i + 8] == x0
                     && p == i + 4
                     && self.cells[i + 3] == i32::from(EMPTY)
                 {
