@@ -158,6 +158,21 @@ const BEST_MOVE_NONE: u8 = 0xFF;
 const GENERATION_MASK: u16 = 0x3FFF;
 
 fn pack_entry(entry: TTEntry) -> u64 {
+    debug_assert!(
+        i32::from(entry.value as i16) == entry.value,
+        "TT value {} does not fit the i16 packing field",
+        entry.value
+    );
+    debug_assert!(
+        (0..=i32::from(u8::MAX)).contains(&entry.depth),
+        "TT depth {} outside the u8 packing range",
+        entry.depth
+    );
+    debug_assert!(
+        (0..=i32::from(u16::MAX)).contains(&entry.priority),
+        "TT priority {} outside the u16 packing range",
+        entry.priority
+    );
     let value = (entry.value as i16 as u16 as u64) << VALUE_SHIFT;
     let flag = (u64::from(entry.flag) & 0x3) << FLAG_SHIFT;
     let depth = (entry.depth.clamp(0, u8::MAX as i32) as u64) << DEPTH_SHIFT;

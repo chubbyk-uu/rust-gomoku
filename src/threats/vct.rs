@@ -333,20 +333,43 @@ impl VCTSearcher {
         }
 
         let mut solved = true;
+        // WIN5 wins on the spot. An open or double four (A4) only wins
+        // immediately when the defender cannot answer with a five of their
+        // own: the defender moves next, so any completable four they already
+        // hold (and which the attack move does not block) makes five first.
+        // Attacker moves never create defender fours, so when the defender has
+        // none before the attack the per-attack recheck can be skipped; the
+        // existence scan is cached across the attack loop.
+        let mut defender_had_completable_four: Option<bool> = None;
         for attack in attacks {
             if attack.level >= ThreatLevel::A4 {
-                return self.store(
-                    OR_NODE,
-                    attacker,
-                    depth,
-                    key,
-                    0,
-                    VCTResult {
-                        move_: Some(attack.move_),
-                        found: true,
-                        solved: true,
-                    },
-                );
+                let instant = attack.level >= ThreatLevel::WIN5 || {
+                    let had_four = *defender_had_completable_four.get_or_insert_with(|| {
+                        view.broken_four_point_for_side(-attacker).0.is_some()
+                    });
+                    if had_four {
+                        view.play(attack.move_, attacker);
+                        let blocked = view.broken_four_point_for_side(-attacker).0.is_none();
+                        view.undo();
+                        blocked
+                    } else {
+                        true
+                    }
+                };
+                if instant {
+                    return self.store(
+                        OR_NODE,
+                        attacker,
+                        depth,
+                        key,
+                        0,
+                        VCTResult {
+                            move_: Some(attack.move_),
+                            found: true,
+                            solved: true,
+                        },
+                    );
+                }
             }
 
             view.play(attack.move_, attacker);
@@ -468,7 +491,8 @@ impl VCTSearcher {
         let mut solved = true;
 
         let counter_wins = self.collect_counter_wins(view, attacker);
-        let win_stage = self.search_defense_stage(view, attacker, depth, counter_wins, &mut seen);
+        let win_stage =
+            self.search_defense_stage(view, attacker, depth, attack.level, counter_wins, &mut seen);
         if let Some(result) = win_stage.refutation {
             return self.store(AND_NODE, attacker, depth, key, context, result);
         }
@@ -479,6 +503,7 @@ impl VCTSearcher {
             view,
             attacker,
             depth,
+            attack.level,
             attack.defenses.iter().copied(),
             &mut seen,
         );
@@ -489,8 +514,14 @@ impl VCTSearcher {
         solved &= forced_stage.solved;
 
         let counter_forcing = self.collect_counter_forcing_defenses(view, attacker, &seen);
-        let counter_stage =
-            self.search_defense_stage(view, attacker, depth, counter_forcing, &mut seen);
+        let counter_stage = self.search_defense_stage(
+            view,
+            attacker,
+            depth,
+            attack.level,
+            counter_forcing,
+            &mut seen,
+        );
         if let Some(result) = counter_stage.refutation {
             return self.store(AND_NODE, attacker, depth, key, context, result);
         }
@@ -516,6 +547,7 @@ impl VCTSearcher {
         view: &mut ThreatBoardView,
         attacker: Side,
         depth: i32,
+        attack_level: ThreatLevel,
         defenses: I,
         seen: &mut std::collections::HashSet<Move>,
     ) -> DefenseStageResult
@@ -536,7 +568,13 @@ impl VCTSearcher {
 
             view.play(d_move, -attacker);
             let (dx, dy) = crate::board::move_to_xy(d_move).expect("move stays valid");
-            if view.board.winner() == -attacker || view.has_a4(dx, dy) {
+            // A defender five refutes any threat. A defender open four only
+            // refutes an open-three-level attack: against a four (B4) the
+            // attacker completes five first, so the reply is searched like any
+            // other defense and the child OR node claims the win.
+            if view.board.winner() == -attacker
+                || (attack_level < ThreatLevel::B4 && view.has_winning_a4(dx, dy))
+            {
                 view.undo();
                 return DefenseStageResult {
                     refutation: Some(VCTResult {
@@ -584,7 +622,7 @@ impl VCTSearcher {
             }
             view.play(m, defender);
             let (dx, dy) = crate::board::move_to_xy(m).expect("move stays valid");
-            if view.board.winner() == defender || view.has_a4(dx, dy) {
+            if view.board.winner() == defender || view.has_winning_a4(dx, dy) {
                 counter_wins.push(m);
             }
             view.undo();
@@ -609,7 +647,7 @@ impl VCTSearcher {
             }
             view.play(m, defender);
             let (dx, dy) = crate::board::move_to_xy(m).expect("move stays valid");
-            if view.board.winner() != defender && !view.has_a4(dx, dy) {
+            if view.board.winner() != defender && !view.has_winning_a4(dx, dy) {
                 let b4 = view.b4_count(dx, dy);
                 if b4 >= 1 {
                     counter_b4.push(m);
@@ -643,6 +681,64 @@ fn mix_signature(hash: &mut u64, value: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::xy_to_move;
+    use crate::constants::{BLACK, WHITE};
+
+    // Black has an open three (6..8,7): extending it makes an open four (A4).
+    // But white already has a live four on the diagonal — after any black
+    // non-winning move white completes five first, so black has no VCT. The
+    // OR node must not treat the A4 attack as an unconditional instant win.
+    #[test]
+    fn vct_open_four_is_not_instant_win_when_defender_answers_with_five() {
+        let mut board = Board::new();
+        for (x, y, side) in [
+            (6, 7, BLACK),
+            (7, 7, BLACK),
+            (8, 7, BLACK),
+            (1, 1, WHITE),
+            (2, 2, WHITE),
+            (3, 3, WHITE),
+            (4, 4, WHITE),
+        ] {
+            board.grid_rows_mut()[y][x] = side;
+        }
+
+        let result = VCTSearcher::default().search(&board, BLACK, 4);
+        assert!(
+            !result.found,
+            "black's open four loses to white's immediate five"
+        );
+    }
+
+    // Black wins by force: (8,7) makes a four (5..8,7) and at the same time a
+    // column three (8,5)(8,6)(8,7). White's only block (9,7) lets black play
+    // (8,8) for an open four. White's open three at (1,1)..(3,3) can answer
+    // with an open four, but never a five in time — it must not be accepted
+    // as a refutation of the four attack.
+    #[test]
+    fn vct_four_attack_is_not_refuted_by_defender_counter_open_four() {
+        let mut board = Board::new();
+        for (x, y, side) in [
+            (5, 7, BLACK),
+            (6, 7, BLACK),
+            (7, 7, BLACK),
+            (8, 5, BLACK),
+            (8, 6, BLACK),
+            (4, 7, WHITE),
+            (1, 1, WHITE),
+            (2, 2, WHITE),
+            (3, 3, WHITE),
+        ] {
+            board.grid_rows_mut()[y][x] = side;
+        }
+
+        let result = VCTSearcher::default().search(&board, BLACK, 4);
+        assert!(
+            result.found,
+            "the forcing four -> open four chain is a real VCT"
+        );
+        assert_eq!(result.move_, Some(xy_to_move(8, 7).unwrap()));
+    }
 
     #[test]
     fn and_memo_context_diagnostic_detects_same_key_different_attack() {

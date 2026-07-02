@@ -577,6 +577,21 @@ impl ThreatBoardView {
         l1.a4(p1) > 0 || l2.a4(p2) > 0 || l3.a4(p3) > 0 || l4.a4(p4) > 0
     }
 
+    /// Rule-aware "this open four wins" check for the stone at `(x, y)`.
+    /// Freestyle (and white under Renju) matches `has_a4`. For black under
+    /// Renju an apparent open four can be fake: a completion may form an
+    /// overline or another forbidden shape. Require at least two rule-legal
+    /// winning completions so the four is really unstoppable.
+    pub fn has_winning_a4(&mut self, x: usize, y: usize) -> bool {
+        if !self.has_a4(x, y) {
+            return false;
+        }
+        if self.rule_set != RuleSet::Renju || self.board.grid_rows()[y][x] != BLACK {
+            return true;
+        }
+        self.legal_win_completions(x, y, BLACK).len() >= 2
+    }
+
     pub fn has_a6(&self, x: usize, y: usize) -> bool {
         if self.board.grid_rows()[y][x] == EMPTY {
             return false;
@@ -1094,6 +1109,22 @@ impl ThreatBoardView {
             .is_legal_move_for_rule(move_, side, self.rule_set)
     }
 
+    pub fn rule_set(&self) -> RuleSet {
+        self.rule_set
+    }
+
+    /// True when the four(s) through the stone at `(x, y)` can actually be
+    /// completed into a rule-legal winning five by their owner. Freestyle and
+    /// white fours always can; a Renju black "four" whose every completion
+    /// forms an overline is fake and carries no forcing power.
+    pub fn four_has_rule_legal_completion(&mut self, x: usize, y: usize) -> bool {
+        let side = self.board.grid_rows()[y][x];
+        if self.rule_set != RuleSet::Renju || side != BLACK {
+            return true;
+        }
+        !self.legal_win_completions(x, y, BLACK).is_empty()
+    }
+
     pub fn collect_attack_moves(&mut self, attacker: Side) -> Vec<AttackMove> {
         let moves = self.threat_moves(attacker);
         let mut attacks = Vec::new();
@@ -1133,7 +1164,7 @@ impl ThreatBoardView {
         for move_ in moves {
             self.play(move_, side);
             let (x, y) = move_to_xy(move_).expect("move stays valid");
-            if self.broken_four_reply(x, y).is_some() {
+            if self.broken_four_reply(x, y).is_some() && self.four_has_rule_legal_completion(x, y) {
                 forcing.push(move_);
             }
             self.undo();
@@ -1155,8 +1186,9 @@ pub fn has_vct_trigger_for_rule(board: &Board, side: Side, rule: RuleSet) -> boo
         }
         view.play(move_, side);
         let (x, y) = move_to_xy(move_).expect("move stays valid");
-        let is_b4_plus =
-            view.board.winner() == side || view.has_a4(x, y) || view.b4_count(x, y) >= 1;
+        let is_b4_plus = view.board.winner() == side
+            || view.has_winning_a4(x, y)
+            || (view.b4_count(x, y) >= 1 && view.four_has_rule_legal_completion(x, y));
         let is_dual_a3 = !is_b4_plus && view.a3r_count(x, y) >= 2;
         view.undo();
         if is_b4_plus || is_dual_a3 {
@@ -1188,4 +1220,61 @@ pub fn forcing_threat_moves(board: &Board, side: Side) -> Vec<Move> {
 
 pub fn forcing_threat_moves_for_rule(board: &Board, side: Side, rule: RuleSet) -> Vec<Move> {
     ThreatBoardView::from_board_with_rule(board.clone(), rule).forcing_threat_moves(side)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Black 3,4,5,6 and 8 on row 7, with white blocking (2,7): every black
+    // "four" on this line is fake under Renju. The board four 3..6 can only
+    // complete at (7,7), which makes the overline 3..8; the move (9,7) creates
+    // the raw four 5,6,_,8,9 whose sole five point is again (7,7), now the
+    // overline 3..9. Black therefore has no real forcing threat.
+    fn fake_black_four_board() -> Board {
+        let mut board = Board::new();
+        for (x, y, side) in [
+            (3, 7, BLACK),
+            (4, 7, BLACK),
+            (5, 7, BLACK),
+            (6, 7, BLACK),
+            (8, 7, BLACK),
+            (2, 7, WHITE),
+        ] {
+            board.grid_rows_mut()[y][x] = side;
+        }
+        board
+    }
+
+    #[test]
+    fn renju_fake_black_four_is_not_a_forcing_threat() {
+        let board = fake_black_four_board();
+        let attack = xy_to_move(9, 7).expect("attack stays valid");
+
+        let freestyle = forcing_threat_moves_for_rule(&board, BLACK, RuleSet::Freestyle);
+        assert!(
+            freestyle.contains(&attack),
+            "freestyle: the raw four 5,6,_,8,9 is forcing"
+        );
+
+        let renju = forcing_threat_moves_for_rule(&board, BLACK, RuleSet::Renju);
+        assert!(
+            renju.is_empty(),
+            "renju: the only five point (7,7) is an overline, nothing is forcing: {renju:?}"
+        );
+    }
+
+    #[test]
+    fn renju_fake_black_four_does_not_trigger_vct() {
+        let board = fake_black_four_board();
+
+        assert!(
+            has_vct_trigger_for_rule(&board, BLACK, RuleSet::Freestyle),
+            "freestyle: completing at (7,7) wins outright, the trigger must fire"
+        );
+        assert!(
+            !has_vct_trigger_for_rule(&board, BLACK, RuleSet::Renju),
+            "renju: black has no real four or dual three, the trigger must stay off"
+        );
+    }
 }

@@ -1055,6 +1055,33 @@ mod tests {
         );
     }
 
+    // Renju: black's only "forcing" reply is the raw four 5,6,_,8,9 on row 7,
+    // whose sole five point (7,7) completes the overline 3..9 and is therefore
+    // forbidden — black has no real counter. The VCT verification must not
+    // reject white's move because of that fake forcing threat.
+    #[test]
+    fn renju_vct_verification_ignores_fake_black_forcing() {
+        let mut board = Board::new();
+        for (x, y, side) in [
+            (3, 7, BLACK),
+            (4, 7, BLACK),
+            (5, 7, BLACK),
+            (6, 7, BLACK),
+            (8, 7, BLACK),
+            (2, 7, WHITE),
+        ] {
+            board.grid_rows_mut()[y][x] = side;
+        }
+
+        let mut config = load_default_config();
+        config.rule_set = RuleSet::Renju;
+        let mut searcher = RootSearcher::new(config);
+        let (accepted, reason) =
+            searcher.verify_root_vct_move(&board, WHITE, xy_to_move(12, 12).unwrap());
+        assert_eq!(reason, None, "black's fake four must not count as forcing");
+        assert!(accepted);
+    }
+
     #[test]
     fn root_search_handles_no_legal_fallback_move_without_panicking() {
         let mut board = Board::new();
