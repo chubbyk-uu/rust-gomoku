@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 //! Local browser GUI for playing against the engine.
 
 use std::io::{Read, Write};
@@ -5,6 +10,7 @@ use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -155,9 +161,12 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameController>>) {
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("/");
     let (path, query) = split_target(target);
-    let response = match (method, path) {
-        ("GET", "/") => html_response(INDEX_HTML),
-        ("GET", "/state") => json_response(&state.lock().expect("state lock").snapshot()),
+    let (response, should_shutdown) = match (method, path) {
+        ("GET", "/") => (html_response(INDEX_HTML), false),
+        ("GET", "/state") => (
+            json_response(&state.lock().expect("state lock").snapshot()),
+            false,
+        ),
         ("POST", "/new") => {
             let side = query_param(query, "side")
                 .and_then(parse_side)
@@ -176,7 +185,10 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameController>>) {
             if mode == GameMode::VsEngine && side == WHITE {
                 maybe_start_engine(Arc::clone(&state));
             }
-            json_response(&state.lock().expect("state lock").snapshot())
+            (
+                json_response(&state.lock().expect("state lock").snapshot()),
+                false,
+            )
         }
         ("POST", "/play") => {
             let x = query_param(query, "x").and_then(|value| value.parse::<usize>().ok());
@@ -193,11 +205,17 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameController>>) {
             if should_engine_move {
                 maybe_start_engine(Arc::clone(&state));
             }
-            json_response(&state.lock().expect("state lock").snapshot())
+            (
+                json_response(&state.lock().expect("state lock").snapshot()),
+                false,
+            )
         }
         ("POST", "/undo") => {
             state.lock().expect("state lock").undo_turn();
-            json_response(&state.lock().expect("state lock").snapshot())
+            (
+                json_response(&state.lock().expect("state lock").snapshot()),
+                false,
+            )
         }
         ("POST", "/profile") => {
             let profile = query_param(query, "value").and_then(|value| value.parse().ok());
@@ -209,7 +227,10 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameController>>) {
                     game.set_error("未知模式，请选择 base 或 fast。");
                 }
             }
-            json_response(&state.lock().expect("state lock").snapshot())
+            (
+                json_response(&state.lock().expect("state lock").snapshot()),
+                false,
+            )
         }
         ("POST", "/difficulty") => {
             let difficulty = query_param(query, "value")
@@ -224,11 +245,21 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameController>>) {
                     );
                 }
             }
-            json_response(&state.lock().expect("state lock").snapshot())
+            (
+                json_response(&state.lock().expect("state lock").snapshot()),
+                false,
+            )
         }
-        _ => text_response(404, "not found"),
+        ("POST", "/shutdown") => (text_response(200, "shutting down"), true),
+        _ => (text_response(404, "not found"), false),
     };
     let _ = stream.write_all(response.as_bytes());
+    if should_shutdown {
+        thread::spawn(|| {
+            thread::sleep(Duration::from_millis(120));
+            std::process::exit(0);
+        });
+    }
 }
 
 fn split_target(target: &str) -> (&str, &str) {
@@ -318,6 +349,8 @@ mod tests {
             "start-two-player",
             "开始双人对局",
             "selectMode('two_player')",
+            "shutdownApp",
+            "退出",
         ] {
             assert!(INDEX_HTML.contains(marker), "missing marker: {marker}");
         }
@@ -463,7 +496,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     select:disabled { opacity: .48; cursor: not-allowed; }
     .actions {
       display: grid;
-      grid-template-columns: 1fr;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 12px;
       padding-top: 2px;
     }
@@ -613,6 +646,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </div>
         <div class="actions">
           <button id="undo-btn" class="warn" onclick="undo()">悔棋</button>
+          <button id="exit-btn" class="secondary" onclick="shutdownApp()">退出</button>
         </div>
         <div class="hint">棋盘会自动刷新；规则只在新局生效。难度控制深度、宽度和 VCF/VCT，Base/Fast 控制搜索排序；两者都在下一次引擎思考生效。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
       </div>
@@ -752,6 +786,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
       newGame(side);
     }
     function undo() { api('/undo').catch(showError); }
+    async function shutdownApp() {
+      try {
+        await fetch('/shutdown', { method: 'POST' });
+        const status = document.getElementById('status');
+        status.textContent = '程序正在退出，可以关闭此页面。';
+        status.className = 'status';
+      } catch (err) {
+        showError(err);
+      }
+    }
     function closeResult() {
       const backdrop = document.getElementById('result-backdrop');
       backdrop.classList.remove('open');
