@@ -1,8 +1,3 @@
-#![cfg_attr(
-    all(target_os = "windows", not(debug_assertions)),
-    windows_subsystem = "windows"
-)]
-
 //! Local browser GUI for playing against the engine.
 
 use std::io::{Read, Write};
@@ -10,7 +5,7 @@ use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -19,6 +14,8 @@ use rust_gomoku::{
 };
 
 const DEFAULT_ADDR: &str = "127.0.0.1:18080";
+const BROWSER_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+const BROWSER_HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 fn main() {
     if cfg!(debug_assertions) {
@@ -36,6 +33,8 @@ fn main() {
         config.root_search.timed_max_wide = width;
     }
     let state = Arc::new(Mutex::new(GameController::new(config)));
+    let browser_activity = Arc::new(Mutex::new(BrowserActivity::default()));
+    start_browser_watchdog(Arc::clone(&browser_activity));
     let addr = args.addr;
     let listener = TcpListener::bind(&addr).expect("GUI server binds to local address");
     let url = browser_url(&addr);
@@ -45,14 +44,66 @@ fn main() {
             eprintln!("warning: failed to open the browser automatically: {err}");
         }
     }
+    minimize_console_window();
     for stream in listener.incoming() {
         let Ok(stream) = stream else {
             continue;
         };
         let state = Arc::clone(&state);
-        thread::spawn(move || handle_client(stream, state));
+        let browser_activity = Arc::clone(&browser_activity);
+        thread::spawn(move || handle_client(stream, state, browser_activity));
     }
 }
+
+struct BrowserActivity {
+    seen: bool,
+    last_seen: Instant,
+}
+
+impl Default for BrowserActivity {
+    fn default() -> Self {
+        Self {
+            seen: false,
+            last_seen: Instant::now(),
+        }
+    }
+}
+
+fn start_browser_watchdog(browser_activity: Arc<Mutex<BrowserActivity>>) {
+    thread::spawn(move || loop {
+        thread::sleep(BROWSER_HEARTBEAT_CHECK_INTERVAL);
+        let should_exit = {
+            let activity = browser_activity.lock().expect("browser activity lock");
+            activity.seen && activity.last_seen.elapsed() >= BROWSER_HEARTBEAT_TIMEOUT
+        };
+        if should_exit {
+            eprintln!("browser heartbeat timed out; exiting GUI server");
+            std::process::exit(0);
+        }
+    });
+}
+
+#[cfg(all(target_os = "windows", not(debug_assertions)))]
+fn minimize_console_window() {
+    use std::ffi::c_void;
+
+    const SW_MINIMIZE: i32 = 6;
+
+    unsafe extern "system" {
+        fn GetConsoleWindow() -> *mut c_void;
+        fn ShowWindow(hwnd: *mut c_void, n_cmd_show: i32) -> i32;
+    }
+
+    unsafe {
+        let hwnd = GetConsoleWindow();
+        if !hwnd.is_null() {
+            let _ = ShowWindow(hwnd, SW_MINIMIZE);
+        }
+    }
+}
+
+#[cfg(not(all(target_os = "windows", not(debug_assertions))))]
+fn minimize_console_window() {}
 
 struct GuiArgs {
     addr: String,
@@ -145,7 +196,11 @@ fn open_browser(_url: &str) -> std::io::Result<()> {
     ))
 }
 
-fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameController>>) {
+fn handle_client(
+    mut stream: TcpStream,
+    state: Arc<Mutex<GameController>>,
+    browser_activity: Arc<Mutex<BrowserActivity>>,
+) {
     let mut buffer = [0_u8; 8192];
     let Ok(read) = stream.read(&mut buffer) else {
         return;
@@ -161,12 +216,17 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameController>>) {
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("/");
     let (path, query) = split_target(target);
-    let (response, should_shutdown) = match (method, path) {
-        ("GET", "/") => (html_response(INDEX_HTML), false),
-        ("GET", "/state") => (
-            json_response(&state.lock().expect("state lock").snapshot()),
-            false,
-        ),
+    let response = match (method, path) {
+        ("GET", "/") => html_response(INDEX_HTML),
+        ("GET", "/state") => json_response(&state.lock().expect("state lock").snapshot()),
+        ("POST", "/heartbeat") => {
+            {
+                let mut activity = browser_activity.lock().expect("browser activity lock");
+                activity.seen = true;
+                activity.last_seen = Instant::now();
+            }
+            text_response(200, "ok")
+        }
         ("POST", "/new") => {
             let side = query_param(query, "side")
                 .and_then(parse_side)
@@ -185,10 +245,7 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameController>>) {
             if mode == GameMode::VsEngine && side == WHITE {
                 maybe_start_engine(Arc::clone(&state));
             }
-            (
-                json_response(&state.lock().expect("state lock").snapshot()),
-                false,
-            )
+            json_response(&state.lock().expect("state lock").snapshot())
         }
         ("POST", "/play") => {
             let x = query_param(query, "x").and_then(|value| value.parse::<usize>().ok());
@@ -205,17 +262,11 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameController>>) {
             if should_engine_move {
                 maybe_start_engine(Arc::clone(&state));
             }
-            (
-                json_response(&state.lock().expect("state lock").snapshot()),
-                false,
-            )
+            json_response(&state.lock().expect("state lock").snapshot())
         }
         ("POST", "/undo") => {
             state.lock().expect("state lock").undo_turn();
-            (
-                json_response(&state.lock().expect("state lock").snapshot()),
-                false,
-            )
+            json_response(&state.lock().expect("state lock").snapshot())
         }
         ("POST", "/profile") => {
             let profile = query_param(query, "value").and_then(|value| value.parse().ok());
@@ -227,10 +278,7 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameController>>) {
                     game.set_error("未知模式，请选择 base 或 fast。");
                 }
             }
-            (
-                json_response(&state.lock().expect("state lock").snapshot()),
-                false,
-            )
+            json_response(&state.lock().expect("state lock").snapshot())
         }
         ("POST", "/difficulty") => {
             let difficulty = query_param(query, "value")
@@ -245,21 +293,11 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<GameController>>) {
                     );
                 }
             }
-            (
-                json_response(&state.lock().expect("state lock").snapshot()),
-                false,
-            )
+            json_response(&state.lock().expect("state lock").snapshot())
         }
-        ("POST", "/shutdown") => (text_response(200, "shutting down"), true),
-        _ => (text_response(404, "not found"), false),
+        _ => text_response(404, "not found"),
     };
     let _ = stream.write_all(response.as_bytes());
-    if should_shutdown {
-        thread::spawn(|| {
-            thread::sleep(Duration::from_millis(120));
-            std::process::exit(0);
-        });
-    }
 }
 
 fn split_target(target: &str) -> (&str, &str) {
@@ -349,8 +387,8 @@ mod tests {
             "start-two-player",
             "开始双人对局",
             "selectMode('two_player')",
-            "shutdownApp",
-            "退出",
+            "sendHeartbeat",
+            "/heartbeat",
         ] {
             assert!(INDEX_HTML.contains(marker), "missing marker: {marker}");
         }
@@ -496,7 +534,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     select:disabled { opacity: .48; cursor: not-allowed; }
     .actions {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: 1fr;
       gap: 12px;
       padding-top: 2px;
     }
@@ -646,9 +684,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </div>
         <div class="actions">
           <button id="undo-btn" class="warn" onclick="undo()">悔棋</button>
-          <button id="exit-btn" class="secondary" onclick="shutdownApp()">退出</button>
         </div>
-        <div class="hint">棋盘会自动刷新；规则只在新局生效。难度控制深度、宽度和 VCF/VCT，Base/Fast 控制搜索排序；两者都在下一次引擎思考生效。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
+        <div class="hint">棋盘会自动刷新；规则只在新局生效。难度控制深度、宽度和 VCF/VCT，Base/Fast 控制搜索排序；两者都在下一次引擎思考生效。关闭网页后一段时间，后台服务会自动退出。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
       </div>
       <div class="kv" id="info"></div>
     </aside>
@@ -748,6 +785,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
       draw();
       renderInfo();
     }
+    function sendHeartbeat() {
+      fetch('/heartbeat', { method: 'POST', keepalive: true }).catch(() => {});
+    }
     function refresh() { api('/state').catch(showError); }
     function newGame(side) { api('/new?side=' + side + '&rule=' + selectedRule + '&mode=' + selectedMode).catch(showError); }
     function startTwoPlayer() { newGame('black'); }
@@ -786,16 +826,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
       newGame(side);
     }
     function undo() { api('/undo').catch(showError); }
-    async function shutdownApp() {
-      try {
-        await fetch('/shutdown', { method: 'POST' });
-        const status = document.getElementById('status');
-        status.textContent = '程序正在退出，可以关闭此页面。';
-        status.className = 'status';
-      } catch (err) {
-        showError(err);
-      }
-    }
     function closeResult() {
       const backdrop = document.getElementById('result-backdrop');
       backdrop.classList.remove('open');
@@ -1023,6 +1053,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       renderResult();
     }
     renderModeButtons();
+    sendHeartbeat();
+    setInterval(sendHeartbeat, 5000);
     setInterval(refresh, 500);
     refresh();
   </script>
