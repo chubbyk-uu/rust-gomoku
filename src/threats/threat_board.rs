@@ -1,7 +1,7 @@
 //! Threat-focused board view and tactical helpers.
 
 use crate::board::{move_to_xy, xy_to_move, Board};
-use crate::constants::{BLACK, BOARD_SIZE, EMPTY, WHITE};
+use crate::constants::{BLACK, BOARD_SIZE, EMPTY};
 use crate::rules::RuleSet;
 use crate::threats::types::{AttackMove, ThreatLevel};
 use crate::types::{Move, Side};
@@ -31,14 +31,6 @@ fn ga(value: i32) -> usize {
 
 fn gb(value: i32) -> usize {
     ((value >> 8) & 0xFF) as usize
-}
-
-fn comb(x: usize, y: usize) -> i32 {
-    ((x as i32) << 8) | (y as i32 - 2)
-}
-
-fn comc(x: usize, y: usize, z: usize) -> i32 {
-    comb(comb(x, y) as usize, z)
 }
 
 pub const MAX_BROKEN_FOUR_REPLIES: usize = 8;
@@ -101,271 +93,27 @@ impl ThreatLine {
     }
 
     fn a4(&self, point_index: usize) -> i32 {
-        let p = point_index + 2;
-        let x0 = self.cells[p];
-        if x0 == i32::from(EMPTY) {
-            return 0;
-        }
-        let xmin = usize::max(2, p.saturating_sub(3));
-        let xmax = usize::min(BOARD_SIZE - 2, p);
-        for i in xmin..=xmax {
-            if self.cells[i] + self.cells[i + 1] + self.cells[i + 2] + self.cells[i + 3] != 4 * x0 {
-                continue;
-            }
-            if self.cells[i - 1] == i32::from(EMPTY) && self.cells[i + 4] == i32::from(EMPTY) {
-                return 1;
-            }
-        }
-        0
+        crate::patterns::line::scan_a4(&self.cells, point_index)
     }
 
     fn a6(&self, point_index: usize) -> i32 {
-        let p = point_index + 2;
-        if self.cells[p] != i32::from(BLACK) {
-            return 0;
-        }
-        let xmin = usize::max(2, p.saturating_sub(5));
-        let xmax = usize::min(BOARD_SIZE - 4, p);
-        for i in xmin..=xmax {
-            if self.cells[i]
-                + self.cells[i + 1]
-                + self.cells[i + 2]
-                + self.cells[i + 3]
-                + self.cells[i + 4]
-                + self.cells[i + 5]
-                == 6
-            {
-                return 1;
-            }
-        }
-        0
+        crate::patterns::line::scan_a6(&self.cells, point_index)
     }
 
     fn a5(&self, point_index: usize) -> i32 {
-        let p = point_index + 2;
-        let x0 = self.cells[p];
-        if x0 == i32::from(EMPTY) {
-            return 0;
-        }
-        let xmin = usize::max(2, p.saturating_sub(4));
-        let xmax = usize::min(BOARD_SIZE - 3, p);
-        for i in xmin..=xmax {
-            if self.cells[i]
-                + self.cells[i + 1]
-                + self.cells[i + 2]
-                + self.cells[i + 3]
-                + self.cells[i + 4]
-                == 5 * x0
-            {
-                return 1;
-            }
-        }
-        0
+        crate::patterns::line::scan_a5(&self.cells, point_index)
     }
 
     fn b4(&self, point_index: usize) -> i32 {
-        let p = point_index + 2;
-        let x0 = self.cells[p];
-        if x0 == i32::from(EMPTY) {
-            return 0;
-        }
-        let xmin = usize::max(2, p.saturating_sub(4));
-        let xmax = usize::min(BOARD_SIZE - 3, p);
-        for i in xmin..=xmax {
-            if self.cells[i]
-                + self.cells[i + 1]
-                + self.cells[i + 2]
-                + self.cells[i + 3]
-                + self.cells[i + 4]
-                != 4 * x0
-            {
-                continue;
-            }
-            let mut shape = (self.cells[i] << 4)
-                + (self.cells[i + 1] << 3)
-                + (self.cells[i + 2] << 2)
-                + (self.cells[i + 3] << 1)
-                + self.cells[i + 4];
-            if x0 == i32::from(WHITE) {
-                shape = -shape;
-            }
-            if shape == 0x1E || shape == 0x0F {
-                return 1;
-            }
-            if shape == 0x1D {
-                if i <= BOARD_SIZE - 7
-                    && self.cells[i + 5] == i32::from(EMPTY)
-                    && self.cells[i + 6] == x0
-                    && self.cells[i + 7] == x0
-                    && self.cells[i + 8] == x0
-                    && p == i + 4
-                {
-                    return 2;
-                }
-                return 1;
-            }
-            if shape == 0x1B {
-                if i <= BOARD_SIZE - 6
-                    && self.cells[i + 5] == i32::from(EMPTY)
-                    && self.cells[i + 6] == x0
-                    && self.cells[i + 7] == x0
-                    && (p == i + 4 || p == i + 3)
-                {
-                    return 2;
-                }
-                return 1;
-            }
-            if shape == 0x17 {
-                if i <= BOARD_SIZE - 5
-                    && self.cells[i + 5] == i32::from(EMPTY)
-                    && self.cells[i + 6] == x0
-                    && (p == i + 4 || p == i + 3 || p == i + 2)
-                {
-                    return 2;
-                }
-                return 1;
-            }
-        }
-        0
+        crate::patterns::line::scan_b4(&self.cells, point_index)
     }
 
     fn b4p(&self, point_index: usize) -> i32 {
-        let p = point_index + 2;
-        let x0 = self.cells[p];
-        if x0 == i32::from(EMPTY) {
-            return 0;
-        }
-        let xmin = usize::max(2, p.saturating_sub(4));
-        let xmax = usize::min(BOARD_SIZE - 3, p);
-        for i in xmin..=xmax {
-            if self.cells[i]
-                + self.cells[i + 1]
-                + self.cells[i + 2]
-                + self.cells[i + 3]
-                + self.cells[i + 4]
-                != 4 * x0
-            {
-                continue;
-            }
-            let mut shape = (self.cells[i] << 4)
-                + (self.cells[i + 1] << 3)
-                + (self.cells[i + 2] << 2)
-                + (self.cells[i + 3] << 1)
-                + self.cells[i + 4];
-            if x0 == i32::from(WHITE) {
-                shape = -shape;
-            }
-            if shape == 0x1E {
-                if self.cells[i - 1] == i32::from(EMPTY) {
-                    return comc(1, i - 1, i + 4);
-                }
-                return comb(1, i + 4);
-            }
-            if shape == 0x1D {
-                if i <= BOARD_SIZE - 7
-                    && self.cells[i + 5] == i32::from(EMPTY)
-                    && self.cells[i + 6] == x0
-                    && self.cells[i + 7] == x0
-                    && self.cells[i + 8] == x0
-                    && p == i + 4
-                    && self.cells[i + 3] == i32::from(EMPTY)
-                {
-                    return comc(1, i + 3, i + 5);
-                }
-                if self.cells[i + 3] == i32::from(EMPTY) {
-                    return comb(1, i + 3);
-                }
-            }
-            if shape == 0x1B {
-                if i <= BOARD_SIZE - 6
-                    && self.cells[i + 5] == i32::from(EMPTY)
-                    && self.cells[i + 6] == x0
-                    && self.cells[i + 7] == x0
-                    && (p == i + 4 || p == i + 3)
-                    && self.cells[i + 2] == i32::from(EMPTY)
-                {
-                    return comc(1, i + 2, i + 5);
-                }
-                if self.cells[i + 2] == i32::from(EMPTY) {
-                    return comb(1, i + 2);
-                }
-            }
-            if shape == 0x17 {
-                if i <= BOARD_SIZE - 5
-                    && self.cells[i + 5] == i32::from(EMPTY)
-                    && self.cells[i + 6] == x0
-                    && (p == i + 4 || p == i + 3 || p == i + 2)
-                    && self.cells[i + 1] == i32::from(EMPTY)
-                {
-                    return comc(1, i + 1, i + 5);
-                }
-                if self.cells[i + 1] == i32::from(EMPTY) {
-                    return comb(1, i + 1);
-                }
-            }
-            if shape == 0x0F {
-                if self.cells[i + 5] == i32::from(EMPTY) {
-                    return comc(1, i, i + 5);
-                }
-                return comb(1, i);
-            }
-        }
-        0
+        crate::patterns::line::scan_b4p(&self.cells, point_index)
     }
 
     fn a3(&self, point_index: usize) -> i32 {
-        let p = point_index + 2;
-        let x0 = self.cells[p];
-        if x0 == i32::from(EMPTY) {
-            return 0;
-        }
-        let xmin = usize::max(2, p.saturating_sub(3));
-        let xmax = usize::min(BOARD_SIZE - 2, p);
-        for i in xmin..=xmax {
-            let num1 = self.cells[i] + self.cells[i + 1] + self.cells[i + 2] + self.cells[i + 3];
-            let num2 = self.cells[i] * self.cells[i + 1] * self.cells[i + 2] * self.cells[i + 3];
-            if num1 != 3 * x0 || num2 != 0 {
-                continue;
-            }
-            let mut shape = (self.cells[i] << 3)
-                + (self.cells[i + 1] << 2)
-                + (self.cells[i + 2] << 1)
-                + self.cells[i + 3];
-            if x0 == i32::from(WHITE) {
-                shape = -shape;
-            }
-            if shape == 0x0E {
-                if self.cells[i - 1] == i32::from(EMPTY)
-                    && self.cells[i - 2] != x0
-                    && self.cells[i + 4] != x0
-                {
-                    if self.cells[i - 2] == i32::from(EMPTY)
-                        && self.cells[i + 4] == i32::from(EMPTY)
-                    {
-                        return comc(1, i - 1, i + 3);
-                    }
-                    if self.cells[i - 2] == i32::from(EMPTY) {
-                        return comb(1, i - 1);
-                    }
-                    if self.cells[i + 4] == i32::from(EMPTY) {
-                        return comb(1, i + 3);
-                    }
-                }
-            }
-            if shape == 0x0D
-                && self.cells[i - 1] == i32::from(EMPTY)
-                && self.cells[i + 4] == i32::from(EMPTY)
-            {
-                return comb(1, i + 2);
-            }
-            if shape == 0x0B
-                && self.cells[i - 1] == i32::from(EMPTY)
-                && self.cells[i + 4] == i32::from(EMPTY)
-            {
-                return comb(1, i + 1);
-            }
-        }
-        0
+        crate::patterns::line::scan_a3(&self.cells, point_index)
     }
 }
 
@@ -1226,6 +974,72 @@ pub fn forcing_threat_moves_for_rule(board: &Board, side: Side, rule: RuleSet) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::WHITE;
+
+    // Equivalence gate for the ThreatLine/Line dedup: the two duplicate copies
+    // of a3/a4/a5/a6/b4/b4p must return the same value for the same line at
+    // every point index. Proven here before collapsing them onto one shared
+    // implementation, so a hidden divergence would surface as a mismatch.
+    #[test]
+    fn threat_line_matches_pattern_line_on_random_lines() {
+        use crate::patterns::line::Line;
+
+        let mut state = 0x0bad_c0de_1337_beef_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for _ in 0..30_000 {
+            let mut values = [0_i32; BOARD_SIZE];
+            for value in values.iter_mut() {
+                *value = match next() % 3 {
+                    0 => 0,
+                    1 => i32::from(BLACK),
+                    _ => i32::from(WHITE),
+                };
+            }
+            let threat_line = ThreatLine::from_values(&values);
+            let mut cells = vec![1024_i32; BOARD_SIZE + 4];
+            cells[2..2 + BOARD_SIZE].copy_from_slice(&values);
+            let pattern_line = Line { cells };
+
+            for pi in 0..BOARD_SIZE {
+                assert_eq!(
+                    threat_line.a3(pi),
+                    pattern_line.a3(pi),
+                    "a3 @ {pi}: {values:?}"
+                );
+                assert_eq!(
+                    threat_line.a4(pi),
+                    pattern_line.a4(pi),
+                    "a4 @ {pi}: {values:?}"
+                );
+                assert_eq!(
+                    threat_line.a5(pi),
+                    pattern_line.a5(pi),
+                    "a5 @ {pi}: {values:?}"
+                );
+                assert_eq!(
+                    threat_line.a6(pi),
+                    pattern_line.a6(pi),
+                    "a6 @ {pi}: {values:?}"
+                );
+                assert_eq!(
+                    threat_line.b4(pi),
+                    pattern_line.b4(pi),
+                    "b4 @ {pi}: {values:?}"
+                );
+                assert_eq!(
+                    threat_line.b4p(pi),
+                    pattern_line.b4p(pi),
+                    "b4p @ {pi}: {values:?}"
+                );
+            }
+        }
+    }
 
     // Oracle: every point `broken_four_legal_replies_for_side` returns for a
     // black stone must, when black plays it, actually complete a five. A reply

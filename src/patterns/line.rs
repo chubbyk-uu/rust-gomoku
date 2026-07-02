@@ -706,259 +706,27 @@ impl Line {
     }
 
     pub fn a4(&self, point_index: usize) -> i32 {
-        let p = point_index + 2;
-        let x0 = self.cells[p];
-        if x0 == i32::from(EMPTY) {
-            return 0;
-        }
-        let xmin = usize::max(2, p.saturating_sub(3));
-        let xmax = usize::min(BOARD_SIZE - 2, p);
-        for i in xmin..=xmax {
-            if self.cells[i] + self.cells[i + 1] + self.cells[i + 2] + self.cells[i + 3] != 4 * x0 {
-                continue;
-            }
-            if self.cells[i - 1] == i32::from(EMPTY) && self.cells[i + 4] == i32::from(EMPTY) {
-                return 1;
-            }
-        }
-        0
+        scan_a4(&self.cells, point_index)
     }
 
     pub fn a6(&self, point_index: usize) -> i32 {
-        let p = point_index + 2;
-        if self.cells[p] != i32::from(BLACK) {
-            return 0;
-        }
-        let xmin = usize::max(2, p.saturating_sub(5));
-        let xmax = usize::min(BOARD_SIZE - 4, p);
-        for i in xmin..=xmax {
-            if self.cells[i]
-                + self.cells[i + 1]
-                + self.cells[i + 2]
-                + self.cells[i + 3]
-                + self.cells[i + 4]
-                + self.cells[i + 5]
-                == 6
-            {
-                return 1;
-            }
-        }
-        0
+        scan_a6(&self.cells, point_index)
     }
 
     pub fn a5(&self, point_index: usize) -> i32 {
-        let p = point_index + 2;
-        let x0 = self.cells[p];
-        if x0 == i32::from(EMPTY) {
-            return 0;
-        }
-        let xmin = usize::max(2, p.saturating_sub(4));
-        let xmax = usize::min(BOARD_SIZE - 3, p);
-        for i in xmin..=xmax {
-            if self.cells[i]
-                + self.cells[i + 1]
-                + self.cells[i + 2]
-                + self.cells[i + 3]
-                + self.cells[i + 4]
-                == 5 * x0
-            {
-                return 1;
-            }
-        }
-        0
+        scan_a5(&self.cells, point_index)
     }
 
     pub fn b4(&self, point_index: usize) -> i32 {
-        let p = point_index + 2;
-        let x0 = self.cells[p];
-        if x0 == i32::from(EMPTY) {
-            return 0;
-        }
-        let xmin = usize::max(2, p.saturating_sub(4));
-        let xmax = usize::min(BOARD_SIZE - 3, p);
-        for i in xmin..=xmax {
-            if (0..5).map(|k| self.cells[i + k]).sum::<i32>() != 4 * x0 {
-                continue;
-            }
-            let mut shape = (self.cells[i] << 4)
-                + (self.cells[i + 1] << 3)
-                + (self.cells[i + 2] << 2)
-                + (self.cells[i + 3] << 1)
-                + self.cells[i + 4];
-            if x0 == i32::from(WHITE) {
-                shape = -shape;
-            }
-            if shape == 0x1E || shape == 0x0F {
-                return 1;
-            }
-            if shape == 0x1D {
-                if i <= BOARD_SIZE - 7
-                    && self.cells[i + 5] == i32::from(EMPTY)
-                    && self.cells[i + 6] == x0
-                    && self.cells[i + 7] == x0
-                    && self.cells[i + 8] == x0
-                    && p == i + 4
-                {
-                    return 2;
-                }
-                return 1;
-            }
-            if shape == 0x1B {
-                if i <= BOARD_SIZE - 6
-                    && self.cells[i + 5] == i32::from(EMPTY)
-                    && self.cells[i + 6] == x0
-                    && self.cells[i + 7] == x0
-                    && (p == i + 4 || p == i + 3)
-                {
-                    return 2;
-                }
-                return 1;
-            }
-            if shape == 0x17 {
-                if i <= BOARD_SIZE - 5
-                    && self.cells[i + 5] == i32::from(EMPTY)
-                    && self.cells[i + 6] == x0
-                    && (p == i + 4 || p == i + 3 || p == i + 2)
-                {
-                    return 2;
-                }
-                return 1;
-            }
-        }
-        0
+        scan_b4(&self.cells, point_index)
     }
 
     pub fn b4p(&self, point_index: usize) -> i32 {
-        let p = point_index + 2;
-        let x0 = self.cells[p];
-        if x0 == i32::from(EMPTY) {
-            return 0;
-        }
-        let xmin = usize::max(2, p.saturating_sub(4));
-        let xmax = usize::min(BOARD_SIZE - 3, p);
-        for i in xmin..=xmax {
-            if (0..5).map(|k| self.cells[i + k]).sum::<i32>() != 4 * x0 {
-                continue;
-            }
-            let mut shape = (self.cells[i] << 4)
-                + (self.cells[i + 1] << 3)
-                + (self.cells[i + 2] << 2)
-                + (self.cells[i + 3] << 1)
-                + self.cells[i + 4];
-            if x0 == i32::from(WHITE) {
-                shape = -shape;
-            }
-            if shape == 0x1E {
-                if self.cells[i - 1] == i32::from(EMPTY) {
-                    return comc(1, i - 1, i + 4);
-                }
-                return comb(1, i + 4);
-            }
-            if shape == 0x1D {
-                if i <= BOARD_SIZE - 7
-                    && self.cells[i + 5] == i32::from(EMPTY)
-                    && self.cells[i + 6] == x0
-                    && self.cells[i + 7] == x0
-                    && self.cells[i + 8] == x0
-                    && p == i + 4
-                    && self.cells[i + 3] == i32::from(EMPTY)
-                {
-                    return comc(1, i + 3, i + 5);
-                }
-                if self.cells[i + 3] == i32::from(EMPTY) {
-                    return comb(1, i + 3);
-                }
-            }
-            if shape == 0x1B {
-                if i <= BOARD_SIZE - 6
-                    && self.cells[i + 5] == i32::from(EMPTY)
-                    && self.cells[i + 6] == x0
-                    && self.cells[i + 7] == x0
-                    && (p == i + 4 || p == i + 3)
-                    && self.cells[i + 2] == i32::from(EMPTY)
-                {
-                    return comc(1, i + 2, i + 5);
-                }
-                if self.cells[i + 2] == i32::from(EMPTY) {
-                    return comb(1, i + 2);
-                }
-            }
-            if shape == 0x17 {
-                if i <= BOARD_SIZE - 5
-                    && self.cells[i + 5] == i32::from(EMPTY)
-                    && self.cells[i + 6] == x0
-                    && (p == i + 4 || p == i + 3 || p == i + 2)
-                    && self.cells[i + 1] == i32::from(EMPTY)
-                {
-                    return comc(1, i + 1, i + 5);
-                }
-                if self.cells[i + 1] == i32::from(EMPTY) {
-                    return comb(1, i + 1);
-                }
-            }
-            if shape == 0x0F {
-                if self.cells[i + 5] == i32::from(EMPTY) {
-                    return comc(1, i, i + 5);
-                }
-                return comb(1, i);
-            }
-        }
-        0
+        scan_b4p(&self.cells, point_index)
     }
 
     pub fn a3(&self, point_index: usize) -> i32 {
-        let p = point_index + 2;
-        let x0 = self.cells[p];
-        if x0 == i32::from(EMPTY) {
-            return 0;
-        }
-        let xmin = usize::max(2, p.saturating_sub(3));
-        let xmax = usize::min(BOARD_SIZE - 2, p);
-        for i in xmin..=xmax {
-            let num1 = self.cells[i] + self.cells[i + 1] + self.cells[i + 2] + self.cells[i + 3];
-            let num2 = self.cells[i] * self.cells[i + 1] * self.cells[i + 2] * self.cells[i + 3];
-            if num1 != 3 * x0 || num2 != 0 {
-                continue;
-            }
-            let mut shape = (self.cells[i] << 3)
-                + (self.cells[i + 1] << 2)
-                + (self.cells[i + 2] << 1)
-                + self.cells[i + 3];
-            if x0 == i32::from(WHITE) {
-                shape = -shape;
-            }
-            if shape == 0x0E {
-                if self.cells[i - 1] == i32::from(EMPTY)
-                    && self.cells[i - 2] != x0
-                    && self.cells[i + 4] != x0
-                {
-                    if self.cells[i - 2] == i32::from(EMPTY)
-                        && self.cells[i + 4] == i32::from(EMPTY)
-                    {
-                        return comc(1, i - 1, i + 3);
-                    }
-                    if self.cells[i - 2] == i32::from(EMPTY) {
-                        return comb(1, i - 1);
-                    }
-                    if self.cells[i + 4] == i32::from(EMPTY) {
-                        return comb(1, i + 3);
-                    }
-                }
-            }
-            if shape == 0x0D
-                && self.cells[i - 1] == i32::from(EMPTY)
-                && self.cells[i + 4] == i32::from(EMPTY)
-            {
-                return comb(1, i + 2);
-            }
-            if shape == 0x0B
-                && self.cells[i - 1] == i32::from(EMPTY)
-                && self.cells[i + 4] == i32::from(EMPTY)
-            {
-                return comb(1, i + 1);
-            }
-        }
-        0
+        scan_a3(&self.cells, point_index)
     }
 }
 
@@ -1023,14 +791,249 @@ fn fill_cells_python(
     Ok(())
 }
 
-fn comb(x: usize, y: usize) -> i32 {
+pub(crate) fn comb(x: usize, y: usize) -> i32 {
     ((x as i32) << 8) | (y as i32 - 2)
 }
 
-fn comc(x: usize, y: usize, z: usize) -> i32 {
+pub(crate) fn comc(x: usize, y: usize, z: usize) -> i32 {
     comb(comb(x, y) as usize, z)
 }
 
 fn comd(x: usize, y: usize, z: usize, w: usize) -> i32 {
     comb(comc(x, y, z) as usize, w)
+}
+
+// Shared directional-line shape scanners over a padded `&[i32]` cell buffer
+// (two SENTINEL cells on each side; `point_index + 2` addresses the anchor).
+// `Line` (Vec-backed, extracted from a board) and `ThreatLine` (fixed-array,
+// incrementally maintained) both delegate here so the encoding lives once.
+
+pub(crate) fn scan_a4(cells: &[i32], point_index: usize) -> i32 {
+    let p = point_index + 2;
+    let x0 = cells[p];
+    if x0 == i32::from(EMPTY) {
+        return 0;
+    }
+    let xmin = usize::max(2, p.saturating_sub(3));
+    let xmax = usize::min(BOARD_SIZE - 2, p);
+    for i in xmin..=xmax {
+        if cells[i] + cells[i + 1] + cells[i + 2] + cells[i + 3] != 4 * x0 {
+            continue;
+        }
+        if cells[i - 1] == i32::from(EMPTY) && cells[i + 4] == i32::from(EMPTY) {
+            return 1;
+        }
+    }
+    0
+}
+
+pub(crate) fn scan_a6(cells: &[i32], point_index: usize) -> i32 {
+    let p = point_index + 2;
+    if cells[p] != i32::from(BLACK) {
+        return 0;
+    }
+    let xmin = usize::max(2, p.saturating_sub(5));
+    let xmax = usize::min(BOARD_SIZE - 4, p);
+    for i in xmin..=xmax {
+        if cells[i] + cells[i + 1] + cells[i + 2] + cells[i + 3] + cells[i + 4] + cells[i + 5] == 6
+        {
+            return 1;
+        }
+    }
+    0
+}
+
+pub(crate) fn scan_a5(cells: &[i32], point_index: usize) -> i32 {
+    let p = point_index + 2;
+    let x0 = cells[p];
+    if x0 == i32::from(EMPTY) {
+        return 0;
+    }
+    let xmin = usize::max(2, p.saturating_sub(4));
+    let xmax = usize::min(BOARD_SIZE - 3, p);
+    for i in xmin..=xmax {
+        if cells[i] + cells[i + 1] + cells[i + 2] + cells[i + 3] + cells[i + 4] == 5 * x0 {
+            return 1;
+        }
+    }
+    0
+}
+
+pub(crate) fn scan_b4(cells: &[i32], point_index: usize) -> i32 {
+    let p = point_index + 2;
+    let x0 = cells[p];
+    if x0 == i32::from(EMPTY) {
+        return 0;
+    }
+    let xmin = usize::max(2, p.saturating_sub(4));
+    let xmax = usize::min(BOARD_SIZE - 3, p);
+    for i in xmin..=xmax {
+        if (0..5).map(|k| cells[i + k]).sum::<i32>() != 4 * x0 {
+            continue;
+        }
+        let mut shape = (cells[i] << 4)
+            + (cells[i + 1] << 3)
+            + (cells[i + 2] << 2)
+            + (cells[i + 3] << 1)
+            + cells[i + 4];
+        if x0 == i32::from(WHITE) {
+            shape = -shape;
+        }
+        if shape == 0x1E || shape == 0x0F {
+            return 1;
+        }
+        if shape == 0x1D {
+            if i <= BOARD_SIZE - 7
+                && cells[i + 5] == i32::from(EMPTY)
+                && cells[i + 6] == x0
+                && cells[i + 7] == x0
+                && cells[i + 8] == x0
+                && p == i + 4
+            {
+                return 2;
+            }
+            return 1;
+        }
+        if shape == 0x1B {
+            if i <= BOARD_SIZE - 6
+                && cells[i + 5] == i32::from(EMPTY)
+                && cells[i + 6] == x0
+                && cells[i + 7] == x0
+                && (p == i + 4 || p == i + 3)
+            {
+                return 2;
+            }
+            return 1;
+        }
+        if shape == 0x17 {
+            if i <= BOARD_SIZE - 5
+                && cells[i + 5] == i32::from(EMPTY)
+                && cells[i + 6] == x0
+                && (p == i + 4 || p == i + 3 || p == i + 2)
+            {
+                return 2;
+            }
+            return 1;
+        }
+    }
+    0
+}
+
+pub(crate) fn scan_b4p(cells: &[i32], point_index: usize) -> i32 {
+    let p = point_index + 2;
+    let x0 = cells[p];
+    if x0 == i32::from(EMPTY) {
+        return 0;
+    }
+    let xmin = usize::max(2, p.saturating_sub(4));
+    let xmax = usize::min(BOARD_SIZE - 3, p);
+    for i in xmin..=xmax {
+        if (0..5).map(|k| cells[i + k]).sum::<i32>() != 4 * x0 {
+            continue;
+        }
+        let mut shape = (cells[i] << 4)
+            + (cells[i + 1] << 3)
+            + (cells[i + 2] << 2)
+            + (cells[i + 3] << 1)
+            + cells[i + 4];
+        if x0 == i32::from(WHITE) {
+            shape = -shape;
+        }
+        if shape == 0x1E {
+            if cells[i - 1] == i32::from(EMPTY) {
+                return comc(1, i - 1, i + 4);
+            }
+            return comb(1, i + 4);
+        }
+        if shape == 0x1D {
+            if i <= BOARD_SIZE - 7
+                && cells[i + 5] == i32::from(EMPTY)
+                && cells[i + 6] == x0
+                && cells[i + 7] == x0
+                && cells[i + 8] == x0
+                && p == i + 4
+                && cells[i + 3] == i32::from(EMPTY)
+            {
+                return comc(1, i + 3, i + 5);
+            }
+            if cells[i + 3] == i32::from(EMPTY) {
+                return comb(1, i + 3);
+            }
+        }
+        if shape == 0x1B {
+            if i <= BOARD_SIZE - 6
+                && cells[i + 5] == i32::from(EMPTY)
+                && cells[i + 6] == x0
+                && cells[i + 7] == x0
+                && (p == i + 4 || p == i + 3)
+                && cells[i + 2] == i32::from(EMPTY)
+            {
+                return comc(1, i + 2, i + 5);
+            }
+            if cells[i + 2] == i32::from(EMPTY) {
+                return comb(1, i + 2);
+            }
+        }
+        if shape == 0x17 {
+            if i <= BOARD_SIZE - 5
+                && cells[i + 5] == i32::from(EMPTY)
+                && cells[i + 6] == x0
+                && (p == i + 4 || p == i + 3 || p == i + 2)
+                && cells[i + 1] == i32::from(EMPTY)
+            {
+                return comc(1, i + 1, i + 5);
+            }
+            if cells[i + 1] == i32::from(EMPTY) {
+                return comb(1, i + 1);
+            }
+        }
+        if shape == 0x0F {
+            if cells[i + 5] == i32::from(EMPTY) {
+                return comc(1, i, i + 5);
+            }
+            return comb(1, i);
+        }
+    }
+    0
+}
+
+pub(crate) fn scan_a3(cells: &[i32], point_index: usize) -> i32 {
+    let p = point_index + 2;
+    let x0 = cells[p];
+    if x0 == i32::from(EMPTY) {
+        return 0;
+    }
+    let xmin = usize::max(2, p.saturating_sub(3));
+    let xmax = usize::min(BOARD_SIZE - 2, p);
+    for i in xmin..=xmax {
+        let num1 = cells[i] + cells[i + 1] + cells[i + 2] + cells[i + 3];
+        let num2 = cells[i] * cells[i + 1] * cells[i + 2] * cells[i + 3];
+        if num1 != 3 * x0 || num2 != 0 {
+            continue;
+        }
+        let mut shape = (cells[i] << 3) + (cells[i + 1] << 2) + (cells[i + 2] << 1) + cells[i + 3];
+        if x0 == i32::from(WHITE) {
+            shape = -shape;
+        }
+        if shape == 0x0E {
+            if cells[i - 1] == i32::from(EMPTY) && cells[i - 2] != x0 && cells[i + 4] != x0 {
+                if cells[i - 2] == i32::from(EMPTY) && cells[i + 4] == i32::from(EMPTY) {
+                    return comc(1, i - 1, i + 3);
+                }
+                if cells[i - 2] == i32::from(EMPTY) {
+                    return comb(1, i - 1);
+                }
+                if cells[i + 4] == i32::from(EMPTY) {
+                    return comb(1, i + 3);
+                }
+            }
+        }
+        if shape == 0x0D && cells[i - 1] == i32::from(EMPTY) && cells[i + 4] == i32::from(EMPTY) {
+            return comb(1, i + 2);
+        }
+        if shape == 0x0B && cells[i - 1] == i32::from(EMPTY) && cells[i + 4] == i32::from(EMPTY) {
+            return comb(1, i + 1);
+        }
+    }
+    0
 }
