@@ -9,6 +9,7 @@ Do not repeat these directions unless new evidence invalidates the decision:
 - Shape reader LUT, indexed neighbor reader, and batch-lines: rejected as default paths after semantic-equivalent tests showed unstable or worse performance.
 - Lazy SMP, root YBWC, root split, and aspiration window: rejected as default paths after poor speed/strength or maintenance tradeoffs.
 - Early stop and broad dynamic pruning: only revisit with a concrete tactical safety proof and fast-vs-base validation.
+- VCF memo-key allocation and VCT/VCF as a per-node hotspot: confirmed non-bottleneck by the 2026-07-02 VCT-path profile (`or_node` 0.27% cumulative, the `(Side, Vec<Move>, Vec<Move>)` memo alloc + sort below the 0.8% floor). Do not pursue memo-key micro-optimization.
 
 Current active target:
 
@@ -369,3 +370,62 @@ Session totals on the bench: Freestyle 3193 -> ~2993 ns/node (~6.3%), Renju
 6499 -> ~4588 ns/node (**~29%**). The remaining top cost is the rule-independent
 `shape_raw` (~18-19%) reader; further gains there need the bitboard line model,
 not call-count reduction.
+
+## 2026-07-02 — VCT-path profile after Renju tactical fixes
+
+Context: after the Renju VCF/VCT correctness fixes (false-positive A4 instant
+win, four-vs-open-four refutation, forbidden-block VCF win, `b4p` 0x1D jump
+four), a same-position sequential bench over 88 match-derived Renju positions
+showed the fixed engine ~16% slower per move than the pre-fix baseline (avg
+~601 ms vs ~516 ms, release build). This profile localizes that cost.
+
+Setup:
+
+- Profiling build (`--profile profiling`, no LTO), `renju_search_bench`
+  (`BENCH_POSITIONS=6`, depth 8 / width 40, Freestyle+Renju mixed).
+- `perf record -F 997 -e task-clock --call-graph dwarf`, 4494 samples.
+
+Findings (flat self%):
+
+| % self | function | bucket |
+| --- | --- | --- |
+| 16.07 | `patterns::line::shape_raw_from_board_point_hypothetical` | eval, rule-independent |
+| 9.32 | `eval::local::value_wide_compute_for_rule` | eval driver |
+| 7.70 | `eval::local::compute_bucket_attack_and_counts` | eval classifier |
+| 7.10 | `threats::threat_board::ThreatBoardView::threat_moves` | VCF/VCT candidate gen |
+| 4.83 | `search::ordering::getmi` | ordering |
+| 4.58 | `eval::global_eval::evaluate_board_main_cached` | leaf eval |
+| ~8 (sum) | `rules::forbidden::*` (`count_four_shapes_through`, `classify_placed_black`, `black_run_bounds_with_extra`) | Renju forbidden |
+| 1.07 | `ThreatBoardView::legal_win_completions` | new rule-aware check |
+
+Interpretation:
+
+- Two hypotheses are ruled out. The VCF memo key's per-node `Vec` alloc + sort
+  does not appear at all (below the 0.8% floor), matching the 2026-06-24 finding
+  that allocation is not a bottleneck. The new rule-aware tactical checks added
+  by the fixes are cheap: `legal_win_completions` 1.07%, `has_a4` 1.13%,
+  `has_winning_a4`/`four_has_rule_legal_completion` below the floor.
+- VCT itself barely runs on the strength-prefix sample (`or_node` 0.27%
+  cumulative), so this sample does not reproduce the +16%, which was measured on
+  VCT-heavy match positions. The +16% is therefore attributed to the extra
+  search nodes from the four-vs-open-four correctness fix (a real work increase,
+  not per-node cost), which cannot be optimized away without reintroducing the
+  bug. `threat_moves` (7.1%, re-scans the board per VCF/VCT node) is the largest
+  single tactical-path item and would be the target if a VCT-heavy profile later
+  justifies it.
+- General-search top costs are unchanged from 2026-06-24: the rule-independent
+  eval core (`shape_raw` + `value_wide` + `compute_bucket` ~33%) and Renju
+  forbidden detection (~8%). Both are known; the eval core needs the bitboard
+  line model.
+
+Decisions:
+
+- Drop the VCF memo-key optimization (non-bottleneck; see decision rules above).
+- Reverted the A1 cache micro-opt (caching the defender-four existence across
+  the OR-node attack loop) back to the simple per-attack
+  `a4_attack_wins_immediately`: the profile shows `or_node` is not hot, so the
+  cache had no measurable benefit, and the simple form is obviously correct
+  without a cross-iteration-invariance argument. Behavior-equivalent: vcf/vct/
+  root alignment unchanged, `root_alignment` nodes identical.
+- Accept the ~16% Renju single-move overhead as the correctness cost of the
+  four-vs-open-four fix.

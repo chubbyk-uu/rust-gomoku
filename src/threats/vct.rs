@@ -333,43 +333,22 @@ impl VCTSearcher {
         }
 
         let mut solved = true;
-        // WIN5 wins on the spot. An open or double four (A4) only wins
-        // immediately when the defender cannot answer with a five of their
-        // own: the defender moves next, so any completable four they already
-        // hold (and which the attack move does not block) makes five first.
-        // Attacker moves never create defender fours, so when the defender has
-        // none before the attack the per-attack recheck can be skipped; the
-        // existence scan is cached across the attack loop.
-        let mut defender_had_completable_four: Option<bool> = None;
         for attack in attacks {
-            if attack.level >= ThreatLevel::A4 {
-                let instant = attack.level >= ThreatLevel::WIN5 || {
-                    let had_four = *defender_had_completable_four.get_or_insert_with(|| {
-                        view.broken_four_point_for_side(-attacker).0.is_some()
-                    });
-                    if had_four {
-                        view.play(attack.move_, attacker);
-                        let blocked = view.broken_four_point_for_side(-attacker).0.is_none();
-                        view.undo();
-                        blocked
-                    } else {
-                        true
-                    }
-                };
-                if instant {
-                    return self.store(
-                        OR_NODE,
-                        attacker,
-                        depth,
-                        key,
-                        0,
-                        VCTResult {
-                            move_: Some(attack.move_),
-                            found: true,
-                            solved: true,
-                        },
-                    );
-                }
+            if attack.level >= ThreatLevel::A4
+                && self.a4_attack_wins_immediately(view, attacker, &attack)
+            {
+                return self.store(
+                    OR_NODE,
+                    attacker,
+                    depth,
+                    key,
+                    0,
+                    VCTResult {
+                        move_: Some(attack.move_),
+                        found: true,
+                        solved: true,
+                    },
+                );
             }
 
             view.play(attack.move_, attacker);
@@ -416,6 +395,27 @@ impl VCTSearcher {
                 solved,
             },
         )
+    }
+
+    /// WIN5 wins on the spot. An open or double four (A4) only wins immediately
+    /// when the defender cannot answer with a five of their own: the defender
+    /// moves next, so any four they already hold (that this attack does not
+    /// block) completes first. Attacker moves never create defender fours, so
+    /// this also covers the "defender had no four" case. When a counter-five
+    /// survives, the attack must go through the AND node instead.
+    fn a4_attack_wins_immediately(
+        &mut self,
+        view: &mut ThreatBoardView,
+        attacker: Side,
+        attack: &AttackMove,
+    ) -> bool {
+        if attack.level >= ThreatLevel::WIN5 {
+            return true;
+        }
+        view.play(attack.move_, attacker);
+        let defender_five = view.broken_four_point_for_side(-attacker).0;
+        view.undo();
+        defender_five.is_none()
     }
 
     fn observe_and_memo_context(
