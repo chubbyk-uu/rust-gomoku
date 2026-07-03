@@ -76,11 +76,46 @@ Correctness follow-up:
   VCT4/VCT5 lines won.
 - The VCT6 branch lost at ply 114 when white played `(8,14)`, completing the
   diagonal five `(8,14)-(9,13)-(10,12)-(11,11)-(12,10)`.
-- This is now a correctness blocker for raising the default VCT depth. The
-  immediate priority is to trace the `(8,8)` proof chain and identify the
-  missing defender refutation or invalid pruning/memo reuse. Keep the default
-  `root_vct_depth=4` until this false positive is fixed and covered by a
-  regression test.
+- Root cause: A3 attack classification used only gain squares as defender
+  replies. In this case, black `(8,8)` had gain `(6,6)`, but white `(9,9)` was
+  a quiet endpoint reply: it did not occupy the gain, but it spoiled the open
+  four that `(6,6)` would otherwise create. VCT therefore never searched the
+  only refutation.
+- Fix: A3 defenses now include each real gain plus the rule-legal winning
+  completions of the open four created by that gain. Regression coverage:
+  `a3_defenses_include_future_open_four_endpoints`,
+  `renju_vct6_rejects_a3_quiet_endpoint_false_positive`, and
+  `renju_vct6_fails_after_quiet_endpoint_refutation` in `tests/vct_alignment.rs`.
+- After the fix, the same case no longer accepts `(8,8)`. VCT6 finds `(9,9)`
+  instead; that matches the prior alpha-beta/VCT5 winning branch for this
+  paired match. Keep the default `root_vct_depth=4` until VCT6 receives broader
+  strength/performance validation.
+
+Performance impact of the correctness fix:
+
+- On `target/match-results/vct_slow_probe_case.json`, the same-machine
+  release probe changed from about 20.60s after the legality-cache optimization
+  to about 23.09s after the expanded A3 defense set. The move, score, and
+  alpha-beta nodes remained the same on this probe.
+- This is an expected VCT6 cost increase: the search now considers quiet
+  endpoint refutations that were previously unsoundly pruned. It remains below
+  the earlier 28.32s paired baseline from before the legality-cache cleanup.
+
+100-game VCT6 match validation:
+
+- Command family: `scripts/run_gomocup_match.py` on
+  `cases/renju/strength_100_prefixes.jsonl`, Renju, depth 8 / width 40,
+  VCF/VCT enabled, both sides `root_vct_depth=6`, 12 parallel jobs.
+- Output:
+  `target/match-results/current_a3fix_vct6_vs_v014_vct6_renju_d8w40_strength100.json`.
+- Result after the A3 defense fix: current 51 wins, `v0.1.4` 46 wins, 3 draws,
+  0 timeouts, 0 errors.
+- Previous current-vs-`v0.1.4` VCT6 run before the fix was 49 wins, 48 losses,
+  3 draws. Only two paired outcomes changed, both from loss to win; one was the
+  recorded case 17 false-positive line.
+- Current-side timing changed from avg 1526.735ms, median 513.303ms,
+  p95 5529.782ms, max 29450.221ms before the fix to avg 1514.905ms,
+  median 544.475ms, p95 5193.077ms, max 31878.314ms after the fix.
 
 ## 2026-06-23 Renju Forbidden Movegen Cache Gate
 

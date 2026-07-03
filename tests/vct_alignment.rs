@@ -12,6 +12,65 @@ fn make_board(moves: &[(usize, usize, i8)]) -> Board {
     board
 }
 
+fn replay_alternating(moves: &[[usize; 2]], first_side: i8, rule: RuleSet) -> Board {
+    let mut board = Board::with_side_to_move(first_side).unwrap();
+    for &[x, y] in moves {
+        board
+            .play_for_rule(xy_to_move(x, y).unwrap(), None, rule)
+            .unwrap();
+    }
+    board
+}
+
+fn vct6_false_positive_board_after_ply40() -> Board {
+    replay_alternating(
+        &[
+            [2, 12],
+            [2, 11],
+            [4, 10],
+            [3, 11],
+            [3, 9],
+            [3, 12],
+            [5, 11],
+            [2, 8],
+            [4, 9],
+            [2, 9],
+            [6, 10],
+            [1, 10],
+            [4, 13],
+            [4, 12],
+            [2, 10],
+            [3, 8],
+            [4, 7],
+            [4, 8],
+            [1, 8],
+            [5, 10],
+            [6, 12],
+            [7, 13],
+            [6, 9],
+            [6, 8],
+            [5, 8],
+            [7, 10],
+            [6, 7],
+            [7, 6],
+            [5, 7],
+            [3, 7],
+            [7, 7],
+            [8, 7],
+            [5, 5],
+            [5, 9],
+            [7, 11],
+            [2, 6],
+            [1, 5],
+            [2, 5],
+            [2, 7],
+            [9, 11],
+        ],
+        1,
+        RuleSet::Renju,
+    )
+}
+
 fn classify_after_play(
     board: &Board,
     x: usize,
@@ -210,6 +269,59 @@ fn renju_vct_white_wins_when_black_block_forbidden() {
     assert_eq!(board.side_to_move(), -1);
     let renju = VCTSearcher::default().search_for_rule(&board, -1, 3, RuleSet::Renju);
     assert!(renju.found, "white should find a continuous-threat win");
+}
+
+#[test]
+fn a3_defenses_include_future_open_four_endpoints() {
+    let board = vct6_false_positive_board_after_ply40();
+    let mut view = ThreatBoardView::from_board_with_rule(board, RuleSet::Renju);
+    let move_ = xy_to_move(8, 8).unwrap();
+    view.play(move_, 1);
+    let attack = view
+        .classify_attack_at(8, 8, 1, move_)
+        .expect("black (8,8) is an A3 attack");
+    assert_eq!(attack.level, ThreatLevel::A3);
+    let defenses: std::collections::HashSet<_> = attack
+        .defenses
+        .iter()
+        .map(|&m| move_to_xy(m).unwrap())
+        .collect();
+    assert!(
+        defenses.contains(&(6, 6)),
+        "A3 defenses must include the gain square"
+    );
+    assert!(
+        defenses.contains(&(9, 9)),
+        "A3 defenses must include quiet endpoints that spoil the future open four; got {defenses:?}"
+    );
+}
+
+#[test]
+fn renju_vct6_rejects_a3_quiet_endpoint_false_positive() {
+    let board = vct6_false_positive_board_after_ply40();
+    let result = VCTSearcher::default().search_for_rule(&board, 1, 6, RuleSet::Renju);
+    assert_ne!(
+        result.move_,
+        Some(xy_to_move(8, 8).unwrap()),
+        "VCT6 must not accept black (8,8): white (9,9) refutes it"
+    );
+}
+
+#[test]
+fn renju_vct6_fails_after_quiet_endpoint_refutation() {
+    let mut board = vct6_false_positive_board_after_ply40();
+    board
+        .play_for_rule(xy_to_move(8, 8).unwrap(), None, RuleSet::Renju)
+        .unwrap();
+    board
+        .play_for_rule(xy_to_move(9, 9).unwrap(), None, RuleSet::Renju)
+        .unwrap();
+
+    let result = VCTSearcher::default().search_for_rule(&board, 1, 6, RuleSet::Renju);
+    assert!(
+        !result.found,
+        "white (9,9) must refute the black (8,8) VCT line"
+    );
 }
 
 #[test]

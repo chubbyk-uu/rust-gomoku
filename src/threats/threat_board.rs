@@ -709,6 +709,45 @@ impl ThreatBoardView {
         gains
     }
 
+    fn push_unique_move(moves: &mut Vec<Move>, move_: Move) {
+        if !moves.contains(&move_) {
+            moves.push(move_);
+        }
+    }
+
+    /// Defensive points for an A3 attack. The gain square itself is not the
+    /// whole defense set: a defender can also occupy an endpoint of the open
+    /// four that the gain would create, turning the continuation into a single
+    /// broken four instead of a continuous threat.
+    fn a3_defense_squares(&mut self, x: usize, y: usize, attacker: Side) -> Vec<Move> {
+        let defender = -attacker;
+        let gains = self.a3_gain_squares(x, y);
+        let mut defenses = Vec::new();
+        for gain in gains {
+            if !self.rule_legal_cached(gain, attacker) {
+                continue;
+            }
+            let gain_is_defense = self.rule_legal_cached(gain, defender);
+            self.play(gain, attacker);
+            let (gx, gy) = move_to_xy(gain).expect("gain stays valid");
+            let completions = self.legal_win_completions(gx, gy, attacker);
+            let real_gain = self.board.winner() == attacker || completions.len() >= 2;
+            self.undo();
+            if !real_gain {
+                continue;
+            }
+            if gain_is_defense {
+                Self::push_unique_move(&mut defenses, gain);
+            }
+            for completion in completions {
+                if self.rule_legal_cached(completion, defender) {
+                    Self::push_unique_move(&mut defenses, completion);
+                }
+            }
+        }
+        defenses
+    }
+
     pub fn classify_attack_at(
         &mut self,
         x: usize,
@@ -766,16 +805,12 @@ impl ThreatBoardView {
                 defenses: Vec::new(),
             });
         }
-        let legal: Vec<_> = self
-            .a3_gain_squares(x, y)
-            .into_iter()
-            .filter(|&gain| self.board.is_legal_move(gain))
-            .collect();
-        if !legal.is_empty() {
+        let defenses = self.a3_defense_squares(x, y, attacker);
+        if !defenses.is_empty() {
             return Some(AttackMove {
                 move_,
                 level: ThreatLevel::A3,
-                defenses: legal,
+                defenses,
             });
         }
         None
@@ -805,17 +840,10 @@ impl ThreatBoardView {
         let completions = self.legal_win_completions(x, y, attacker);
         match completions.len() {
             0 => {
-                let gains = self.a3_gain_squares(x, y);
-                let has_real_threat = gains
-                    .iter()
-                    .any(|&gain| self.gain_creates_open_four(gain, attacker));
-                if !has_real_threat {
+                let defenses = self.a3_defense_squares(x, y, attacker);
+                if defenses.is_empty() {
                     return None;
                 }
-                let defenses: Vec<_> = gains
-                    .into_iter()
-                    .filter(|&gain| self.rule_legal_cached(gain, defender))
-                    .collect();
                 Some(AttackMove {
                     move_,
                     level: ThreatLevel::A3,
@@ -884,21 +912,6 @@ impl ThreatBoardView {
             }
         }
         wins
-    }
-
-    /// True if `attacker` playing `gain` is rule-legal and yields an unstoppable
-    /// open four (two or more rule-legal winning completions) or an immediate
-    /// win. Used to verify that an open-three threat can really be escalated.
-    fn gain_creates_open_four(&mut self, gain: Move, attacker: Side) -> bool {
-        if !self.rule_legal_cached(gain, attacker) {
-            return false;
-        }
-        self.play(gain, attacker);
-        let (gx, gy) = move_to_xy(gain).expect("gain stays valid");
-        let real = self.board.winner() == attacker
-            || self.legal_win_completions(gx, gy, attacker).len() >= 2;
-        self.undo();
-        real
     }
 
     /// Rule-aware legality of `move_` for `side`, used by the threat searcher to
