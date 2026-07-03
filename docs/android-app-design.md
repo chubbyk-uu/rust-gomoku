@@ -578,7 +578,7 @@ and validate its playing strength separately.
 Status: complete. Release signing is configured through a repository-external
 properties file, signed release APK/AAB builds pass locally, and Android
 release artifacts are attached to GitHub Releases. The latest published Android
-package is `v0.1.7`.
+package is `v0.1.8`.
 
 1. Produce `app-debug.apk` for initial manual installation: complete.
 2. After the real-device gate, create a release signing key outside the
@@ -586,7 +586,7 @@ package is `v0.1.7`.
 3. Configure release signing through local/CI secrets: complete for local
    builds.
 4. Produce signed release APK and AAB: complete.
-5. Attach the APK to a GitHub Release: complete through `v0.1.5`.
+5. Attach the APK to a GitHub Release: complete through `v0.1.8`.
 6. Consider Play publication only after signing, privacy, screenshots, version
    upgrades, and device compatibility are stable.
 
@@ -615,13 +615,14 @@ Expected local outputs:
 
 The first signed Android distribution version was `versionName = "0.1.2"` and
 `versionCode = 3`. The current published Android version is
-`versionName = "0.1.7"` and `versionCode = 7`.
+`versionName = "0.1.8"` and `versionCode = 8`.
 
 GitHub Release:
 
 - <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.5>
 - <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.6> (Windows-only)
 - <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.7>
+- <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.8>
 
 ## Stop Conditions
 
