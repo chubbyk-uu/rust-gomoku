@@ -1,5 +1,8 @@
 //! Threat-focused board view and tactical helpers.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use crate::board::{move_to_xy, xy_to_move, Board};
 use crate::constants::{BLACK, BOARD_SIZE, EMPTY};
 use crate::rules::RuleSet;
@@ -185,6 +188,14 @@ pub struct ThreatBoardView {
     pub x4: Vec<Vec<i32>>,
     rule_set: RuleSet,
     previous_sides: Vec<Side>,
+    /// Memoizes the expensive Renju-black forbidden-move verdict, keyed by
+    /// `(zobrist_key, move)`. `is_legal_move_for_rule` for black under Renju
+    /// runs a full forbidden classification (double-three/four, overline) that
+    /// dominates deep VCT search; the verdict is a pure function of the current
+    /// position and candidate point, so caching by zobrist is sound and needs
+    /// no invalidation across play/undo. Freestyle and white are never cached
+    /// (their legality is a cheap empty/winner check).
+    legality_cache: RefCell<HashMap<(u64, Move), bool>>,
 }
 
 impl ThreatBoardView {
@@ -226,6 +237,7 @@ impl ThreatBoardView {
             x4,
             rule_set,
             previous_sides: Vec::new(),
+            legality_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -307,10 +319,7 @@ impl ThreatBoardView {
                         && grid[yy as usize][xx as usize] == side
                     {
                         let move_ = xy_to_move(x, y).expect("threat move stays valid");
-                        if self
-                            .board
-                            .is_legal_move_for_rule(move_, side, self.rule_set)
-                        {
+                        if self.rule_legal_cached(move_, side) {
                             candidates.push(move_);
                         }
                         break;
@@ -758,10 +767,7 @@ impl ThreatBoardView {
                 }
                 let defenses: Vec<_> = gains
                     .into_iter()
-                    .filter(|&gain| {
-                        self.board
-                            .is_legal_move_for_rule(gain, defender, self.rule_set)
-                    })
+                    .filter(|&gain| self.rule_legal_cached(gain, defender))
                     .collect();
                 Some(AttackMove {
                     move_,
@@ -771,10 +777,7 @@ impl ThreatBoardView {
             }
             1 => {
                 let completion = completions[0];
-                if self
-                    .board
-                    .is_legal_move_for_rule(completion, defender, self.rule_set)
-                {
+                if self.rule_legal_cached(completion, defender) {
                     Some(AttackMove {
                         move_,
                         level: ThreatLevel::B4,
@@ -822,10 +825,13 @@ impl ThreatBoardView {
                 if wins.contains(&candidate) || !self.board.is_legal_move(candidate) {
                     continue;
                 }
-                self.play(candidate, side);
-                let win = self.board.winner() == side;
-                self.undo();
-                if win {
+                // Equivalent to play(candidate) + winner()==side + undo (play
+                // sets `winner` from exactly this predicate) but without the
+                // board mutation and threat-line churn.
+                if self
+                    .board
+                    .is_winning_move_for_rule(cxu, cyu, side, self.rule_set)
+                {
                     wins.push(candidate);
                 }
             }
@@ -837,10 +843,7 @@ impl ThreatBoardView {
     /// open four (two or more rule-legal winning completions) or an immediate
     /// win. Used to verify that an open-three threat can really be escalated.
     fn gain_creates_open_four(&mut self, gain: Move, attacker: Side) -> bool {
-        if !self
-            .board
-            .is_legal_move_for_rule(gain, attacker, self.rule_set)
-        {
+        if !self.rule_legal_cached(gain, attacker) {
             return false;
         }
         self.play(gain, attacker);
@@ -854,8 +857,30 @@ impl ThreatBoardView {
     /// Rule-aware legality of `move_` for `side`, used by the threat searcher to
     /// drop forbidden defender replies without reaching into private fields.
     pub fn is_rule_legal(&self, move_: Move, side: Side) -> bool {
-        self.board
-            .is_legal_move_for_rule(move_, side, self.rule_set)
+        self.rule_legal_cached(move_, side)
+    }
+
+    /// `Board::is_legal_move_for_rule` with the Renju-black forbidden verdict
+    /// memoized by `(zobrist_key, move)`. Only that branch is cached: for
+    /// freestyle or white the underlying check is a cheap empty/winner test, so
+    /// caching would only add hashing overhead. The cached verdict is a pure
+    /// function of the current position and candidate, so it stays valid as the
+    /// board is played and unplayed (the zobrist key moves with it).
+    pub fn rule_legal_cached(&self, move_: Move, side: Side) -> bool {
+        if self.rule_set != RuleSet::Renju || side != BLACK {
+            return self
+                .board
+                .is_legal_move_for_rule(move_, side, self.rule_set);
+        }
+        let key = (self.board.zobrist_key(), move_);
+        if let Some(&cached) = self.legality_cache.borrow().get(&key) {
+            return cached;
+        }
+        let verdict = self
+            .board
+            .is_legal_move_for_rule(move_, side, self.rule_set);
+        self.legality_cache.borrow_mut().insert(key, verdict);
+        verdict
     }
 
     pub fn rule_set(&self) -> RuleSet {
