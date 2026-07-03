@@ -77,8 +77,8 @@ Implementation progress on `feature/android-app`:
 - Base/Fast remains a search-ordering mode. The separate five-level difficulty
   selector maps Beginner to `d1/w10` without VCF/VCT, Junior to `d2/w10`
   without VCF/VCT, Intermediate to `d4/w20` without VCF/VCT, Senior to
-  `d6/w30` with VCF/VCT, and Master to `d8/w40` with VCF/VCT. Intermediate is
-  the default.
+  `d6/w30` with VCF/VCT and `root_vct_depth=4`, and Master to `d8/w40` with
+  VCF/VCT and `root_vct_depth=4`. Intermediate is the default.
 - Responsive verification at the target viewports and the touch/rotation/stale
   behaviors are confirmed on a real device.
 - Mobile UI state logic is isolated in `ui_logic.js` and covered by Node tests
@@ -578,7 +578,7 @@ and validate its playing strength separately.
 Status: complete. Release signing is configured through a repository-external
 properties file, signed release APK/AAB builds pass locally, and Android
 release artifacts are attached to GitHub Releases. The latest published Android
-package is `v0.1.5`; `v0.1.6` is a Windows-only desktop GUI update.
+package is `v0.1.7`.
 
 1. Produce `app-debug.apk` for initial manual installation: complete.
 2. After the real-device gate, create a release signing key outside the
@@ -615,12 +615,13 @@ Expected local outputs:
 
 The first signed Android distribution version was `versionName = "0.1.2"` and
 `versionCode = 3`. The current published Android version is
-`versionName = "0.1.5"` and `versionCode = 6`.
+`versionName = "0.1.7"` and `versionCode = 7`.
 
 GitHub Release:
 
 - <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.5>
 - <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.6> (Windows-only)
+- <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.7>
 
 ## Stop Conditions
 

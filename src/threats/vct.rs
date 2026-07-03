@@ -490,7 +490,7 @@ impl VCTSearcher {
         let mut searched_any = false;
         let mut solved = true;
 
-        let counter_wins = self.collect_counter_wins(view, attacker);
+        let counter_wins = self.collect_counter_wins(view, attacker, attack.level);
         let win_stage =
             self.search_defense_stage(view, attacker, depth, attack.level, counter_wins, &mut seen);
         if let Some(result) = win_stage.refutation {
@@ -513,20 +513,22 @@ impl VCTSearcher {
         searched_any |= forced_stage.searched;
         solved &= forced_stage.solved;
 
-        let counter_forcing = self.collect_counter_forcing_defenses(view, attacker, &seen);
-        let counter_stage = self.search_defense_stage(
-            view,
-            attacker,
-            depth,
-            attack.level,
-            counter_forcing,
-            &mut seen,
-        );
-        if let Some(result) = counter_stage.refutation {
-            return self.store(AND_NODE, attacker, depth, key, context, result);
+        if attack.level < ThreatLevel::B4 {
+            let counter_forcing = self.collect_counter_forcing_defenses(view, attacker, &seen);
+            let counter_stage = self.search_defense_stage(
+                view,
+                attacker,
+                depth,
+                attack.level,
+                counter_forcing,
+                &mut seen,
+            );
+            if let Some(result) = counter_stage.refutation {
+                return self.store(AND_NODE, attacker, depth, key, context, result);
+            }
+            searched_any |= counter_stage.searched;
+            solved &= counter_stage.solved;
         }
-        searched_any |= counter_stage.searched;
-        solved &= counter_stage.solved;
 
         self.store(
             AND_NODE,
@@ -612,7 +614,12 @@ impl VCTSearcher {
         }
     }
 
-    fn collect_counter_wins(&mut self, view: &mut ThreatBoardView, attacker: Side) -> Vec<Move> {
+    fn collect_counter_wins(
+        &mut self,
+        view: &mut ThreatBoardView,
+        attacker: Side,
+        attack_level: ThreatLevel,
+    ) -> Vec<Move> {
         let defender = -attacker;
         let mut counter_wins = Vec::new();
 
@@ -622,7 +629,9 @@ impl VCTSearcher {
             }
             view.play(m, defender);
             let (dx, dy) = crate::board::move_to_xy(m).expect("move stays valid");
-            if view.board.winner() == defender || view.has_winning_a4(dx, dy) {
+            if view.board.winner() == defender
+                || (attack_level < ThreatLevel::B4 && view.has_winning_a4(dx, dy))
+            {
                 counter_wins.push(m);
             }
             view.undo();

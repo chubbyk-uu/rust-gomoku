@@ -59,23 +59,24 @@ impl SearchDifficulty {
         }
     }
 
-    fn settings(self) -> (i32, i32, bool) {
+    fn settings(self) -> (i32, i32, bool, i32) {
         match self {
-            Self::Beginner => (1, 10, false),
-            Self::Junior => (2, 10, false),
-            Self::Intermediate => (4, 20, false),
-            Self::Senior => (6, 30, true),
-            Self::Master => (8, 40, true),
+            Self::Beginner => (1, 10, false, 4),
+            Self::Junior => (2, 10, false, 4),
+            Self::Intermediate => (4, 20, false, 4),
+            Self::Senior => (6, 30, true, 4),
+            Self::Master => (8, 40, true, 4),
         }
     }
 
     pub fn apply_to_config(self, config: &mut EngineConfig) {
-        let (depth, width, tactical) = self.settings();
+        let (depth, width, tactical, root_vct_depth) = self.settings();
         config.root_search.depth = depth;
         config.root_search.wide = width;
         config.root_search.timed_max_wide = width;
         config.runtime.compute_vcf = tactical;
         config.runtime.compute_vct = tactical;
+        config.runtime.root_vct_depth = root_vct_depth;
     }
 
     fn detect(config: &EngineConfig) -> Option<Self> {
@@ -88,11 +89,12 @@ impl SearchDifficulty {
         ]
         .into_iter()
         .find(|difficulty| {
-            let (depth, width, tactical) = difficulty.settings();
+            let (depth, width, tactical, root_vct_depth) = difficulty.settings();
             config.root_search.depth == depth
                 && config.root_search.wide == width
                 && config.runtime.compute_vcf == tactical
                 && config.runtime.compute_vct == tactical
+                && config.runtime.root_vct_depth == root_vct_depth
         })
     }
 }
@@ -435,7 +437,7 @@ impl GameController {
             self.error = Some("引擎思考中，暂不能切换难度。".to_string());
             return;
         }
-        let (depth, width, tactical) = difficulty.settings();
+        let (depth, width, tactical, _) = difficulty.settings();
         difficulty.apply_to_config(&mut self.config);
         self.difficulty = Some(difficulty);
         self.error = None;
@@ -806,12 +808,19 @@ mod tests {
         let mut controller = GameController::new(load_default_config());
         assert_eq!(controller.snapshot().params.difficulty, "master");
 
-        for (difficulty, name, depth, width, tactical) in [
-            (SearchDifficulty::Beginner, "beginner", 1, 10, false),
-            (SearchDifficulty::Junior, "junior", 2, 10, false),
-            (SearchDifficulty::Intermediate, "intermediate", 4, 20, false),
-            (SearchDifficulty::Senior, "senior", 6, 30, true),
-            (SearchDifficulty::Master, "master", 8, 40, true),
+        for (difficulty, name, depth, width, tactical, root_vct_depth) in [
+            (SearchDifficulty::Beginner, "beginner", 1, 10, false, 4),
+            (SearchDifficulty::Junior, "junior", 2, 10, false, 4),
+            (
+                SearchDifficulty::Intermediate,
+                "intermediate",
+                4,
+                20,
+                false,
+                4,
+            ),
+            (SearchDifficulty::Senior, "senior", 6, 30, true, 4),
+            (SearchDifficulty::Master, "master", 8, 40, true, 4),
         ] {
             controller.set_difficulty(difficulty);
             let params = controller.snapshot().params;
@@ -820,6 +829,7 @@ mod tests {
             assert_eq!(params.width, width);
             assert_eq!(params.compute_vcf, tactical);
             assert_eq!(params.compute_vct, tactical);
+            assert_eq!(params.root_vct_depth, root_vct_depth);
         }
     }
 

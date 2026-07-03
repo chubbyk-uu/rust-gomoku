@@ -47,7 +47,7 @@ The main defaults live in `src/config.rs`.
 | `opponent_vcf_depth` | `7` |
 | `vct_verify_opponent_vcf_depth` | `4` |
 | `vcf_multi_reply` | `true` |
-| `root_vct_depth` | `6` |
+| `root_vct_depth` | `4` |
 | `vct_strict_and_memo_key` | `true` |
 | TT bucket bits | `20` |
 | `compute_vcf` / `compute_vct` | enabled |
@@ -64,8 +64,8 @@ The desktop GUI and Android app expose five shared difficulty presets:
 | Beginner | `d1 / w10` | off |
 | Junior | `d2 / w10` | off |
 | Intermediate | `d4 / w20` | off |
-| Senior | `d6 / w30` | on |
-| Master | `d8 / w40` | on |
+| Senior | `d6 / w30` | on, `root_vct_depth=4` |
+| Master | `d8 / w40` | on, `root_vct_depth=4` |
 
 Intermediate is the default for the desktop GUI and Android app. Difficulty is
 independent from the Base/Fast profile: difficulty controls depth, width, and

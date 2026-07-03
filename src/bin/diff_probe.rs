@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use rust_gomoku::{
-    load_default_config, move_to_xy, xy_to_move, Board, RootSearcher, SearchLimits,
+    load_default_config, move_to_xy, xy_to_move, Board, RootSearcher, RuleSet, SearchLimits,
     VCTAndMemoCollisionSample, VCTDepthStats, VCTStats,
 };
 
@@ -16,6 +16,8 @@ struct DiffCase {
     moves: Vec<[i32; 2]>,
     #[serde(default = "default_first_side")]
     first_side: i8,
+    #[serde(default)]
+    rule_set: Option<String>,
     #[serde(default)]
     limits: CaseLimits,
     #[serde(default)]
@@ -304,13 +306,23 @@ fn parse_args() -> ProbeArgs {
 }
 
 fn run_case(case: DiffCase, root_profile: bool) -> ProbeOutput {
+    let rule_set = case
+        .rule_set
+        .as_deref()
+        .map(str::parse::<RuleSet>)
+        .transpose()
+        .expect("rule_set parses")
+        .unwrap_or(RuleSet::Freestyle);
     let mut board = Board::with_side_to_move(case.first_side).expect("first_side is valid");
     for [x, y] in &case.moves {
         let move_ = xy_to_move(*x as usize, *y as usize).expect("case move is in range");
-        board.play(move_, None).expect("case move is legal");
+        board
+            .play_for_rule(move_, None, rule_set)
+            .expect("case move is legal");
     }
 
     let mut config = load_default_config();
+    config.rule_set = rule_set;
     if let Some(v) = case.runtime.compute_vcf {
         config.runtime.compute_vcf = v;
     }
