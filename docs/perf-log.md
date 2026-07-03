@@ -67,11 +67,15 @@ Correctness follow-up:
 - The later 100-game Renju match against `v0.1.4` exposed a VCT6 root false
   positive. Repro case:
   `cases/renju/vct6_false_positive_case17_after_ply40.json`.
+- The paired-match continuation is recorded in
+  `cases/renju/vct6_false_positive_case17_loss_line.json`.
 - On that exact board with Renju, depth 8 / width 40, VCF/VCT enabled:
   `root_vct_depth=4` and `root_vct_depth=5` do not find VCT and choose `(9,9)`
   through alpha-beta; `root_vct_depth=6` accepts VCT move `(8,8)` with score
   `20000`. In the paired match line, the VCT6 branch later lost while the
   VCT4/VCT5 lines won.
+- The VCT6 branch lost at ply 114 when white played `(8,14)`, completing the
+  diagonal five `(8,14)-(9,13)-(10,12)-(11,11)-(12,10)`.
 - This is now a correctness blocker for raising the default VCT depth. The
   immediate priority is to trace the `(8,8)` proof chain and identify the
   missing defender refutation or invalid pruning/memo reuse. Keep the default
