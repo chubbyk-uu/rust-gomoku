@@ -117,6 +117,22 @@ Performance impact of the correctness fix:
   p95 5529.782ms, max 29450.221ms before the fix to avg 1514.905ms,
   median 544.475ms, p95 5193.077ms, max 31878.314ms after the fix.
 
+Second A3 correctness follow-up:
+
+- The expanded A3 defense helper initially used the final legal-defense list to
+  decide whether an A3 existed. That conflated two cases: no real gain exists,
+  versus a real gain exists but every direct black defense is forbidden under
+  Renju.
+- Fix: A3 classification now returns separate state for "has a real gain" and
+  "rule-legal defender replies". A white A3 whose black gain/endpoint defenses
+  are all forbidden remains an A3 with an empty defense list, so VCT can still
+  evaluate black counter-wins and counter-threats instead of silently dropping
+  the attack.
+- Regression coverage:
+  `renju_white_a3_with_all_black_defenses_forbidden_stays_a3` constructs four
+  black overline-forbidden defense points around a white A3 and verifies the
+  attack remains `A3` with no legal direct defenses.
+
 ## 2026-06-23 Renju Forbidden Movegen Cache Gate
 
 Commands:

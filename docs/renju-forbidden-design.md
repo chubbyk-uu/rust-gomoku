@@ -774,6 +774,10 @@ Current Phase 6 status:
   is forbidden; end-to-end Renju VCT never returns a forbidden double-four move
   and finds the white win when black cannot block; a root regression confirms
   VCT is engaged in Renju and stays legal.
+- Added an A3 classification regression where white has a real open-three gain
+  but every direct black defense is overline-forbidden. The attack must remain
+  `A3` with an empty legal-defense list rather than being discarded as a fake
+  three.
 
 Known Phase 6 limitations:
 

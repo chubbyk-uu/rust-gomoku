@@ -38,6 +38,12 @@ fn gb(value: i32) -> usize {
 pub const MAX_BROKEN_FOUR_REPLIES: usize = 8;
 const LEGALITY_CACHE_SIZE: usize = 1 << 16;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct A3DefenseInfo {
+    has_real_gain: bool,
+    defenses: Vec<Move>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BrokenFourReplies {
     moves: [Move; MAX_BROKEN_FOUR_REPLIES],
@@ -719,10 +725,10 @@ impl ThreatBoardView {
     /// whole defense set: a defender can also occupy an endpoint of the open
     /// four that the gain would create, turning the continuation into a single
     /// broken four instead of a continuous threat.
-    fn a3_defense_squares(&mut self, x: usize, y: usize, attacker: Side) -> Vec<Move> {
+    fn a3_defense_info(&mut self, x: usize, y: usize, attacker: Side) -> A3DefenseInfo {
         let defender = -attacker;
         let gains = self.a3_gain_squares(x, y);
-        let mut defenses = Vec::new();
+        let mut info = A3DefenseInfo::default();
         for gain in gains {
             if !self.rule_legal_cached(gain, attacker) {
                 continue;
@@ -736,16 +742,17 @@ impl ThreatBoardView {
             if !real_gain {
                 continue;
             }
+            info.has_real_gain = true;
             if gain_is_defense {
-                Self::push_unique_move(&mut defenses, gain);
+                Self::push_unique_move(&mut info.defenses, gain);
             }
             for completion in completions {
                 if self.rule_legal_cached(completion, defender) {
-                    Self::push_unique_move(&mut defenses, completion);
+                    Self::push_unique_move(&mut info.defenses, completion);
                 }
             }
         }
-        defenses
+        info
     }
 
     pub fn classify_attack_at(
@@ -805,12 +812,12 @@ impl ThreatBoardView {
                 defenses: Vec::new(),
             });
         }
-        let defenses = self.a3_defense_squares(x, y, attacker);
-        if !defenses.is_empty() {
+        let a3 = self.a3_defense_info(x, y, attacker);
+        if a3.has_real_gain {
             return Some(AttackMove {
                 move_,
                 level: ThreatLevel::A3,
-                defenses,
+                defenses: a3.defenses,
             });
         }
         None
@@ -840,14 +847,14 @@ impl ThreatBoardView {
         let completions = self.legal_win_completions(x, y, attacker);
         match completions.len() {
             0 => {
-                let defenses = self.a3_defense_squares(x, y, attacker);
-                if defenses.is_empty() {
+                let a3 = self.a3_defense_info(x, y, attacker);
+                if !a3.has_real_gain {
                     return None;
                 }
                 Some(AttackMove {
                     move_,
                     level: ThreatLevel::A3,
-                    defenses,
+                    defenses: a3.defenses,
                 })
             }
             1 => {

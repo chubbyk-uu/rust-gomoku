@@ -71,6 +71,68 @@ fn vct6_false_positive_board_after_ply40() -> Board {
     )
 }
 
+fn white_a3_with_all_black_defenses_forbidden_board() -> Board {
+    let black_traps = [
+        (4, 4),
+        (4, 5),
+        (4, 6),
+        (4, 8),
+        (4, 9),
+        (4, 10),
+        (5, 4),
+        (5, 5),
+        (5, 6),
+        (5, 8),
+        (5, 9),
+        (5, 10),
+        (9, 4),
+        (9, 5),
+        (9, 6),
+        (9, 8),
+        (9, 9),
+        (9, 10),
+        (10, 4),
+        (10, 5),
+        (10, 6),
+        (10, 8),
+        (10, 9),
+        (10, 10),
+    ];
+    let white_fillers = [
+        (0, 0),
+        (2, 0),
+        (4, 0),
+        (6, 0),
+        (8, 0),
+        (10, 0),
+        (12, 0),
+        (14, 0),
+        (1, 1),
+        (3, 1),
+        (5, 1),
+        (7, 1),
+        (9, 1),
+        (11, 1),
+        (13, 1),
+        (0, 2),
+        (2, 2),
+        (6, 2),
+        (8, 2),
+        (12, 2),
+        (14, 2),
+        (1, 3),
+        (3, 3),
+        (11, 3),
+    ];
+    let mut moves = Vec::new();
+    for (black, white) in black_traps.into_iter().zip(white_fillers) {
+        moves.push([black.0, black.1]);
+        moves.push([white.0, white.1]);
+    }
+    moves.extend([[13, 3], [6, 7], [14, 3], [7, 7]]);
+    replay_alternating(&moves, 1, RuleSet::Renju)
+}
+
 fn classify_after_play(
     board: &Board,
     x: usize,
@@ -269,6 +331,39 @@ fn renju_vct_white_wins_when_black_block_forbidden() {
     assert_eq!(board.side_to_move(), -1);
     let renju = VCTSearcher::default().search_for_rule(&board, -1, 3, RuleSet::Renju);
     assert!(renju.found, "white should find a continuous-threat win");
+}
+
+#[test]
+fn renju_white_a3_with_all_black_defenses_forbidden_stays_a3() {
+    let board = white_a3_with_all_black_defenses_forbidden_board();
+    assert_eq!(board.winner(), 0);
+
+    for defense in [(4, 7), (5, 7), (9, 7), (10, 7)] {
+        assert_eq!(
+            classify_forbidden_move(
+                &board,
+                xy_to_move(defense.0, defense.1).unwrap(),
+                1,
+                RuleSet::Renju,
+            )
+            .unwrap(),
+            ForbiddenKind::Overline,
+            "black defense {defense:?} should be forbidden"
+        );
+    }
+
+    let renju = classify_after_play(&board, 8, 7, -1, RuleSet::Renju)
+        .expect("white A3 must remain an attack even when black has no legal defense");
+    assert_eq!(renju.level, ThreatLevel::A3);
+    assert!(
+        renju.defenses.is_empty(),
+        "all black A3 defenses are forbidden, got {:?}",
+        renju
+            .defenses
+            .iter()
+            .map(|&move_| move_to_xy(move_).unwrap())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
