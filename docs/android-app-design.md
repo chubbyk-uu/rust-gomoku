@@ -77,8 +77,8 @@ Implementation progress on `feature/android-app`:
 - Base/Fast remains a search-ordering mode. The separate five-level difficulty
   selector maps Beginner to `d1/w10` without VCF/VCT, Junior to `d2/w10`
   without VCF/VCT, Intermediate to `d4/w20` without VCF/VCT, Senior to
-  `d6/w30` with VCF/VCT and `root_vct_depth=4`, and Master to `d8/w40` with
-  VCF/VCT and `root_vct_depth=4`. Intermediate is the default.
+  `d6/w30` with VCF/VCT and `root_vct_depth=6`, and Master to `d8/w40` with
+  VCF/VCT and `root_vct_depth=6`. Intermediate is the default.
 - Responsive verification at the target viewports and the touch/rotation/stale
   behaviors are confirmed on a real device.
 - Mobile UI state logic is isolated in `ui_logic.js` and covered by Node tests

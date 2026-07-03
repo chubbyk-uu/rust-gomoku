@@ -61,11 +61,11 @@ impl SearchDifficulty {
 
     fn settings(self) -> (i32, i32, bool, i32) {
         match self {
-            Self::Beginner => (1, 10, false, 4),
-            Self::Junior => (2, 10, false, 4),
-            Self::Intermediate => (4, 20, false, 4),
-            Self::Senior => (6, 30, true, 4),
-            Self::Master => (8, 40, true, 4),
+            Self::Beginner => (1, 10, false, 6),
+            Self::Junior => (2, 10, false, 6),
+            Self::Intermediate => (4, 20, false, 6),
+            Self::Senior => (6, 30, true, 6),
+            Self::Master => (8, 40, true, 6),
         }
     }
 
@@ -809,18 +809,18 @@ mod tests {
         assert_eq!(controller.snapshot().params.difficulty, "master");
 
         for (difficulty, name, depth, width, tactical, root_vct_depth) in [
-            (SearchDifficulty::Beginner, "beginner", 1, 10, false, 4),
-            (SearchDifficulty::Junior, "junior", 2, 10, false, 4),
+            (SearchDifficulty::Beginner, "beginner", 1, 10, false, 6),
+            (SearchDifficulty::Junior, "junior", 2, 10, false, 6),
             (
                 SearchDifficulty::Intermediate,
                 "intermediate",
                 4,
                 20,
                 false,
-                4,
+                6,
             ),
-            (SearchDifficulty::Senior, "senior", 6, 30, true, 4),
-            (SearchDifficulty::Master, "master", 8, 40, true, 4),
+            (SearchDifficulty::Senior, "senior", 6, 30, true, 6),
+            (SearchDifficulty::Master, "master", 8, 40, true, 6),
         ] {
             controller.set_difficulty(difficulty);
             let params = controller.snapshot().params;

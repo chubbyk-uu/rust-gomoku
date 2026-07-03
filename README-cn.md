@@ -42,7 +42,7 @@ JNI 使用共享 Rust 控制器。
 | `opponent_vcf_depth` | `7` |
 | `vct_verify_opponent_vcf_depth` | `4` |
 | `vcf_multi_reply` | `true` |
-| `root_vct_depth` | `4` |
+| `root_vct_depth` | `6` |
 | `vct_strict_and_memo_key` | `true` |
 | TT bucket bits | `20` |
 | `compute_vcf` / `compute_vct` | 开启 |
@@ -59,8 +59,8 @@ JNI 使用共享 Rust 控制器。
 | 入门 | `d1 / w10` | 关闭 |
 | 初级 | `d2 / w10` | 关闭 |
 | 中级 | `d4 / w20` | 关闭 |
-| 高级 | `d6 / w30` | 开启，`root_vct_depth=4` |
-| 大师 | `d8 / w40` | 开启，`root_vct_depth=4` |
+| 高级 | `d6 / w30` | 开启，`root_vct_depth=6` |
+| 大师 | `d8 / w40` | 开启，`root_vct_depth=6` |
 
 中级是桌面 GUI 和 Android 应用的默认难度。难度与 Base/Fast 互相独立：
 难度控制深度、宽度和战术搜索，Base/Fast 控制排序行为。

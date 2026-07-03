@@ -406,7 +406,7 @@ mod tests {
         assert_eq!(difficulty["state"]["params"]["width"], 30);
         assert_eq!(difficulty["state"]["params"]["compute_vcf"], true);
         assert_eq!(difficulty["state"]["params"]["compute_vct"], true);
-        assert_eq!(difficulty["state"]["params"]["root_vct_depth"], 4);
+        assert_eq!(difficulty["state"]["params"]["root_vct_depth"], 6);
     }
 
     #[test]
