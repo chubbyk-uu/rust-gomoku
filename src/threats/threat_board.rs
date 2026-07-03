@@ -1,7 +1,6 @@
 //! Threat-focused board view and tactical helpers.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 use crate::board::{move_to_xy, xy_to_move, Board};
 use crate::constants::{BLACK, BOARD_SIZE, EMPTY};
@@ -37,6 +36,7 @@ fn gb(value: i32) -> usize {
 }
 
 pub const MAX_BROKEN_FOUR_REPLIES: usize = 8;
+const LEGALITY_CACHE_SIZE: usize = 1 << 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BrokenFourReplies {
@@ -86,6 +86,51 @@ impl BrokenFourReplies {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ThreatLine {
     cells: [i32; BOARD_SIZE + 4],
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LegalityCacheEntry {
+    key: u64,
+    move_: Move,
+    value: bool,
+    occupied: bool,
+}
+
+#[derive(Clone, Debug)]
+struct LegalityCache {
+    entries: Vec<LegalityCacheEntry>,
+}
+
+impl LegalityCache {
+    fn new() -> Self {
+        debug_assert!(LEGALITY_CACHE_SIZE.is_power_of_two());
+        Self {
+            entries: vec![LegalityCacheEntry::default(); LEGALITY_CACHE_SIZE],
+        }
+    }
+
+    fn index(key: u64, move_: Move) -> usize {
+        let mixed = key ^ (key >> 32) ^ (u64::from(move_).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        mixed as usize & (LEGALITY_CACHE_SIZE - 1)
+    }
+
+    fn get(&self, key: u64, move_: Move) -> Option<bool> {
+        let entry = self.entries[Self::index(key, move_)];
+        if entry.occupied && entry.key == key && entry.move_ == move_ {
+            Some(entry.value)
+        } else {
+            None
+        }
+    }
+
+    fn insert(&mut self, key: u64, move_: Move, value: bool) {
+        self.entries[Self::index(key, move_)] = LegalityCacheEntry {
+            key,
+            move_,
+            value,
+            occupied: true,
+        };
+    }
 }
 
 impl ThreatLine {
@@ -195,7 +240,7 @@ pub struct ThreatBoardView {
     /// position and candidate point, so caching by zobrist is sound and needs
     /// no invalidation across play/undo. Freestyle and white are never cached
     /// (their legality is a cheap empty/winner check).
-    legality_cache: RefCell<HashMap<(u64, Move), bool>>,
+    legality_cache: RefCell<Option<Box<LegalityCache>>>,
 }
 
 impl ThreatBoardView {
@@ -237,7 +282,9 @@ impl ThreatBoardView {
             x4,
             rule_set,
             previous_sides: Vec::new(),
-            legality_cache: RefCell::new(HashMap::new()),
+            legality_cache: RefCell::new(
+                (rule_set == RuleSet::Renju).then(|| Box::new(LegalityCache::new())),
+            ),
         }
     }
 
@@ -872,14 +919,22 @@ impl ThreatBoardView {
                 .board
                 .is_legal_move_for_rule(move_, side, self.rule_set);
         }
-        let key = (self.board.zobrist_key(), move_);
-        if let Some(&cached) = self.legality_cache.borrow().get(&key) {
-            return cached;
+        let key = self.board.zobrist_key();
+        {
+            let cache = self.legality_cache.borrow();
+            if let Some(cache) = cache.as_ref() {
+                if let Some(cached) = cache.get(key, move_) {
+                    return cached;
+                }
+            }
         }
         let verdict = self
             .board
             .is_legal_move_for_rule(move_, side, self.rule_set);
-        self.legality_cache.borrow_mut().insert(key, verdict);
+        self.legality_cache
+            .borrow_mut()
+            .get_or_insert_with(|| Box::new(LegalityCache::new()))
+            .insert(key, move_, verdict);
         verdict
     }
 
@@ -903,9 +958,6 @@ impl ThreatBoardView {
         let moves = self.threat_moves(attacker);
         let mut attacks = Vec::new();
         for move_ in moves {
-            if !self.board.is_legal_move(move_) {
-                continue;
-            }
             self.play(move_, attacker);
             let (x, y) = move_to_xy(move_).expect("move stays valid");
             let attack = self.classify_attack_at(x, y, attacker, move_);

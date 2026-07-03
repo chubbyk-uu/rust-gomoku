@@ -559,7 +559,7 @@ impl VCTSearcher {
         let mut solved = true;
         let mut searched = false;
         for d_move in defenses {
-            if !seen.insert(d_move) || !view.is_rule_legal(d_move, -attacker) {
+            if !seen.insert(d_move) {
                 continue;
             }
             searched = true;
@@ -624,9 +624,6 @@ impl VCTSearcher {
         let mut counter_wins = Vec::new();
 
         for m in view.threat_moves(defender) {
-            if !view.is_rule_legal(m, defender) {
-                continue;
-            }
             view.play(m, defender);
             let (dx, dy) = crate::board::move_to_xy(m).expect("move stays valid");
             if view.board.winner() == defender
@@ -651,7 +648,7 @@ impl VCTSearcher {
         let mut counter_a3 = Vec::new();
 
         for m in view.threat_moves(defender) {
-            if seen.contains(&m) || !view.is_rule_legal(m, defender) {
+            if seen.contains(&m) {
                 continue;
             }
             view.play(m, defender);

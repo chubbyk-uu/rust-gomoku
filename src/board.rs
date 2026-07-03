@@ -285,7 +285,13 @@ impl Board {
     /// complete a rule-legal winning line. Because `play` sets `winner` from
     /// exactly this predicate, this is equivalent to play/undo + `winner()`
     /// without mutating the board — used to keep win probing off the hot path.
-    pub(crate) fn is_winning_move_for_rule(&self, x: usize, y: usize, side: Side, rule: RuleSet) -> bool {
+    pub(crate) fn is_winning_move_for_rule(
+        &self,
+        x: usize,
+        y: usize,
+        side: Side,
+        rule: RuleSet,
+    ) -> bool {
         match (rule, side) {
             (RuleSet::Renju, BLACK) => DIRECTIONS
                 .into_iter()

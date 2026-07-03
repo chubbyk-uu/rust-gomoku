@@ -15,6 +15,69 @@ Current active target:
 
 - Final-depth late root candidates. Future analysis should explain why they are expensive, not re-confirm that they are expensive.
 
+## 2026-07-03 — VCT6 slow-case legality-cache cleanup
+
+Context:
+
+- Target case: `target/match-results/vct_slow_probe_case.json`
+  (`vct_slow_case_47_ply42`, Renju, depth 8 / width 40, VCT enabled,
+  `root_vct_depth = 6`).
+- Baseline was `9449d3e` after the Renju threat-legality cache. The historical
+  release run was about 28.5s, but same-machine reruns varied widely, so the
+  final decision used paired A/B runs against a temporary `9449d3e` worktree.
+
+Findings:
+
+- `ThreatBoardView::threat_moves(side)` already returns rule-legal candidates.
+  Three downstream paths repeated legality checks on those same moves:
+  `collect_attack_moves`, `collect_counter_wins`, and
+  `collect_counter_forcing_defenses`.
+- `search_defense_stage` also rechecked defenses that are only produced by
+  those already-filtered attack/counter collectors.
+- Removing those duplicate checks preserves the VCT tree exactly: move, score,
+  alpha-beta nodes, VCT OR/AND nodes, generated attacks, generated defenses, and
+  VCT memo hits matched the baseline on the slow case.
+- The Renju-black legality cache is keyed by `(zobrist, move)`. On this
+  VCT-heavy case, the HashMap lookup/insert path itself became hot after the
+  first cache optimization. A Renju-only 64K direct-mapped cache with full-key
+  validation removes hashing overhead; collisions only cause cache misses, never
+  incorrect verdicts. Freestyle views do not allocate this cache.
+
+Timed A/B:
+
+- Clean CPU, six sequential release runs:
+  base -> redundant-only -> direct-cache -> direct-cache -> redundant-only ->
+  base.
+- Baseline: 28.70s, 27.95s, average 28.32s.
+- Redundant-only: 26.60s, 26.21s, average 26.41s (`-6.8%`).
+- Redundant + direct-cache: 21.39s, 21.43s, average 21.41s (`-24.4%`).
+- Final current-worktree rerun after Renju-only lazy cache initialization:
+  20.60s (`-28.2%` against the first clean baseline run).
+- All compared runs had identical move, score, alpha-beta nodes, VCT OR/AND
+  nodes, generated attacks, generated defenses, and VCT memo hit counts.
+
+Decision:
+
+- Keep both duplicate-legality-check removal and direct-mapped legality cache.
+  They are behavior-equivalent on the slow case and materially reduce VCT6
+  wall time.
+
+Correctness follow-up:
+
+- The later 100-game Renju match against `v0.1.4` exposed a VCT6 root false
+  positive. Repro case:
+  `cases/renju/vct6_false_positive_case17_after_ply40.json`.
+- On that exact board with Renju, depth 8 / width 40, VCF/VCT enabled:
+  `root_vct_depth=4` and `root_vct_depth=5` do not find VCT and choose `(9,9)`
+  through alpha-beta; `root_vct_depth=6` accepts VCT move `(8,8)` with score
+  `20000`. In the paired match line, the VCT6 branch later lost while the
+  VCT4/VCT5 lines won.
+- This is now a correctness blocker for raising the default VCT depth. The
+  immediate priority is to trace the `(8,8)` proof chain and identify the
+  missing defender refutation or invalid pruning/memo reuse. Keep the default
+  `root_vct_depth=4` until this false positive is fixed and covered by a
+  regression test.
+
 ## 2026-06-23 Renju Forbidden Movegen Cache Gate
 
 Commands:
