@@ -108,6 +108,10 @@ fn renju_root_vct_engages_and_avoids_forbidden_double_four() {
     config.rule_set = RuleSet::Renju;
     config.runtime.compute_vct = true;
     config.runtime.overlap_vct_alphabeta = false;
+    // This test only checks that VCT engages and avoids the forbidden completion,
+    // which resolves well within a shallow search. Cap the depth so it does not
+    // inherit the default depth-6 VCT tail (~30s) that dominates the suite.
+    config.runtime.root_vct_depth = 4;
     let mut searcher = RootSearcher::new(config);
     let forbidden = xy_to_move(7, 7).unwrap();
     let result = searcher.search(

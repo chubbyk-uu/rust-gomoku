@@ -19,6 +19,13 @@ serde_json = "1"
 lto = "fat"
 codegen-units = 1
 
+# The engine is search-heavy, so unoptimized test runs are pathologically slow
+# (some VCT tests take >2min in debug vs <1s optimized). Optimize the default
+# `cargo test` (dev) profile so the suite runs in seconds without needing
+# `--release`; debug info is retained for backtraces.
+[profile.test]
+opt-level = 3
+
 # Optimized build that still keeps debug symbols and function boundaries for
 # profiling (WSL2 has no hardware PMU, so sample with software `task-clock`):
 #   cargo build --profile profiling --tests
