@@ -247,6 +247,51 @@ pub struct ThreatBoardView {
     /// no invalidation across play/undo. Freestyle and white are never cached
     /// (their legality is a cheap empty/winner check).
     legality_cache: RefCell<Option<Box<LegalityCache>>>,
+    /// Per-side count of own stones inside each empty point's `THREAT_DIRS`
+    /// neighborhood, maintained incrementally on `play`/`undo`. Slot 0 = black,
+    /// slot 1 = white; index = `x * BOARD_SIZE + y`. `threat_moves` uses
+    /// `adjacency[slot][idx] > 0` instead of rescanning the 16 neighbor cells,
+    /// which is the dominant VCT/VCF hot spot. This tracks *adjacency only*; the
+    /// Renju forbidden-move legality of a candidate is still checked per output
+    /// via `rule_legal_cached`.
+    adjacency: [[u8; BOARD_SIZE * BOARD_SIZE]; 2],
+}
+
+#[inline]
+fn adjacency_slot(side: Side) -> usize {
+    if side == BLACK {
+        0
+    } else {
+        1
+    }
+}
+
+#[inline]
+fn adjacency_index(x: usize, y: usize) -> usize {
+    x * BOARD_SIZE + y
+}
+
+/// Add (`add = true`) or remove (`add = false`) a `side` stone at `(x, y)` from
+/// the adjacency counts. Because `THREAT_DIRS` is symmetric, the empty points
+/// that see this stone as a neighbor are exactly `(x, y) + off` for every `off`
+/// in `THREAT_DIRS`.
+fn bump_adjacency_array(
+    adjacency: &mut [[u8; BOARD_SIZE * BOARD_SIZE]; 2],
+    x: usize,
+    y: usize,
+    side: Side,
+    add: bool,
+) {
+    let slot = adjacency_slot(side);
+    let size = BOARD_SIZE as isize;
+    for (dx, dy) in THREAT_DIRS {
+        let nx = x as isize + dx;
+        let ny = y as isize + dy;
+        if nx >= 0 && ny >= 0 && nx < size && ny < size {
+            let cell = &mut adjacency[slot][adjacency_index(nx as usize, ny as usize)];
+            *cell = if add { *cell + 1 } else { *cell - 1 };
+        }
+    }
 }
 
 impl ThreatBoardView {
@@ -280,6 +325,15 @@ impl ThreatBoardView {
                 }
             }
         }
+        let mut adjacency = [[0u8; BOARD_SIZE * BOARD_SIZE]; 2];
+        for x in 0..size {
+            for y in 0..size {
+                let value = grid[y][x];
+                if value != EMPTY {
+                    bump_adjacency_array(&mut adjacency, x, y, value, true);
+                }
+            }
+        }
         Self {
             board,
             x1,
@@ -291,7 +345,13 @@ impl ThreatBoardView {
             legality_cache: RefCell::new(
                 (rule_set == RuleSet::Renju).then(|| Box::new(LegalityCache::new())),
             ),
+            adjacency,
         }
+    }
+
+    #[inline]
+    fn bump_adjacency(&mut self, x: usize, y: usize, side: Side, add: bool) {
+        bump_adjacency_array(&mut self.adjacency, x, y, side, add);
     }
 
     fn lines_for(
@@ -338,6 +398,7 @@ impl ThreatBoardView {
             .expect("threat board play should stay legal");
         let (x, y) = move_to_xy(move_).expect("move stays in range");
         self.set_point(x, y, side);
+        self.bump_adjacency(x, y, side, true);
     }
 
     pub fn undo(&mut self) {
@@ -351,31 +412,27 @@ impl ThreatBoardView {
             .expect("tracked previous side remains valid");
         let (x, y) = move_to_xy(played.move_).expect("move stays in range");
         self.set_point(x, y, EMPTY);
+        self.bump_adjacency(x, y, played.side, false);
     }
 
     pub fn threat_moves(&self, side: Side) -> Vec<Move> {
         let size = self.board.size();
         let grid = self.board.grid_rows();
+        let slot = adjacency_slot(side);
         let mut candidates = Vec::new();
         for x in 0..size {
             for y in 0..size {
                 if grid[y][x] != EMPTY {
                     continue;
                 }
-                for (dx, dy) in THREAT_DIRS {
-                    let xx = x as isize + dx;
-                    let yy = y as isize + dy;
-                    if xx >= 0
-                        && yy >= 0
-                        && xx < size as isize
-                        && yy < size as isize
-                        && grid[yy as usize][xx as usize] == side
-                    {
-                        let move_ = xy_to_move(x, y).expect("threat move stays valid");
-                        if self.rule_legal_cached(move_, side) {
-                            candidates.push(move_);
-                        }
-                        break;
+                // `adjacency[slot][idx] > 0` is exactly "some `THREAT_DIRS`
+                // neighbor holds a `side` stone", maintained incrementally so
+                // this replaces the per-point 16-neighbor rescan. Legality is
+                // still verified per candidate below.
+                if self.adjacency[slot][adjacency_index(x, y)] > 0 {
+                    let move_ = xy_to_move(x, y).expect("threat move stays valid");
+                    if self.rule_legal_cached(move_, side) {
+                        candidates.push(move_);
                     }
                 }
             }
