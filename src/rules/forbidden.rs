@@ -14,10 +14,16 @@ const NO_EXTRA_BLACK: usize = usize::MAX;
 #[derive(Clone, Copy)]
 struct DirectionalLine {
     cells: [Side; BOARD_SIZE],
-    xs: [usize; BOARD_SIZE],
-    ys: [usize; BOARD_SIZE],
     len: usize,
     anchor: usize,
+    // Line origin and forward step, so a cell index maps back to its grid
+    // coordinate on demand (`coord`) instead of storing per-cell `xs`/`ys`
+    // arrays. This shrinks the struct ~4x, which matters because
+    // `classify_placed_black` builds four of these per call in the VCT hot path.
+    start_x: usize,
+    start_y: usize,
+    dx: isize,
+    dy: isize,
 }
 
 impl DirectionalLine {
@@ -35,16 +41,12 @@ impl DirectionalLine {
         }
 
         let mut cells = [EMPTY; BOARD_SIZE];
-        let mut xs = [0; BOARD_SIZE];
-        let mut ys = [0; BOARD_SIZE];
         let mut len = 0;
         let mut anchor = 0;
         let mut cx = start_x;
         let mut cy = start_y;
         loop {
             cells[len] = grid[cy][cx];
-            xs[len] = cx;
-            ys[len] = cy;
             if cx == x && cy == y {
                 anchor = len;
             }
@@ -58,11 +60,24 @@ impl DirectionalLine {
 
         Self {
             cells,
-            xs,
-            ys,
             len,
             anchor,
+            start_x,
+            start_y,
+            dx,
+            dy,
         }
+    }
+
+    /// Grid coordinate of the cell at `index` along the line. The line is a
+    /// contiguous in-bounds run from `(start_x, start_y)` stepping `(dx, dy)`,
+    /// so cell `index` sits at `origin + index * step` (equal to the `xs`/`ys`
+    /// arrays this replaces).
+    #[inline(always)]
+    fn coord(&self, index: usize) -> (usize, usize) {
+        let gx = self.start_x as isize + index as isize * self.dx;
+        let gy = self.start_y as isize + index as isize * self.dy;
+        (gx as usize, gy as usize)
     }
 
     #[inline(always)]
@@ -353,25 +368,39 @@ fn classify_placed_black(
     let lines: [DirectionalLine; 4] =
         std::array::from_fn(|i| DirectionalLine::from_grid(grid, x, y, DIRECTIONS[i]));
 
-    if lines.iter().any(DirectionalLine::has_exact_five) {
-        return ForbiddenKind::None;
+    for line in &lines {
+        if line.has_exact_five() {
+            return ForbiddenKind::None;
+        }
     }
-    if lines.iter().any(DirectionalLine::has_overline) {
-        return ForbiddenKind::Overline;
+    for line in &lines {
+        if line.has_overline() {
+            return ForbiddenKind::Overline;
+        }
     }
-    let four_count: usize = lines
-        .iter()
-        .map(DirectionalLine::count_four_shapes_through)
-        .sum();
-    if four_count >= 2 {
-        return ForbiddenKind::DoubleFour;
+
+    // Count four-shapes per line once (early-exit at the forbidden threshold),
+    // and remember the per-line counts: a line that already forms a four is
+    // never a "true open three", so the double-three pass reuses these instead
+    // of recomputing `count_four_shapes_through` inside every open-three probe.
+    let mut four_counts = [0usize; 4];
+    let mut four_total = 0;
+    for (i, line) in lines.iter().enumerate() {
+        four_counts[i] = line.count_four_shapes_through();
+        four_total += four_counts[i];
+        if four_total >= 2 {
+            return ForbiddenKind::DoubleFour;
+        }
     }
-    let three_count = lines
-        .iter()
-        .filter(|line| is_true_open_three_with_line(grid, line))
-        .count();
-    if three_count >= 2 {
-        return ForbiddenKind::DoubleThree;
+
+    let mut three_count = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if four_counts[i] == 0 && is_true_open_three_with_line(grid, line) {
+            three_count += 1;
+            if three_count >= 2 {
+                return ForbiddenKind::DoubleThree;
+            }
+        }
     }
     ForbiddenKind::None
 }
@@ -412,14 +441,12 @@ fn is_true_open_three_with_line(
     grid: &mut [[Side; BOARD_SIZE]; BOARD_SIZE],
     line: &DirectionalLine,
 ) -> bool {
-    if line.count_four_shapes_through() > 0 {
-        return false;
-    }
-
+    // The only caller (`classify_placed_black`) already skips lines that form a
+    // four (`four_counts[i] != 0`), which is exactly the condition this used to
+    // recheck via `count_four_shapes_through() > 0`.
     let (gains, gain_count) = line.open_three_gain_indices();
     for &gain in &gains[..gain_count] {
-        let gx = line.xs[gain];
-        let gy = line.ys[gain];
+        let (gx, gy) = line.coord(gain);
         if line.has_open_four_through_gain(gain) && is_legal_black_gain(grid, gx, gy) {
             return true;
         }
