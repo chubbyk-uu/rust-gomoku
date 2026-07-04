@@ -109,14 +109,25 @@ impl DirectionalLine {
         Some((start, end))
     }
 
-    fn has_exact_five(&self) -> bool {
-        self.black_run_bounds_with_extra(self.anchor, NO_EXTRA_BLACK, NO_EXTRA_BLACK)
-            .is_some_and(|(start, end)| end - start + 1 == 5)
+    /// Length of the maximal black run through the anchor (the just-placed
+    /// stone), 0 if the anchor is not black. `== 5` is an exact five (a legal
+    /// win) and `>= 6` is an overline; computing the run once lets the caller
+    /// derive both without probing `black_run_bounds_with_extra` twice.
+    fn anchor_black_run_len(&self) -> usize {
+        match self.black_run_bounds_with_extra(self.anchor, NO_EXTRA_BLACK, NO_EXTRA_BLACK) {
+            Some((start, end)) => end - start + 1,
+            None => 0,
+        }
     }
 
+    #[cfg(test)]
+    fn has_exact_five(&self) -> bool {
+        self.anchor_black_run_len() == 5
+    }
+
+    #[cfg(test)]
     fn has_overline(&self) -> bool {
-        self.black_run_bounds_with_extra(self.anchor, NO_EXTRA_BLACK, NO_EXTRA_BLACK)
-            .is_some_and(|(start, end)| end - start + 1 >= 6)
+        self.anchor_black_run_len() >= 6
     }
 
     fn count_four_shapes_through(&self) -> usize {
@@ -368,15 +379,19 @@ fn classify_placed_black(
     let lines: [DirectionalLine; 4] =
         std::array::from_fn(|i| DirectionalLine::from_grid(grid, x, y, DIRECTIONS[i]));
 
+    // One anchor-run pass per line: an exact five anywhere means the move wins
+    // and is always legal (takes priority over an overline on another line);
+    // otherwise a run of six or more is a forbidden overline.
+    let mut overline = false;
     for line in &lines {
-        if line.has_exact_five() {
-            return ForbiddenKind::None;
+        match line.anchor_black_run_len() {
+            5 => return ForbiddenKind::None,
+            n if n >= 6 => overline = true,
+            _ => {}
         }
     }
-    for line in &lines {
-        if line.has_overline() {
-            return ForbiddenKind::Overline;
-        }
+    if overline {
+        return ForbiddenKind::Overline;
     }
 
     // Count four-shapes per line once (early-exit at the forbidden threshold),
