@@ -4,7 +4,9 @@ use crate::board::{move_to_xy, xy_to_move, Board};
 use crate::config::{apply_engine_profile, load_default_config, EngineConfig, EngineProfile};
 use crate::constants::{BOARD_AREA, BOARD_SIZE};
 use crate::rules::RuleSet;
-use crate::search::{RootSearcher, SearchLimits, TranspositionTable};
+use crate::search::{RootSearcher, SearchLimits, TranspositionTable, MAX_TT_BUCKET_BITS};
+
+const MAX_PROTOCOL_TIME_MS: f64 = i32::MAX as f64;
 
 pub const ABOUT_TEXT: &str = "name=\"rust_gomoku\", version=\"0.1\", author=\"OpenAI\", country=\"China\", www=\"https://example.invalid/\"";
 
@@ -20,6 +22,7 @@ pub struct GomocupProtocol {
     pub node_limit: Option<usize>,
     pub tt_bits: Option<u32>,
     pub ended: bool,
+    pending_error: Option<String>,
     searcher: Option<RootSearcher>,
 }
 
@@ -42,6 +45,7 @@ impl GomocupProtocol {
             node_limit: None,
             tt_bits: None,
             ended: false,
+            pending_error: None,
             searcher: None,
         }
     }
@@ -98,18 +102,13 @@ impl GomocupProtocol {
                 self.handle_info(&parts[1..]);
                 Vec::new()
             }
-            "TAKEBACK" => {
-                if self.board.move_count() > 0 {
-                    let _ = self.board.undo();
-                }
-                vec!["OK".to_string()]
-            }
+            "TAKEBACK" => self.handle_takeback(&parts),
             "ABOUT" => vec![ABOUT_TEXT.to_string()],
             "END" => {
                 self.ended = true;
                 Vec::new()
             }
-            _ => Vec::new(),
+            _ => vec!["UNKNOWN".to_string()],
         }
     }
 
@@ -175,6 +174,28 @@ impl GomocupProtocol {
         self.searcher = None;
         self.board_mode = false;
         self.board_lines.clear();
+        self.pending_error = None;
+    }
+
+    fn handle_takeback(&mut self, parts: &[&str]) -> Vec<String> {
+        if parts.len() != 2 || !parts[1].contains(',') {
+            return vec!["ERROR Takeback error.".to_string()];
+        }
+        let coords: Vec<_> = parts[1].splitn(2, ',').collect();
+        let (Some(x), Some(y)) = (parse_one::<i32>(coords[0]), parse_one::<i32>(coords[1])) else {
+            return vec!["ERROR Takeback error.".to_string()];
+        };
+        if !in_bounds_i32(x, y) {
+            return vec!["ERROR Takeback error.".to_string()];
+        }
+        let Some(last) = self.board.move_history().last() else {
+            return vec!["ERROR Takeback error.".to_string()];
+        };
+        let expected = xy_to_move(x as usize, y as usize).expect("bounds checked");
+        if last.move_ != expected || self.board.undo().is_err() {
+            return vec!["ERROR Takeback error.".to_string()];
+        }
+        vec!["OK".to_string()]
     }
 
     fn play_xy(&mut self, x: usize, y: usize, side: i8) -> Result<(), ()> {
@@ -252,16 +273,22 @@ impl GomocupProtocol {
             "timeout_turn" => {
                 if let Some(parsed) = parse_time_ms(value) {
                     self.timeout_turn_ms = Some(if parsed == 0.0 { 200.0 } else { parsed });
+                } else if is_oversized_time(value) {
+                    self.pending_error = Some("time limit is too large".to_string());
                 }
             }
             "timeout_match" => {
                 if let Some(parsed) = parse_time_ms(value) {
                     self.time_left_ms = Some(if parsed == 0.0 { 99_999_999.0 } else { parsed });
+                } else if is_oversized_time(value) {
+                    self.pending_error = Some("time limit is too large".to_string());
                 }
             }
             "time_left" => {
                 if let Some(parsed) = parse_time_ms(value) {
                     self.time_left_ms = Some(parsed);
+                } else if is_oversized_time(value) {
+                    self.pending_error = Some("time limit is too large".to_string());
                 }
             }
             "max_node" => {
@@ -337,8 +364,14 @@ impl GomocupProtocol {
             }
             "tt_bits" => {
                 if let Some(parsed) = parse_one::<u32>(value) {
-                    self.tt_bits = Some(parsed);
-                    self.searcher = None;
+                    if parsed <= MAX_TT_BUCKET_BITS {
+                        self.tt_bits = Some(parsed);
+                        self.searcher = None;
+                    } else {
+                        self.pending_error = Some(format!(
+                            "tt_bits must be between 0 and {MAX_TT_BUCKET_BITS}"
+                        ));
+                    }
                 }
             }
             "profile" => {
@@ -406,13 +439,32 @@ impl GomocupProtocol {
     }
 
     fn search_move(&mut self) -> Vec<String> {
+        if let Some(message) = self.pending_error.take() {
+            return vec![format!("ERROR {message}.")];
+        }
+        if self.board.is_draw() {
+            return vec!["ERROR Board is full.".to_string()];
+        }
+        if self.board.winner() != 0 {
+            return vec!["ERROR Board is terminal.".to_string()];
+        }
         let limits = self.current_search_limits();
-        let mut searcher = self.searcher.take().unwrap_or_else(|| match self.tt_bits {
-            Some(bits) => RootSearcher::with_tt(self.config.clone(), TranspositionTable::new(bits)),
-            None => RootSearcher::new(self.config.clone()),
-        });
+        let mut searcher = match self.searcher.take() {
+            Some(searcher) => searcher,
+            None => match self.tt_bits {
+                Some(bits) => match TranspositionTable::try_new(bits) {
+                    Ok(tt) => RootSearcher::with_tt(self.config.clone(), tt),
+                    Err(_) => {
+                        return vec!["ERROR Unable to allocate transposition table.".to_string()]
+                    }
+                },
+                None => RootSearcher::new(self.config.clone()),
+            },
+        };
         searcher.config = self.config.clone();
-        let result = searcher.search(&mut self.board, Some(limits));
+        let result = searcher
+            .try_search(&mut self.board, Some(limits))
+            .expect("protocol checked the board is non-terminal");
         let trace = searcher.last_trace.clone();
         self.searcher = Some(searcher);
 
@@ -499,7 +551,11 @@ fn parse_one<T: std::str::FromStr>(raw: &str) -> Option<T> {
 
 fn parse_time_ms(raw: &str) -> Option<f64> {
     let parsed = parse_one::<f64>(raw)?;
-    (parsed.is_finite() && parsed >= 0.0).then_some(parsed)
+    (parsed.is_finite() && parsed >= 0.0 && parsed <= MAX_PROTOCOL_TIME_MS).then_some(parsed)
+}
+
+fn is_oversized_time(raw: &str) -> bool {
+    parse_one::<f64>(raw).is_some_and(|value| value.is_finite() && value > MAX_PROTOCOL_TIME_MS)
 }
 
 fn in_bounds_i32(x: i32, y: i32) -> bool {

@@ -171,11 +171,24 @@ fn vct_stats_baseline() {
         .collect();
 
     let rule = RuleSet::Renju;
-    println!("vct stats baseline (depth {depth}, rule {rule:?}, {} cases):", cases.len());
+    println!(
+        "vct stats baseline (depth {depth}, rule {rule:?}, {} cases):",
+        cases.len()
+    );
     println!(
         "  {:<12} {:>4} {:>5} {:>6} {:>9} {:>9} {:>9} {:>9} {:>8} {:>8} {:>7} {:>7}",
-        "name", "mv", "found", "solved", "or", "and", "attacks", "defenses", "exact", "shfound",
-        "maxA", "maxD"
+        "name",
+        "mv",
+        "found",
+        "solved",
+        "or",
+        "and",
+        "attacks",
+        "defenses",
+        "exact",
+        "shfound",
+        "maxA",
+        "maxD"
     );
     let (mut t_or, mut t_and, mut t_atk, mut t_def) = (0usize, 0usize, 0usize, 0usize);
     for case in &cases {

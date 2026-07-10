@@ -67,6 +67,11 @@ pub struct SearchResult {
     pub nodes: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootSearchError {
+    TerminalPosition,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RootDepthProfile {
     pub depth: i32,
@@ -584,9 +589,14 @@ impl RootSearcher {
         let mut best_move = None;
         let mut best_score = -INF;
         let mut total_nodes = 0_usize;
-        let deadline = limits
-            .time_limit_ms
-            .map(|ms| Instant::now() + Duration::from_secs_f64(ms / 1000.0));
+        let deadline = limits.time_limit_ms.map(|ms| {
+            Duration::try_from_secs_f64(ms / 1000.0)
+                .ok()
+                .and_then(|duration| Instant::now().checked_add(duration))
+                // Invalid library-level limits must fail closed rather than
+                // disabling the deadline or panicking in Duration conversion.
+                .unwrap_or_else(Instant::now)
+        });
         if cancel
             .as_ref()
             .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
@@ -819,6 +829,18 @@ impl RootSearcher {
         trace.tt_bestmove_old_generation = ab_result.trace.tt_bestmove_old_generation;
         self.last_trace = Some(trace);
         ab_result.result
+    }
+
+    pub fn try_search(
+        &mut self,
+        board: &mut Board,
+        limits: Option<SearchLimits>,
+    ) -> Result<SearchResult, RootSearchError> {
+        if board.is_terminal() {
+            self.last_trace = Some(RootTrace::default());
+            return Err(RootSearchError::TerminalPosition);
+        }
+        Ok(self.search(board, limits))
     }
 
     pub fn search(&mut self, board: &mut Board, limits: Option<SearchLimits>) -> SearchResult {

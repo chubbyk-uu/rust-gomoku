@@ -2,6 +2,11 @@ use rust_gomoku::constants::{HASHF_ALPHA, HASHF_BETA, HASHF_EXACT};
 use rust_gomoku::{xy_to_move, TTEntry, TranspositionTable};
 
 #[test]
+fn tt_rejects_unsafe_bucket_bits() {
+    assert!(TranspositionTable::try_new(64).is_err());
+}
+
+#[test]
 fn tt_exact_hit_returns_value_and_best_move() {
     let table = TranspositionTable::new(2);
     table.store(TTEntry {

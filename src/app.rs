@@ -161,6 +161,7 @@ pub struct GameStateSnapshot {
     pub human_side: i8,
     pub side_to_move: i8,
     pub winner: i8,
+    pub draw: bool,
     pub move_count: usize,
     pub can_play: bool,
     pub engine_thinking: bool,
@@ -339,6 +340,8 @@ impl GameController {
                             "黑方胜。".to_string()
                         } else if winner == WHITE {
                             "白方胜。".to_string()
+                        } else if self.board.is_draw() {
+                            "和棋。".to_string()
                         } else if self.board.side_to_move() == BLACK {
                             "轮到黑方落子。".to_string()
                         } else {
@@ -349,6 +352,9 @@ impl GameController {
                     GameMode::VsEngine => {
                         if self.board.winner() == self.human_side {
                             self.status = "你赢了。".to_string();
+                            false
+                        } else if self.board.is_draw() {
+                            self.status = "和棋。".to_string();
                             false
                         } else {
                             self.status = "你已落子，引擎思考中。".to_string();
@@ -458,7 +464,7 @@ impl GameController {
     pub fn prepare_engine_search(&mut self) -> Option<EngineSearchTask> {
         if self.mode == GameMode::TwoPlayer
             || self.engine_thinking
-            || self.board.winner() != EMPTY
+            || self.board.is_terminal()
             || self.board.side_to_move() == self.human_side
         {
             return None;
@@ -567,6 +573,7 @@ impl GameController {
             human_side: self.human_side,
             side_to_move: self.board.side_to_move(),
             winner: self.board.winner(),
+            draw: self.board.is_draw(),
             move_count: self.board.move_count(),
             can_play: self.can_human_play(),
             engine_thinking: self.engine_thinking,
@@ -609,7 +616,7 @@ impl GameController {
     }
 
     fn can_human_play(&self) -> bool {
-        if self.engine_thinking || self.board.winner() != EMPTY {
+        if self.engine_thinking || self.board.is_terminal() {
             return false;
         }
         match self.mode {
@@ -660,7 +667,9 @@ impl EngineSearchTask {
     pub fn run(mut self) -> EngineSearchCompletion {
         let mut searcher = RootSearcher::new(self.config);
         let start = Instant::now();
-        let result = searcher.search(&mut self.board, Some(self.limits));
+        let result = searcher
+            .try_search(&mut self.board, Some(self.limits))
+            .expect("engine task is prepared only for non-terminal boards");
         EngineSearchCompletion {
             result,
             trace: searcher.last_trace,

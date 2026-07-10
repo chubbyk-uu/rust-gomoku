@@ -288,7 +288,7 @@ function render(state) {
   turnDot.className = "";
   if (state.engine_thinking) {
     turnDot.classList.add("thinking");
-  } else if (state.winner !== EMPTY) {
+  } else if (state.winner !== EMPTY || state.draw) {
     turnDot.classList.add("none");
   } else {
     turnDot.classList.add(state.side_to_move === WHITE ? "white" : "black");
@@ -376,7 +376,7 @@ async function applyAndContinue(response) {
   let state = response.state;
   render(state);
   // In two-player mode the engine never moves; humans alternate on both sides.
-  while (state.params.mode !== "two_player" && state.winner === EMPTY && state.side_to_move !== state.human_side) {
+  while (state.params.mode !== "two_player" && state.winner === EMPTY && !state.draw && state.side_to_move !== state.human_side) {
     const settledState = state;
     render(UiLogic.engineThinkingState(state));
     const moved = await nativeRequest({ op: "engine_move" });

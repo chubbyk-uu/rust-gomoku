@@ -161,6 +161,15 @@ test("game result distinguishes the human outcome", () => {
   );
 });
 
+test("game result announces a draw", () => {
+  assert.deepEqual(gameResult({ winner: 0, draw: true, move_count: 225 }), {
+    key: "draw:225",
+    title: "和棋",
+    message: "棋盘在第 225 手填满，双方均未连成五子。",
+    tone: "draw",
+  });
+});
+
 test("game result announces the winning side in two-player mode", () => {
   assert.deepEqual(
     gameResult({ winner: 1, human_side: -1, move_count: 9, params: { mode: "two_player" } }),

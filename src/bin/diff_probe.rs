@@ -370,7 +370,9 @@ fn run_case(case: DiffCase, root_profile: bool) -> ProbeOutput {
     };
 
     let mut searcher = RootSearcher::new(config);
-    let result = searcher.search(&mut board, Some(limits));
+    let result = searcher
+        .try_search(&mut board, Some(limits))
+        .expect("diff cases contain non-terminal boards");
     let (mx, my) = move_to_xy(result.move_).expect("root move is valid");
     let trace = searcher.last_trace.clone().unwrap_or_default();
 

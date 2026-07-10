@@ -780,3 +780,46 @@ fn root_searcher_and_alphabeta_share_tt_storage() {
     assert!(probe.hit);
     assert_eq!(probe.value, Some(456));
 }
+
+#[test]
+fn checked_root_search_rejects_terminal_positions() {
+    let mut board = Board::new();
+    for (x, y) in [
+        (3, 7),
+        (0, 0),
+        (4, 7),
+        (0, 1),
+        (5, 7),
+        (0, 2),
+        (6, 7),
+        (0, 3),
+        (7, 7),
+    ] {
+        board.play(xy_to_move(x, y).unwrap(), None).unwrap();
+    }
+    let mut searcher = RootSearcher::new(load_default_config());
+    assert_eq!(
+        searcher.try_search(&mut board, None),
+        Err(rust_gomoku::RootSearchError::TerminalPosition)
+    );
+}
+
+#[test]
+fn root_search_invalid_library_time_limit_fails_closed_without_panicking() {
+    let mut board = Board::new();
+    board.play(xy_to_move(7, 7).unwrap(), None).unwrap();
+    let mut config = load_default_config();
+    config.runtime.compute_vcf = false;
+    config.runtime.compute_vct = false;
+    let mut searcher = RootSearcher::new(config);
+    let result = searcher.search(
+        &mut board,
+        Some(SearchLimits {
+            max_depth: 1,
+            root_width: 2,
+            time_limit_ms: Some(1e308),
+            ..SearchLimits::default()
+        }),
+    );
+    assert!(board.is_legal_move(result.move_));
+}

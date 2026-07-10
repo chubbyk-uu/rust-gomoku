@@ -200,3 +200,32 @@ fn move_encoding_rejects_out_of_range_values() {
         })
     );
 }
+
+#[test]
+fn full_board_without_five_is_a_draw() {
+    let mut black_moves = Vec::new();
+    let mut white_moves = Vec::new();
+    for y in 0..BOARD_SIZE {
+        for x in 0..BOARD_SIZE {
+            let move_ = xy_to_move(x, y).unwrap();
+            if (x + 2 * y) % 4 < 2 {
+                black_moves.push(move_);
+            } else {
+                white_moves.push(move_);
+            }
+        }
+    }
+
+    let mut board = Board::new();
+    for index in 0..black_moves.len() {
+        board.play(black_moves[index], None).unwrap();
+        if let Some(&move_) = white_moves.get(index) {
+            board.play(move_, None).unwrap();
+        }
+    }
+
+    assert!(board.is_full());
+    assert!(board.is_draw());
+    assert!(board.is_terminal());
+    assert_eq!(board.winner(), 0);
+}

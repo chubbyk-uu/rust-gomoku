@@ -116,15 +116,19 @@ fn protocol_takeback_undoes_last_move() {
     proto.handle_line("START 15");
     proto.handle_line("BEGIN");
     assert_eq!(proto.board.move_count(), 1);
-    assert_eq!(proto.handle_line("TAKEBACK"), ["OK"]);
+    assert_eq!(proto.handle_line("TAKEBACK 7,7"), ["OK"]);
     assert_eq!(proto.board.move_count(), 0);
 }
 
 #[test]
-fn protocol_takeback_on_empty_board_returns_ok() {
+fn protocol_takeback_rejects_empty_or_mismatched_coordinates() {
     let mut proto = proto();
     proto.handle_line("START 15");
-    assert_eq!(proto.handle_line("TAKEBACK"), ["OK"]);
+    assert_eq!(proto.handle_line("TAKEBACK 7,7"), ["ERROR Takeback error."]);
+    proto.handle_line("BEGIN");
+    assert_eq!(proto.handle_line("TAKEBACK 0,0"), ["ERROR Takeback error."]);
+    assert_eq!(proto.board.move_count(), 1);
+    assert_eq!(proto.handle_line("TAKEBACK"), ["ERROR Takeback error."]);
 }
 
 #[test]
@@ -136,6 +140,32 @@ fn protocol_board_mode_reconstructs_position() {
     assert_eq!(proto.handle_line("6,7,2"), Vec::<String>::new());
     let response = proto.handle_line("DONE");
     assert_xy(&response);
+}
+
+#[test]
+fn protocol_reports_a_full_draw_board_without_entering_search() {
+    let mut proto = proto();
+    let mut black_moves = Vec::new();
+    let mut white_moves = Vec::new();
+    for y in 0..15 {
+        for x in 0..15 {
+            let move_ = xy_to_move(x, y).unwrap();
+            if (x + 2 * y) % 4 < 2 {
+                black_moves.push(move_);
+            } else {
+                white_moves.push(move_);
+            }
+        }
+    }
+    for index in 0..black_moves.len() {
+        proto.board.play(black_moves[index], None).unwrap();
+        if let Some(&move_) = white_moves.get(index) {
+            proto.board.play(move_, None).unwrap();
+        }
+    }
+
+    assert!(proto.board.is_draw());
+    assert_eq!(proto.handle_line("BEGIN"), ["ERROR Board is full."]);
 }
 
 #[test]
@@ -296,6 +326,23 @@ fn protocol_info_tt_bits_updates_engine_option() {
     let mut proto = proto();
     proto.handle_line("INFO tt_bits 24");
     assert_eq!(proto.tt_bits, Some(24));
+}
+
+#[test]
+fn protocol_rejects_unsafe_tt_bits_and_time_limits_without_panicking() {
+    let mut proto = proto();
+    proto.handle_line("INFO tt_bits 64");
+    assert_eq!(proto.tt_bits, None);
+    assert_eq!(
+        proto.handle_line("BEGIN"),
+        ["ERROR tt_bits must be between 0 and 24."]
+    );
+
+    proto.handle_line("INFO timeout_turn 1e308");
+    assert_eq!(
+        proto.handle_line("BEGIN"),
+        ["ERROR time limit is too large."]
+    );
 }
 
 #[test]
@@ -532,10 +579,14 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
 }
 
 #[test]
-fn protocol_unknown_command_silently_ignored_as_expected() {
+fn protocol_unknown_command_returns_unknown() {
     let mut proto = proto();
-    assert_eq!(proto.handle_line("FOOBAR"), Vec::<String>::new());
-    assert_eq!(proto.handle_line("XYZZY 123"), Vec::<String>::new());
+    assert_eq!(proto.handle_line("FOOBAR"), ["UNKNOWN"]);
+    assert_eq!(proto.handle_line("SWAP2BOARD"), ["UNKNOWN"]);
+    assert_eq!(
+        proto.handle_line("INFO future_option 1"),
+        Vec::<String>::new()
+    );
 }
 
 #[test]

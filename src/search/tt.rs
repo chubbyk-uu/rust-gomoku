@@ -9,6 +9,14 @@ use std::sync::{
 use crate::constants::{HASHF_ALPHA, HASHF_BETA, HASHF_EMPTY, HASHF_EXACT};
 use crate::types::Move;
 
+pub const MAX_TT_BUCKET_BITS: u32 = 24;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TTError {
+    BucketBitsOutOfRange(u32),
+    AllocationFailed,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TTEntry {
     pub key: u64,
@@ -84,11 +92,13 @@ struct TTStorage {
 }
 
 impl TTStorage {
-    fn new(bucket_count: usize) -> Self {
-        let buckets = (0..bucket_count)
-            .map(|_| array::from_fn(|_| RawEntry::default()))
-            .collect();
-        Self { buckets }
+    fn try_new(bucket_count: usize) -> Result<Self, TTError> {
+        let mut buckets = Vec::new();
+        buckets
+            .try_reserve_exact(bucket_count)
+            .map_err(|_| TTError::AllocationFailed)?;
+        buckets.extend((0..bucket_count).map(|_| array::from_fn(|_| RawEntry::default())));
+        Ok(Self { buckets })
     }
 
     fn bucket_count(&self) -> usize {
@@ -211,12 +221,21 @@ pub struct TranspositionTable {
 }
 
 impl TranspositionTable {
-    pub fn new(bucket_bits: u32) -> Self {
-        let bucket_count = 1_usize << bucket_bits;
-        Self {
-            bucket_mask: (1_u64 << bucket_bits) - 1,
-            storage: Arc::new(TTStorage::new(bucket_count)),
+    pub fn try_new(bucket_bits: u32) -> Result<Self, TTError> {
+        if bucket_bits > MAX_TT_BUCKET_BITS || bucket_bits >= usize::BITS {
+            return Err(TTError::BucketBitsOutOfRange(bucket_bits));
         }
+        let bucket_count = 1_usize
+            .checked_shl(bucket_bits)
+            .ok_or(TTError::BucketBitsOutOfRange(bucket_bits))?;
+        Ok(Self {
+            bucket_mask: (1_u64 << bucket_bits) - 1,
+            storage: Arc::new(TTStorage::try_new(bucket_count)?),
+        })
+    }
+
+    pub fn new(bucket_bits: u32) -> Self {
+        Self::try_new(bucket_bits).expect("trusted TT bucket bits stay within supported bounds")
     }
 
     pub fn bucket(&self, key: u64) -> [TTEntry; 2] {
@@ -236,7 +255,10 @@ impl TranspositionTable {
     pub fn fork_snapshot(&self) -> Self {
         let snapshot = Self {
             bucket_mask: self.bucket_mask,
-            storage: Arc::new(TTStorage::new(self.storage.bucket_count())),
+            storage: Arc::new(
+                TTStorage::try_new(self.storage.bucket_count())
+                    .expect("existing TT capacity remains allocatable for snapshot"),
+            ),
         };
         for (src_bucket, dst_bucket) in self
             .storage

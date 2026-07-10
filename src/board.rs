@@ -97,6 +97,18 @@ impl Board {
         self.move_history.len()
     }
 
+    pub fn is_full(&self) -> bool {
+        self.move_count() == BOARD_AREA
+    }
+
+    pub fn is_draw(&self) -> bool {
+        self.winner == EMPTY && self.is_full()
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        self.winner != EMPTY || self.is_full()
+    }
+
     pub fn side_to_move(&self) -> Side {
         self.side_to_move
     }

@@ -836,16 +836,19 @@ const INDEX_HTML: &str = r#"<!doctype html>
       restartSameSide();
     }
     function renderResult() {
-      if (!state || state.winner === 0) {
+      if (!state || (state.winner === 0 && !state.draw)) {
         announcedResult = null;
         closeResult();
         return;
       }
-      const key = `${state.winner}:${state.move_count}`;
+      const key = state.draw ? `draw:${state.move_count}` : `${state.winner}:${state.move_count}`;
       if (announcedResult === key) return;
       announcedResult = key;
       const twoPlayer = state.params && state.params.mode === 'two_player';
-      if (twoPlayer) {
+      if (state.draw) {
+        document.getElementById('result-title').textContent = '和棋';
+        document.getElementById('result-message').textContent = `棋盘在第 ${state.move_count} 手填满，双方均未连成五子。`;
+      } else if (twoPlayer) {
         const winnerName = sideName(state.winner);
         document.getElementById('result-title').textContent = `${winnerName}胜`;
         document.getElementById('result-message').textContent = `${winnerName}在第 ${state.move_count} 手取胜。`;

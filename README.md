@@ -167,6 +167,15 @@ Common `INFO` commands:
 - `INFO dynamic_board_margin N`
 - `INFO root_profile 0|1`
 
+Current limitation: `timeout_turn` / `time_left` deadlines currently apply to
+the alpha-beta phase only; root VCF/VCT and root preprocessing are outside that
+budget. `max_node` is also reset for each iterative-deepening depth rather than
+being a whole-move budget. This preserves the current classic/reference
+behavior and is suitable for fixed-search use, but is not yet a strict
+tournament time/node-control implementation. A future protocol-budget change
+will give VCF, VCT, and alpha-beta one shared deadline, cancellation signal,
+and cumulative node budget.
+
 ## Diffs and Matches
 
 Single-case diff:

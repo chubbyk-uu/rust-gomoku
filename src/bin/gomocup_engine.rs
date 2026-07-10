@@ -2,7 +2,9 @@
 
 use std::io::{self, BufRead, Write};
 
-use rust_gomoku::{load_config_for_profile, EngineProfile, GomocupProtocol, SearchLimits};
+use rust_gomoku::{
+    load_config_for_profile, EngineProfile, GomocupProtocol, SearchLimits, MAX_TT_BUCKET_BITS,
+};
 
 fn main() {
     let args = parse_args().unwrap_or_else(|message| {
@@ -88,9 +90,18 @@ fn parse_args() -> Result<CliArgs, String> {
                 fast_history_ordering = Some(false);
             }
             "--tt-bits" => {
-                if let Some(value) = args.next().and_then(|value| value.parse::<u32>().ok()) {
-                    tt_bits = Some(value);
+                let Some(value) = args.next() else {
+                    return Err("--tt-bits requires an integer".to_string());
+                };
+                let bits = value
+                    .parse::<u32>()
+                    .map_err(|_| format!("invalid --tt-bits: {value}"))?;
+                if bits > MAX_TT_BUCKET_BITS {
+                    return Err(format!(
+                        "--tt-bits must be between 0 and {MAX_TT_BUCKET_BITS}"
+                    ));
                 }
+                tt_bits = Some(bits);
             }
             "--profile" => {
                 let Some(value) = args.next() else {

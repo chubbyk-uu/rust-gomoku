@@ -64,7 +64,15 @@
   }
 
   function gameResult(state) {
-    if (!state || state.winner === 0) return null;
+    if (!state || (state.winner === 0 && !state.draw)) return null;
+    if (state.draw) {
+      return {
+        key: `draw:${state.move_count}`,
+        title: "和棋",
+        message: `棋盘在第 ${state.move_count} 手填满，双方均未连成五子。`,
+        tone: "draw",
+      };
+    }
     if (state.params && state.params.mode === "two_player") {
       // BLACK is 1, WHITE is -1; announce the winning side, no human/engine.
       const winnerName = state.winner === 1 ? "黑方" : "白方";

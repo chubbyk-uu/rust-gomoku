@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use rust_gomoku::{
     load_config_for_profile, move_to_xy, xy_to_move, Board, EngineProfile, RootSearcher,
     SearchLimits, TranspositionTable, VCTAndMemoCollisionSample, VCTDepthStats, VCTStats, BLACK,
-    WHITE,
+    MAX_TT_BUCKET_BITS, WHITE,
 };
 
 #[derive(Debug, Deserialize)]
@@ -321,11 +321,15 @@ fn parse_args() -> Result<ProbeArgs, String> {
                 let value = args
                     .next()
                     .ok_or_else(|| "--tt-bits requires an integer".to_string())?;
-                tt_bits = Some(
-                    value
-                        .parse::<u32>()
-                        .map_err(|_| format!("invalid --tt-bits: {value}"))?,
-                );
+                let bits = value
+                    .parse::<u32>()
+                    .map_err(|_| format!("invalid --tt-bits: {value}"))?;
+                if bits > MAX_TT_BUCKET_BITS {
+                    return Err(format!(
+                        "--tt-bits must be between 0 and {MAX_TT_BUCKET_BITS}"
+                    ));
+                }
+                tt_bits = Some(bits);
             }
             "--root-profile" => {
                 root_profile = true;
@@ -439,12 +443,17 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
         ..SearchLimits::default()
     };
     let mut searcher = if let Some(bits) = args.tt_bits {
-        RootSearcher::with_tt(config, TranspositionTable::new(bits))
+        RootSearcher::with_tt(
+            config,
+            TranspositionTable::try_new(bits).map_err(|err| format!("invalid TT: {err:?}"))?,
+        )
     } else {
         RootSearcher::new(config)
     };
     let start = Instant::now();
-    let result = searcher.search(&mut board, Some(limits));
+    let result = searcher
+        .try_search(&mut board, Some(limits))
+        .map_err(|err| format!("search failed: {err:?}"))?;
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
     let (mx, my) =
         move_to_xy(result.move_).map_err(|err| format!("invalid result move: {err:?}"))?;

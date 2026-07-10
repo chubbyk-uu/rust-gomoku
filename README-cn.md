@@ -149,6 +149,12 @@ target/release/gomocup_engine --profile fast
 - `INFO dynamic_board_margin N`
 - `INFO root_profile 0|1`
 
+当前限制：`timeout_turn` / `time_left` 的 deadline 目前只约束 alpha-beta
+阶段，root VCF/VCT 和 root 前置处理尚不计入该预算；`max_node` 也会在每个
+迭代加深深度重新计数，并非整手累计预算。这保持了当前 classic/reference
+行为，适用于固定搜索，但尚不是严格的比赛级时间/节点控制。后续会让 VCF、
+VCT 和 alpha-beta 共用 deadline、取消信号及累计节点预算。
+
 ## 差分和对战
 
 单 case 差分：
