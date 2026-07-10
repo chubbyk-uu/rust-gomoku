@@ -8,6 +8,23 @@ use crate::search::{RootSearcher, SearchLimits, TranspositionTable, MAX_TT_BUCKE
 
 const MAX_PROTOCOL_TIME_MS: f64 = i32::MAX as f64;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingProtocolError {
+    TimeLimitTooLarge,
+    TtBitsOutOfRange,
+}
+
+impl PendingProtocolError {
+    fn message(self) -> String {
+        match self {
+            Self::TimeLimitTooLarge => "time limit is too large".to_string(),
+            Self::TtBitsOutOfRange => {
+                format!("tt_bits must be between 0 and {MAX_TT_BUCKET_BITS}")
+            }
+        }
+    }
+}
+
 pub const ABOUT_TEXT: &str = "name=\"rust_gomoku\", version=\"0.1\", author=\"OpenAI\", country=\"China\", www=\"https://example.invalid/\"";
 
 #[derive(Clone, Debug)]
@@ -22,7 +39,7 @@ pub struct GomocupProtocol {
     pub node_limit: Option<usize>,
     pub tt_bits: Option<u32>,
     pub ended: bool,
-    pending_error: Option<String>,
+    pending_error: Option<PendingProtocolError>,
     searcher: Option<RootSearcher>,
 }
 
@@ -273,22 +290,25 @@ impl GomocupProtocol {
             "timeout_turn" => {
                 if let Some(parsed) = parse_time_ms(value) {
                     self.timeout_turn_ms = Some(if parsed == 0.0 { 200.0 } else { parsed });
+                    self.clear_pending_error(PendingProtocolError::TimeLimitTooLarge);
                 } else if is_oversized_time(value) {
-                    self.pending_error = Some("time limit is too large".to_string());
+                    self.pending_error = Some(PendingProtocolError::TimeLimitTooLarge);
                 }
             }
             "timeout_match" => {
                 if let Some(parsed) = parse_time_ms(value) {
                     self.time_left_ms = Some(if parsed == 0.0 { 99_999_999.0 } else { parsed });
+                    self.clear_pending_error(PendingProtocolError::TimeLimitTooLarge);
                 } else if is_oversized_time(value) {
-                    self.pending_error = Some("time limit is too large".to_string());
+                    self.pending_error = Some(PendingProtocolError::TimeLimitTooLarge);
                 }
             }
             "time_left" => {
                 if let Some(parsed) = parse_time_ms(value) {
                     self.time_left_ms = Some(parsed);
+                    self.clear_pending_error(PendingProtocolError::TimeLimitTooLarge);
                 } else if is_oversized_time(value) {
-                    self.pending_error = Some("time limit is too large".to_string());
+                    self.pending_error = Some(PendingProtocolError::TimeLimitTooLarge);
                 }
             }
             "max_node" => {
@@ -367,10 +387,9 @@ impl GomocupProtocol {
                     if parsed <= MAX_TT_BUCKET_BITS {
                         self.tt_bits = Some(parsed);
                         self.searcher = None;
+                        self.clear_pending_error(PendingProtocolError::TtBitsOutOfRange);
                     } else {
-                        self.pending_error = Some(format!(
-                            "tt_bits must be between 0 and {MAX_TT_BUCKET_BITS}"
-                        ));
+                        self.pending_error = Some(PendingProtocolError::TtBitsOutOfRange);
                     }
                 }
             }
@@ -439,8 +458,8 @@ impl GomocupProtocol {
     }
 
     fn search_move(&mut self) -> Vec<String> {
-        if let Some(message) = self.pending_error.take() {
-            return vec![format!("ERROR {message}.")];
+        if let Some(error) = self.pending_error.take() {
+            return vec![format!("ERROR {}.", error.message())];
         }
         if self.board.is_draw() {
             return vec!["ERROR Board is full.".to_string()];
@@ -492,6 +511,12 @@ impl GomocupProtocol {
         let mut responses = trace_messages(trace.as_ref());
         responses.push(format!("{x},{y}"));
         responses
+    }
+
+    fn clear_pending_error(&mut self, error: PendingProtocolError) {
+        if self.pending_error == Some(error) {
+            self.pending_error = None;
+        }
     }
 }
 

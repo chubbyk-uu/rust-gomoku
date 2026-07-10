@@ -346,6 +346,19 @@ fn protocol_rejects_unsafe_tt_bits_and_time_limits_without_panicking() {
 }
 
 #[test]
+fn protocol_accepts_valid_info_after_correcting_a_rejected_value() {
+    let mut proto = proto();
+    proto.handle_line("INFO tt_bits 64");
+    proto.handle_line("INFO tt_bits 2");
+    assert_last_xy(&proto.handle_line("BEGIN"));
+
+    proto.handle_line("RESTART");
+    proto.handle_line("INFO timeout_turn 1e308");
+    proto.handle_line("INFO timeout_turn 500");
+    assert_last_xy(&proto.handle_line("BEGIN"));
+}
+
+#[test]
 fn protocol_info_profile_updates_config_profile() {
     let mut proto = proto();
     assert_eq!(proto.config.profile, EngineProfile::Base);
