@@ -2,6 +2,31 @@
 
 `rust_gomoku` 是 Python reference 项目 `pygomoku` classic 主线的 Rust 重构，并支持可选的连珠禁手规则。当前主线目标是同时守住两种规则的正确性，在可验证的前提下继续降低搜索耗时并提高棋力。
 
+## 界面截图
+
+在 [Releases](https://github.com/chubbyk-uu/rust-gomoku/releases/latest) 下载 Windows x64 程序或 Android ARM64 APK。
+
+### Windows / 桌面 GUI
+
+Windows 程序启动后打开本地网页界面。可与引擎对弈或进行双人对局，在右侧选择无禁手或连珠规则、调整难度。
+
+![桌面 GUI：与引擎对弈，右侧提供规则与难度设置](docs/screenshots/desktop-gui.png)
+
+### Android
+
+手机界面集中展示棋盘、当前回合，以及悔棋和新局操作。提供入门、初级、中级、高级、大师五档难度，默认中级。
+
+<p>
+  <img src="docs/screenshots/android-portrait.png" alt="Android 竖屏界面：连珠对局进行中" width="320">
+  <img src="docs/screenshots/android-difficulty.png" alt="Android 难度选择：五档难度，当前选择中级" width="320">
+</p>
+
+横屏时，操作区排列在棋盘旁边：
+
+![Android 横屏对局界面](docs/screenshots/android-landscape.png)
+
+截图说明：桌面图截自 WSL 中实际运行的 GUI，与 Windows 版本使用同一网页。Android 图片使用应用内置的 HTML/CSS/JavaScript 和 Rust 控制器产生的真实对局状态，在浏览器中预览截取，不含 Android 系统栏，非手机实机截图。
+
 ## 当前状态
 
 已完成：

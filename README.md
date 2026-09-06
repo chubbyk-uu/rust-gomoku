@@ -4,6 +4,31 @@
 
 A Chinese version of this document is available at [README-cn.md](README-cn.md).
 
+## Screenshots
+
+Download the Windows x64 program or Android ARM64 APK from [Releases](https://github.com/chubbyk-uu/rust-gomoku/releases/latest).
+
+### Windows / Desktop GUI
+
+The Windows program opens this local browser interface. Play against the engine or another person, choose freestyle or Renju, and adjust difficulty from the side panel.
+
+![Desktop GUI showing a game against the engine and the rule and difficulty controls](docs/screenshots/desktop-gui.png)
+
+### Android
+
+The mobile interface puts the board, turn status, and undo/new-game controls together. Five difficulty levels range from Beginner to Master; Intermediate is the default.
+
+<p>
+  <img src="docs/screenshots/android-portrait.png" alt="Android interface in portrait orientation during a Renju game" width="320">
+  <img src="docs/screenshots/android-difficulty.png" alt="Android difficulty picker with five levels and Intermediate selected" width="320">
+</p>
+
+Landscape mode places the controls beside the board:
+
+![Android interface in landscape orientation](docs/screenshots/android-landscape.png)
+
+Capture notes: the desktop screenshot was taken from the running GUI in WSL, which serves the same page as the Windows build. Android images are browser previews of the app's bundled HTML/CSS/JavaScript using a real Rust-controller game snapshot, without Android system bars. They are not device screenshots.
+
 ## Current Status
 
 Completed:
