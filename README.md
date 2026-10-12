@@ -6,7 +6,7 @@ A Chinese version of this document is available at [README-cn.md](README-cn.md).
 
 ## Screenshots
 
-Download the Windows x64 program or Android ARM64 APK from [Releases](https://github.com/chubbyk-uu/rust-gomoku/releases/latest).
+Download the Windows x64 program from the [latest release](https://github.com/chubbyk-uu/rust-gomoku/releases/latest). The latest Android ARM64 APK is available in [v0.1.11](https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.11); v0.1.12 is a Windows-only update.
 
 ### Windows / Desktop GUI
 

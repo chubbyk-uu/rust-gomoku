@@ -2,6 +2,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+#[cfg(not(target_os = "windows"))]
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -156,6 +157,7 @@ fn browser_url(addr: &str) -> String {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn spawn_browser(program: &str, args: &[&str]) -> std::io::Result<()> {
     Command::new(program)
         .args(args)
@@ -168,7 +170,83 @@ fn spawn_browser(program: &str, args: &[&str]) -> std::io::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn open_browser(url: &str) -> std::io::Result<()> {
-    spawn_browser("cmd", &["/C", "start", "", url])
+    use std::ffi::c_void;
+    use std::ptr::null;
+    use std::ptr::null_mut;
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut c_void,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show_cmd: i32,
+        ) -> *mut c_void;
+    }
+
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn CoInitializeEx(reserved: *mut c_void, coinit: u32) -> i32;
+        fn CoUninitialize();
+    }
+
+    const COINIT_APARTMENTTHREADED: u32 = 2;
+    const COINIT_DISABLE_OLE1DDE: u32 = 4;
+    const SW_SHOWNORMAL: i32 = 1;
+    let file = browser_url_utf16(url)?;
+    let operation = [b'o' as u16, b'p' as u16, b'e' as u16, b'n' as u16, 0];
+
+    // Shell handlers may require STA COM; balance both S_OK and S_FALSE.
+    let initialized = unsafe {
+        CoInitializeEx(
+            null_mut(),
+            COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE,
+        )
+    };
+    if initialized < 0 {
+        return Err(std::io::Error::other(format!(
+            "browser COM initialization failed (HRESULT {:#010x})",
+            initialized as u32
+        )));
+    }
+
+    // Both UTF-16 buffers remain alive and terminated for the synchronous call.
+    let result = unsafe {
+        ShellExecuteW(
+            null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            null(),
+            null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    unsafe { CoUninitialize() };
+    shell_execute_result(result as isize)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn browser_url_utf16(url: &str) -> std::io::Result<Vec<u16>> {
+    if url.contains('\0') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "browser URL contains a null character",
+        ));
+    }
+    Ok(url.encode_utf16().chain(std::iter::once(0)).collect())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn shell_execute_result(result: isize) -> std::io::Result<()> {
+    if result > 32 {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "ShellExecuteW failed to open browser (code {result})"
+        )))
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -370,6 +448,34 @@ mod tests {
         assert_eq!(browser_url("0.0.0.0:18080"), "http://127.0.0.1:18080");
         assert_eq!(browser_url("[::]:18080"), "http://[::1]:18080");
         assert_eq!(browser_url("127.0.0.1:18080"), "http://127.0.0.1:18080");
+    }
+
+    #[test]
+    fn windows_browser_url_encoding_preserves_unicode_and_rejects_nulls() {
+        let url = "http://127.0.0.1:18080/?name=\u{68cb}\u{1f600}&mode=renju";
+        let encoded = browser_url_utf16(url).unwrap();
+        assert_eq!(encoded.last(), Some(&0));
+        assert_eq!(
+            String::from_utf16(&encoded[..encoded.len() - 1]).unwrap(),
+            url
+        );
+        assert_eq!(
+            browser_url_utf16("http://127.0.0.1/\0ignored")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn windows_browser_shell_result_uses_documented_success_boundary() {
+        for code in [0, 2, 5, 31, 32] {
+            let error = shell_execute_result(code).unwrap_err();
+            assert!(error.to_string().contains(&format!("code {code}")));
+        }
+        for code in [33, isize::MAX] {
+            assert!(shell_execute_result(code).is_ok());
+        }
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 ## 界面截图
 
-在 [Releases](https://github.com/chubbyk-uu/rust-gomoku/releases/latest) 下载 Windows x64 程序或 Android ARM64 APK。
+Windows x64 程序可从[最新 Release](https://github.com/chubbyk-uu/rust-gomoku/releases/latest) 下载。Android ARM64 APK 的最新版本在 [v0.1.11](https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.11)；v0.1.12 仅更新 Windows 程序。
 
 ### Windows / 桌面 GUI
 
