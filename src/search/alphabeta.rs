@@ -104,7 +104,7 @@ pub struct SearchOptions<'a> {
 
 pub fn terminal_score(board: &Board, side: Side, ply: i32) -> Option<i32> {
     if board.winner() == 0 {
-        return None;
+        return board.is_draw().then_some(0);
     }
     if board.winner() == side {
         return Some(INF - ply);
@@ -319,6 +319,21 @@ impl AlphaBetaSearcher {
 
         if let Some(score) = terminal_score(board, side, options.ply) {
             return (score, None);
+        }
+
+        // Quiet last moves can have zero static value and be dropped by movegen.
+        if board.move_count() == BOARD_AREA - 1 {
+            let last = (0..BOARD_AREA as Move)
+                .find(|&m| board.is_legal_move_for_rule(m, side, self.config.rule_set));
+            if let Some(m) = last {
+                let (x, y) = move_to_xy(m).expect("board move");
+                let score = if board.is_winning_move_for_rule(x, y, side, self.config.rule_set) {
+                    INF - options.ply
+                } else {
+                    0
+                };
+                return (score, Some(m));
+            }
         }
 
         let probe = self.tt.probe(board.zobrist_key(), hash_depth, alpha, beta);

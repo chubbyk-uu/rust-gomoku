@@ -239,3 +239,19 @@ fn alphabeta_matches_expected_mid_ladder_nonroot_score() {
     );
     assert_eq!(score, -43);
 }
+
+#[test]
+fn last_free_point_draw_scores_zero() {
+    let mut board = Board::new();
+    let (black, white): (Vec<u16>, Vec<u16>) =
+        (0..225).partition(|m| ((m % 15 + 2 * (m / 15)) % 4) < 2);
+    for i in 0..224 {
+        let stones = if i % 2 == 0 { &black } else { &white };
+        board.play(stones[i / 2], None).unwrap();
+    }
+    let result = rust_gomoku::RootSearcher::new(load_default_config()).search(&mut board, None);
+    board.play(result.move_, None).unwrap();
+    assert!(board.is_draw());
+    assert_eq!(terminal_score(&board, board.side_to_move(), 1), Some(0));
+    assert_eq!(result.score, 0);
+}
