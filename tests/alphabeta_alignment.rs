@@ -235,9 +235,39 @@ fn alphabeta_matches_expected_mid_ladder_nonroot_score() {
     );
     assert_eq!(
         move_to_xy(move_.expect("move should exist")).unwrap(),
-        (12, 12)
+        (7, 6)
     );
-    assert_eq!(score, -43);
+    assert_eq!(score, -19990);
+}
+
+#[test]
+fn fractional_depth_expands_after_a_cached_leaf() {
+    let mut board = Board::new();
+    for (x, y) in [(7, 7), (8, 6), (7, 5), (7, 4), (6, 6), (1, 1)] {
+        board.play(xy_to_move(x, y).unwrap(), None).unwrap();
+    }
+    let mut caches = EvalCaches::new();
+    recompute_all(&mut board, &mut caches);
+    let mut search = |engine: &mut AlphaBetaSearcher, depth| {
+        let side = board.side_to_move();
+        engine.search(
+            &mut board,
+            &mut caches,
+            side,
+            depth,
+            -INF,
+            INF,
+            20,
+            &mut SearchStats::default(),
+            SearchOptions::default(),
+        )
+    };
+    let mut engine = AlphaBetaSearcher::new(load_default_config());
+    let cold = search(&mut engine, 0.8);
+    let mut engine = AlphaBetaSearcher::new(load_default_config());
+    search(&mut engine, 0.0);
+    assert!(cold.1.is_some());
+    assert_eq!(search(&mut engine, 0.8), cold);
 }
 
 #[test]

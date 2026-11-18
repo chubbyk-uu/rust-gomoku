@@ -55,20 +55,11 @@ def filter_by_profile(case_paths: list[Path], profile: str) -> list[Path]:
     return [case_path for case_path in case_paths if case_profile(case_path) == profile]
 
 
-def compare(rust: dict, reference: dict, fields: list[str]) -> list[tuple[str, object, object]]:
-    mismatches = []
-    for field in fields:
-        rv = get_path(rust, field)
-        fv = get_path(reference, field)
-        if rv != fv:
-            mismatches.append((field, rv, fv))
-    return mismatches
-
-
 def run_one_case(
     case_path: Path,
     fields: list[str],
     ref_root: Path | None,
+    check_baselines: bool,
 ) -> tuple[str, bool, list[str], float]:
     start = time.perf_counter()
     name = case_path.name
@@ -85,20 +76,34 @@ def run_one_case(
         lines.append(f"{name}: FAIL {exc!r}")
         return name, False, lines, time.perf_counter() - start
 
-    mismatches = compare(rust, reference, fields)
+    pinned = {}
+    if check_baselines:
+        pinned = json.loads(case_path.read_text(encoding="utf-8")).get("expected_differences", {})
+    mismatches = []
+    for field in fields:
+        rv, fv = get_path(rust, field), get_path(reference, field)
+        if field in pinned:
+            if pinned[field] == {"rust": rv, "reference": fv}:
+                lines.append(f"  {field}: pinned rust={rv!r} reference={fv!r}")
+                continue
+            lines.append(f"  {field}: expected {pinned[field]}")
+            mismatches.append((field, rv, fv))
+        elif rv != fv:
+            mismatches.append((field, rv, fv))
     if mismatches:
         lines.append(f"{name}: DIFF")
         for field, rv, fv in mismatches:
             lines.append(f"  {field}: rust={rv!r} reference={fv!r}")
         return name, False, lines, time.perf_counter() - start
 
-    lines.append(f"{name}: OK {len(fields)} fields match")
+    lines.append(f"{name}: OK {len(fields)} fields checked")
     return name, True, lines, time.perf_counter() - start
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("cases", nargs="*", type=Path)
+    parser.add_argument("--check-baselines", action="store_true", help="verify both pinned values for documented reference differences")
     parser.add_argument("--field", action="append", dest="fields")
     parser.add_argument(
         "--profile",
@@ -131,11 +136,11 @@ def main() -> int:
 
     started = time.perf_counter()
     if jobs == 1 or len(case_paths) <= 1:
-        results = [run_one_case(case_path, fields, args.ref_root) for case_path in case_paths]
+        results = [run_one_case(case_path, fields, args.ref_root, args.check_baselines) for case_path in case_paths]
     else:
         with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as pool:
             futures = {
-                pool.submit(run_one_case, case_path, fields, args.ref_root): index
+                pool.submit(run_one_case, case_path, fields, args.ref_root, args.check_baselines): index
                 for index, case_path in enumerate(case_paths)
             }
             indexed_results = []

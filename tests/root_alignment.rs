@@ -506,7 +506,7 @@ fn root_search_matches_expected_one_move_reply() {
 }
 
 #[test]
-fn root_search_matches_classic_opening_10_4_depth6_width15() {
+fn root_search_opening_10_4_depth6_width15_with_fractional_depth_probe() {
     let mut board = Board::new();
     board.play(xy_to_move(10, 4).unwrap(), None).unwrap();
     let mut searcher = RootSearcher::new(load_default_config());
@@ -519,7 +519,7 @@ fn root_search_matches_classic_opening_10_4_depth6_width15() {
         }),
     );
     assert_eq!(move_to_xy(result.move_).unwrap(), (9, 4));
-    assert_eq!(result.score, -10);
+    assert_eq!(result.score, -12);
 }
 
 #[test]

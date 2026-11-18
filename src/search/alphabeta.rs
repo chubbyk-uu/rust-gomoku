@@ -336,7 +336,11 @@ impl AlphaBetaSearcher {
             }
         }
 
-        let probe = self.tt.probe(board.zobrist_key(), hash_depth, alpha, beta);
+        // Stored depths round down. Round the requirement up so a leaf never
+        // cuts off a positive-depth search, even after fractional reductions.
+        let probe = self
+            .tt
+            .probe(board.zobrist_key(), depth.ceil() as i32, alpha, beta);
         if let Some(best_move_hint) = probe.best_move_hint {
             if best_move_hint.generation == self.tt_generation {
                 stats.tt_bestmove_current_generation += 1;
