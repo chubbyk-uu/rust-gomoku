@@ -4,13 +4,14 @@ use std::collections::HashMap;
 
 use crate::board::Board;
 use crate::rules::RuleSet;
+use crate::search::budget::MoveBudget;
 use crate::threats::threat_board::ThreatBoardView;
 use crate::types::{Move, Side};
 
 pub const NO_MOVE: Move = u16::MAX;
 pub const VCFM: i32 = 5;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VCFResult {
     pub move_: Option<Move>,
     pub found: bool,
@@ -25,6 +26,7 @@ pub struct VcfMemoEntry {
 
 #[derive(Clone, Debug, Default)]
 pub struct VCFSearcher {
+    pub(crate) budget: MoveBudget,
     pub memo: HashMap<(Side, Vec<Move>, Vec<Move>), VcfMemoEntry>,
     pub multi_reply: bool,
 }
@@ -52,6 +54,9 @@ impl VCFSearcher {
         depth: i32,
         rule: RuleSet,
     ) -> VCFResult {
+        if self.budget.stopped() {
+            return VCFResult::default();
+        }
         let effective_depth = Self::normalize_begin_depth(depth);
         self.search_begin(
             &mut ThreatBoardView::from_board_with_rule(board.clone(), rule),
@@ -131,7 +136,7 @@ impl VCFSearcher {
         attacker_moves: &[Move],
         defender_moves: &[Move],
     ) -> VCFResult {
-        if depth <= 0 {
+        if !self.budget.enter() || depth <= 0 {
             return VCFResult {
                 move_: None,
                 found: false,
@@ -226,6 +231,9 @@ impl VCFSearcher {
         let ordered_moves = view.threat_moves(side);
         let mut forcing_moves = Vec::new();
         for move_ in ordered_moves {
+            if self.budget.stopped() {
+                return VCFResult::default();
+            }
             view.play(move_, side);
             let (x, y) = crate::board::move_to_xy(move_).expect("move stays valid");
             if view.board.winner() == side || view.has_winning_a4(x, y) {
@@ -245,6 +253,9 @@ impl VCFSearcher {
         }
 
         for move_ in forcing_moves {
+            if self.budget.stopped() {
+                return VCFResult::default();
+            }
             view.play(move_, side);
             let mut next_attacker_moves = attacker_moves.to_vec();
             next_attacker_moves.push(move_);
@@ -289,7 +300,7 @@ impl VCFSearcher {
         attacker_moves: &[Move],
         defender_moves: &[Move],
     ) -> VCFResult {
-        if depth < 0 {
+        if !self.budget.enter() || depth < 0 {
             return VCFResult {
                 move_: None,
                 found: false,
@@ -337,6 +348,9 @@ impl VCFSearcher {
         let mut any_unsolved = false;
         let mut next_defender_moves = defender_moves.to_vec();
         for &reply in replies.as_slice() {
+            if self.budget.stopped() {
+                return VCFResult::default();
+            }
             view.play(reply, -attacker);
             next_defender_moves.push(reply);
             let result =

@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::board::Board;
 use crate::rules::RuleSet;
+use crate::search::budget::MoveBudget;
 use crate::threats::threat_board::ThreatBoardView;
 use crate::threats::types::{AttackMove, ThreatLevel};
 use crate::types::{Move, Side};
@@ -13,7 +14,7 @@ const OR_NODE: i32 = 0;
 const AND_NODE: i32 = 1;
 const MAX_AND_MEMO_COLLISION_SAMPLES: usize = 8;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VCTResult {
     pub move_: Option<Move>,
     pub found: bool,
@@ -162,6 +163,7 @@ impl VCTStats {
 
 #[derive(Clone, Debug, Default)]
 pub struct VCTSearcher {
+    pub(crate) budget: MoveBudget,
     pub memo: HashMap<(i32, Side, i32, u64, u64), VctMemoEntry>,
     pub stats: VCTStats,
     pub memo_diagnostics_enabled: bool,
@@ -216,6 +218,10 @@ impl VCTSearcher {
             self.stats.current_depth_max_defense_count = 0;
             let depth_start = Instant::now();
             result = self.or_node(&mut view, side, d);
+            if self.budget.stopped() {
+                self.stats.elapsed_us = total_start.elapsed().as_micros();
+                return VCTResult::default();
+            }
             self.stats.depth_completed = d;
             self.stats.depth_stats.push(self.stats.depth_delta(
                 before,
@@ -284,6 +290,9 @@ impl VCTSearcher {
     }
 
     fn or_node(&mut self, view: &mut ThreatBoardView, attacker: Side, depth: i32) -> VCTResult {
+        if !self.budget.enter() {
+            return VCTResult::default();
+        }
         self.stats.or_nodes += 1;
         if depth <= 0 {
             return VCTResult {
@@ -334,6 +343,9 @@ impl VCTSearcher {
 
         let mut solved = true;
         for attack in attacks {
+            if self.budget.stopped() {
+                return VCTResult::default();
+            }
             if attack.level >= ThreatLevel::A4
                 && self.a4_attack_wins_immediately(view, attacker, &attack)
             {
@@ -478,6 +490,9 @@ impl VCTSearcher {
         depth: i32,
         attack: &AttackMove,
     ) -> VCTResult {
+        if !self.budget.enter() {
+            return VCTResult::default();
+        }
         self.stats.and_nodes += 1;
 
         let key = view.board.zobrist_key();

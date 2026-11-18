@@ -608,3 +608,11 @@ fn protocol_end_marks_protocol_ended() {
     assert_eq!(proto.handle_line("END"), Vec::<String>::new());
     assert!(proto.ended);
 }
+
+#[test]
+fn remaining_match_time_caps_the_turn() {
+    let mut protocol = GomocupProtocol::default();
+    protocol.handle_line("INFO timeout_turn 5000");
+    protocol.handle_line("INFO time_left 30");
+    assert_eq!(protocol.current_search_limits().time_limit_ms, Some(30.0));
+}

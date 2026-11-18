@@ -823,3 +823,83 @@ fn root_search_invalid_library_time_limit_fails_closed_without_panicking() {
     );
     assert!(board.is_legal_move(result.move_));
 }
+
+#[test]
+fn tactical_and_iterative_nodes_share_a_move_budget() {
+    let mut board = Board::new();
+    for (x, y) in [(7, 7), (8, 6), (7, 5), (7, 4), (6, 6)] {
+        board.play(xy_to_move(x, y).unwrap(), None).unwrap();
+    }
+    let key = board.zobrist_key();
+    let mut searcher = RootSearcher::new(load_default_config());
+    for cap in [1, 20, 1000] {
+        let result = searcher.search(
+            &mut board,
+            Some(SearchLimits {
+                max_depth: 8,
+                root_width: 20,
+                node_limit: Some(cap),
+                time_limit_ms: None,
+            }),
+        );
+        assert_eq!(result.nodes, cap);
+        assert!(board.is_legal_move(result.move_));
+        assert_eq!(board.zobrist_key(), key);
+    }
+    let result = searcher.search(
+        &mut board,
+        Some(SearchLimits {
+            max_depth: 3,
+            root_width: 20,
+            ..SearchLimits::default()
+        }),
+    );
+    assert_eq!(result.depth, 3);
+}
+
+#[test]
+fn interrupted_root_vct_cannot_claim_a_win() {
+    let mut board = Board::new();
+    for (x, y) in [
+        (6, 7),
+        (0, 0),
+        (8, 7),
+        (1, 3),
+        (7, 6),
+        (3, 1),
+        (7, 8),
+        (14, 14),
+    ] {
+        board.play(xy_to_move(x, y).unwrap(), None).unwrap();
+    }
+    let key = board.zobrist_key();
+    let mut config = load_default_config();
+    config.runtime.compute_vcf = false;
+    config.runtime.root_vct_depth = 4;
+    let mut searcher = RootSearcher::new(config);
+    let limits = SearchLimits {
+        max_depth: 4,
+        root_width: 20,
+        ..SearchLimits::default()
+    };
+    for limited in [
+        SearchLimits {
+            node_limit: Some(1),
+            ..limits
+        },
+        SearchLimits {
+            time_limit_ms: Some(0.0),
+            ..limits
+        },
+    ] {
+        let result = searcher.search(&mut board, Some(limited));
+        let trace = searcher.last_trace.as_ref().unwrap();
+        assert!(!trace.vct_accepted);
+        assert_eq!(result.depth, 0);
+        assert_eq!(result.nodes, limited.node_limit.unwrap_or(0));
+        assert!(board.is_legal_move(result.move_));
+        assert_eq!(board.zobrist_key(), key);
+    }
+    searcher.search(&mut board, Some(limits));
+    assert!(searcher.last_trace.as_ref().unwrap().vct_accepted);
+}

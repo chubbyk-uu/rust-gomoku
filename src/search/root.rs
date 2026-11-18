@@ -1,12 +1,13 @@
 //! Root iterative-deepening search for the classic mainline.
 
+use super::budget::MoveBudget;
 use std::collections::HashSet;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::board::{move_to_xy, xy_to_move, Board};
 use crate::config::EngineConfig;
@@ -446,6 +447,9 @@ impl RootSearcher {
         {
             return (false, Some("opponent_vcf"));
         }
+        if self.vcf.budget.stopped() {
+            return (false, Some("budget"));
+        }
         (true, None)
     }
 
@@ -546,6 +550,9 @@ impl RootSearcher {
 
         let mut filtered = HashSet::new();
         for move_ in candidates {
+            if self.vcf.budget.stopped() {
+                return None;
+            }
             let mut trial = board.clone();
             trial
                 .play_assuming_rule_legal(move_, Some(side), self.config.rule_set)
@@ -589,25 +596,19 @@ impl RootSearcher {
         let mut best_move = None;
         let mut best_score = -INF;
         let mut total_nodes = 0_usize;
-        let deadline = limits.time_limit_ms.map(|ms| {
-            Duration::try_from_secs_f64(ms / 1000.0)
-                .ok()
-                .and_then(|duration| Instant::now().checked_add(duration))
-                // Invalid library-level limits must fail closed rather than
-                // disabling the deadline or panicking in Duration conversion.
-                .unwrap_or_else(Instant::now)
-        });
-        if cancel
-            .as_ref()
-            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+        if self.vcf.budget.stopped()
+            || cancel
+                .as_ref()
+                .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
         {
             return self.fallback_search_result(board, &caches, side, best_score, 0, 0);
         }
         let root_allowed_moves =
             self.apply_opponent_vcf_filter(board, side, self.root_allowed_moves(board));
-        if cancel
-            .as_ref()
-            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+        if self.vcf.budget.stopped()
+            || cancel
+                .as_ref()
+                .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
         {
             return self.fallback_search_result(board, &caches, side, best_score, 0, 0);
         }
@@ -633,19 +634,15 @@ impl RootSearcher {
 
         let mut completed_depth = 0_i32;
         for depth in 1..=limits.max_depth {
-            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                break;
-            }
-            if cancel
-                .as_ref()
-                .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+            if self.vcf.budget.stopped()
+                || cancel
+                    .as_ref()
+                    .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
             {
                 break;
             }
             let depth_start = Instant::now();
             let mut stats = SearchStats {
-                node_limit: limits.node_limit,
-                deadline,
                 root_profile: self.config.runtime.root_profile,
                 cancel: cancel.clone(),
                 ..SearchStats::default()
@@ -845,7 +842,21 @@ impl RootSearcher {
 
     pub fn search(&mut self, board: &mut Board, limits: Option<SearchLimits>) -> SearchResult {
         let limits = limits.unwrap_or_else(|| SearchLimits::fixed_from_config(&self.config));
+        let budget = MoveBudget::new(limits);
+        self.vcf.budget = budget.clone();
+        self.vct.budget = budget.clone();
+        self.alphabeta.vcf.budget = budget.clone();
+        let mut result = self.search_move(board, limits);
+        if let Some(nodes) = budget.nodes() {
+            result.nodes = nodes;
+            self.vcf.budget = MoveBudget::default();
+            self.vct.budget = MoveBudget::default();
+            self.alphabeta.vcf.budget = MoveBudget::default();
+        }
+        result
+    }
 
+    fn search_move(&mut self, board: &mut Board, limits: SearchLimits) -> SearchResult {
         if board.move_count() == 0 {
             self.last_trace = Some(RootTrace::default());
             let center =
@@ -872,7 +883,7 @@ impl RootSearcher {
                 self.config.runtime.vcf_multi_reply,
                 self.config.rule_set,
             );
-            if vcf_result.found {
+            if vcf_result.found && !self.vcf.budget.stopped() {
                 trace.vcf_found = true;
                 trace.tactical_path = "vcf";
                 self.last_trace = Some(trace);
@@ -887,7 +898,10 @@ impl RootSearcher {
             }
         }
 
-        if self.config.runtime.compute_vct && self.config.runtime.root_vct_depth > 0 {
+        if !self.vcf.budget.stopped()
+            && self.config.runtime.compute_vct
+            && self.config.runtime.root_vct_depth > 0
+        {
             trace.used_vct = true;
             if has_vct_trigger_for_rule(board, side, self.config.rule_set) {
                 trace.vct_triggered = true;

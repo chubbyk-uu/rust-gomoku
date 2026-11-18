@@ -1,6 +1,7 @@
 //! Search modules aligned with the classic reference.
 
 pub mod alphabeta;
+pub(crate) mod budget;
 pub mod movegen;
 pub mod ordering;
 pub mod root;

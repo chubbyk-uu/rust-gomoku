@@ -19,5 +19,9 @@
     "root_vct_depth": 4,
     "static_board": true
   },
-  "checks": ["root"]
+  "checks": ["root"],
+  "expected_differences": {
+    "root.depth": {"rust": 3, "reference": 4},
+    "root.nodes": {"rust": 1000, "reference": 1913}
+  }
 }

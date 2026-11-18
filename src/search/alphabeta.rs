@@ -315,6 +315,10 @@ impl AlphaBetaSearcher {
             stats.stop = true;
             return (0, None);
         }
+        if !self.vcf.budget.enter() {
+            stats.stop = true;
+            return (0, None);
+        }
         stats.nodes = next_node;
 
         if let Some(score) = terminal_score(board, side, options.ply) {
@@ -439,6 +443,10 @@ impl AlphaBetaSearcher {
             {
                 let mut filtered = Vec::new();
                 for candidate in ordered {
+                    if self.vcf.budget.stopped() {
+                        stats.stop = true;
+                        return (0, None);
+                    }
                     let mut trial = board.clone();
                     trial
                         .play_assuming_rule_legal(candidate.move_, Some(side), self.config.rule_set)
@@ -461,6 +469,10 @@ impl AlphaBetaSearcher {
             }
         }
 
+        if self.config.runtime.nonroot_vcf && self.vcf.budget.stopped() {
+            stats.stop = true;
+            return (0, None);
+        }
         if !win_priority && !single_forcing {
             ordered.truncate(wide);
         }

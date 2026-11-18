@@ -431,15 +431,16 @@ impl GomocupProtocol {
     }
 
     pub fn current_search_limits(&self) -> SearchLimits {
+        let time_budget = match (self.timeout_turn_ms, self.time_left_ms) {
+            (Some(turn), Some(left)) => Some(turn.min(left)),
+            (turn, left) => turn.or(left),
+        };
         if let Some(default_limits) = self.default_limits {
             SearchLimits {
                 max_depth: default_limits.max_depth,
                 root_width: default_limits.root_width,
                 node_limit: self.node_limit.or(default_limits.node_limit),
-                time_limit_ms: self
-                    .timeout_turn_ms
-                    .or(self.time_left_ms)
-                    .or(default_limits.time_limit_ms),
+                time_limit_ms: time_budget.or(default_limits.time_limit_ms),
             }
         } else {
             let has_time_control = self.timeout_turn_ms.is_some() || self.time_left_ms.is_some();
@@ -452,7 +453,7 @@ impl GomocupProtocol {
                 max_depth: defaults.max_depth,
                 root_width: defaults.root_width,
                 node_limit: self.node_limit,
-                time_limit_ms: self.timeout_turn_ms.or(self.time_left_ms),
+                time_limit_ms: time_budget,
             }
         }
     }
