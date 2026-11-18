@@ -150,6 +150,11 @@ impl ThreatLine {
         crate::patterns::line::scan_a4(&self.cells, point_index)
     }
 
+    fn has_a4_with_stone(mut self, point_index: usize, side: Side) -> bool {
+        self.cells[point_index + 2] = i32::from(side);
+        self.a4(point_index) > 0
+    }
+
     fn a6(&self, point_index: usize) -> i32 {
         crate::patterns::line::scan_a6(&self.cells, point_index)
     }
@@ -438,6 +443,63 @@ impl ThreatBoardView {
             }
         }
         candidates
+    }
+
+    pub(crate) fn first_counter_win(
+        &mut self,
+        side: Side,
+        include_open_four: bool,
+    ) -> Option<Move> {
+        if self.board.winner() != EMPTY {
+            return None;
+        }
+        let slot = adjacency_slot(side);
+        // Match threat_moves' order. An immediate counter-win refutes the
+        // attack on its own, so later counter-wins need not be collected.
+        for x in 0..self.board.size() {
+            for y in 0..self.board.size() {
+                if self.board.grid_rows()[y][x] != EMPTY
+                    || self.adjacency[slot][adjacency_index(x, y)] == 0
+                {
+                    continue;
+                }
+                let move_ = xy_to_move(x, y).expect("threat move stays valid");
+                // Renju black exact-five has priority over every forbidden
+                // shape. A rule-aware five is sufficient without a trial move.
+                if self
+                    .board
+                    .is_winning_move_for_rule(x, y, side, self.rule_set)
+                {
+                    return Some(move_);
+                }
+                if include_open_four && self.lays_winning_open_four(x, y, move_, side) {
+                    return Some(move_);
+                }
+            }
+        }
+        None
+    }
+
+    fn lays_winning_open_four(&mut self, x: usize, y: usize, move_: Move, side: Side) -> bool {
+        let (l1, l2, l3, l4, p1, p2, p3, p4) = self.lines_for(x, y);
+        let raw_open_four = l1.has_a4_with_stone(p1, side)
+            || l2.has_a4_with_stone(p2, side)
+            || l3.has_a4_with_stone(p3, side)
+            || l4.has_a4_with_stone(p4, side);
+        if !raw_open_four {
+            return false;
+        }
+        if self.rule_set != RuleSet::Renju || side != BLACK {
+            return true;
+        }
+        if !self.rule_legal_cached(move_, side) {
+            return false;
+        }
+        self.play(move_, side);
+        // The apparent four can have an endpoint that would be an overline.
+        let wins = self.legal_win_completions(x, y, side).len() >= 2;
+        self.undo();
+        wins
     }
 
     pub fn has_a4(&self, x: usize, y: usize) -> bool {
@@ -1143,6 +1205,48 @@ pub fn forcing_threat_moves_for_rule(board: &Board, side: Side, rule: RuleSet) -
 mod tests {
     use super::*;
     use crate::constants::WHITE;
+
+    #[test]
+    fn counter_win_scan_matches_trial_moves_for_both_rules() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../cases/renju/vct_counter_win_scan_ply75.json"
+        ))
+        .unwrap();
+        let moves: Vec<[usize; 2]> = serde_json::from_value(fixture["moves"].clone()).unwrap();
+        for rule in [RuleSet::Freestyle, RuleSet::Renju] {
+            let mut board = Board::new();
+            for [x, y] in moves.iter().copied() {
+                board
+                    .play_for_rule(xy_to_move(x, y).unwrap(), None, rule)
+                    .unwrap();
+                if board.move_count() < 5 {
+                    continue;
+                }
+                let mut view = ThreatBoardView::from_board_with_rule(board.clone(), rule);
+                for side in [BLACK, WHITE] {
+                    let candidates = view.threat_moves(side);
+                    for include_open_four in [false, true] {
+                        let reference = candidates.iter().copied().find(|&candidate| {
+                            view.play(candidate, side);
+                            let (x, y) = move_to_xy(candidate).unwrap();
+                            let wins = view.board.winner() == side
+                                || (include_open_four && view.has_winning_a4(x, y));
+                            view.undo();
+                            wins
+                        });
+                        assert_eq!(
+                            view.first_counter_win(side, include_open_four),
+                            reference,
+                            "{rule:?} side={side} moves={} open_four={include_open_four}",
+                            board.move_count()
+                        );
+                        assert_eq!(view.board.zobrist_key(), board.zobrist_key());
+                        assert_eq!(view.board.grid_rows(), board.grid_rows());
+                    }
+                }
+            }
+        }
+    }
 
     // Equivalence gate for the ThreatLine/Line dedup: the two duplicate copies
     // of a3/a4/a5/a6/b4/b4p must return the same value for the same line at

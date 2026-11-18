@@ -505,7 +505,7 @@ impl VCTSearcher {
         let mut searched_any = false;
         let mut solved = true;
 
-        let counter_wins = self.collect_counter_wins(view, attacker, attack.level);
+        let counter_wins = view.first_counter_win(-attacker, attack.level < ThreatLevel::B4);
         let win_stage =
             self.search_defense_stage(view, attacker, depth, attack.level, counter_wins, &mut seen);
         if let Some(result) = win_stage.refutation {
@@ -627,29 +627,6 @@ impl VCTSearcher {
             solved,
             searched,
         }
-    }
-
-    fn collect_counter_wins(
-        &mut self,
-        view: &mut ThreatBoardView,
-        attacker: Side,
-        attack_level: ThreatLevel,
-    ) -> Vec<Move> {
-        let defender = -attacker;
-        let mut counter_wins = Vec::new();
-
-        for m in view.threat_moves(defender) {
-            view.play(m, defender);
-            let (dx, dy) = crate::board::move_to_xy(m).expect("move stays valid");
-            if view.board.winner() == defender
-                || (attack_level < ThreatLevel::B4 && view.has_winning_a4(dx, dy))
-            {
-                counter_wins.push(m);
-            }
-            view.undo();
-        }
-
-        counter_wins
     }
 
     fn collect_counter_forcing_defenses(
