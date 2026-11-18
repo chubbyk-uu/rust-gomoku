@@ -192,14 +192,16 @@ Common `INFO` commands:
 - `INFO dynamic_board_margin N`
 - `INFO root_profile 0|1`
 
-Current limitation: `timeout_turn` / `time_left` deadlines currently apply to
-the alpha-beta phase only; root VCF/VCT and root preprocessing are outside that
-budget. `max_node` is also reset for each iterative-deepening depth rather than
-being a whole-move budget. This preserves the current classic/reference
-behavior and is suitable for fixed-search use, but is not yet a strict
-tournament time/node-control implementation. A future protocol-budget change
-will give VCF, VCT, and alpha-beta one shared deadline, cancellation signal,
-and cumulative node budget.
+VCF, VCT and alpha-beta share a deadline and cumulative node budget across a move.
+When both time controls are given the smaller limit applies. Cancellation is
+cooperative. Finishing a board operation, selecting a legal fallback and
+protocol setup can add wall time. Under a budget, the reported node count
+includes tactical visits. Without limits it retains the alpha-beta count.
+
+Use `scripts/run_diff.py --profile all --check-baselines` to verify pinned
+Rust and Python values for fractional TT depth and whole-move budget changes.
+The default diff still reports every mismatch. For same-position Renju
+benchmarks pass `--rule renju` to `scripts/bench_match_cases.py`.
 
 ## Diffs and Matches
 

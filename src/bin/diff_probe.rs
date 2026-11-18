@@ -16,7 +16,7 @@ struct DiffCase {
     moves: Vec<[i32; 2]>,
     #[serde(default = "default_first_side")]
     first_side: i8,
-    #[serde(default)]
+    #[serde(default, alias = "rule")]
     rule_set: Option<String>,
     #[serde(default)]
     limits: CaseLimits,

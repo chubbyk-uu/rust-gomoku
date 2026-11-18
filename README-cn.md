@@ -174,11 +174,14 @@ target/release/gomocup_engine --profile fast
 - `INFO dynamic_board_margin N`
 - `INFO root_profile 0|1`
 
-当前限制：`timeout_turn` / `time_left` 的 deadline 目前只约束 alpha-beta
-阶段，root VCF/VCT 和 root 前置处理尚不计入该预算；`max_node` 也会在每个
-迭代加深深度重新计数，并非整手累计预算。这保持了当前 classic/reference
-行为，适用于固定搜索，但尚不是严格的比赛级时间/节点控制。后续会让 VCF、
-VCT 和 alpha-beta 共用 deadline、取消信号及累计节点预算。
+VCF、VCT 与 alpha-beta 在一手棋内共用截止时间和累计节点预算。同时给出
+`timeout_turn` 与 `time_left` 时取较小值。搜索采用协作式中止，完成当前棋盘
+操作、选择合法后备手及协议初始化仍可能产生额外耗时。限额搜索报告的节点数
+包含战术节点，无限额搜索沿用 alpha-beta 节点数。
+
+运行 `scripts/run_diff.py --profile all --check-baselines` 可同时验证 TT 小数
+深度及整手预算修正后 Rust 和 Python 各自的预期值。默认差分仍报告所有不同。
+用 `scripts/bench_match_cases.py` 测 Renju 前缀时可指定 `--rule renju`。
 
 ## 差分和对战
 

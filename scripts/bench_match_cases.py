@@ -138,6 +138,8 @@ def run_one_case(
         root_profile=root_profile,
         extra_args=fast_extra_args,
     )
+    if base["rule_set"] != fast["rule_set"]:
+        raise ValueError(f"different rules for {base['case_name']}")
     base_result = base["result"]
     fast_result = fast["result"]
     base_time = float(base_result["elapsed_ms"])
@@ -149,6 +151,7 @@ def run_one_case(
         "case_name": base["case_name"],
         "tags": base.get("tags", []),
         "prefix_plies": base["prefix_plies"],
+        "rule_set": base["rule_set"],
         "side_to_move": base["side_to_move"],
         "base": base_result,
         "fast": fast_result,
@@ -217,6 +220,7 @@ def parse_args() -> argparse.Namespace:
     root = repo_root()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case-file", type=Path, default=root / "cases" / "match" / "standard.jsonl")
+    parser.add_argument("--rule", choices=("renju", "freestyle"), help="rule for unlabelled prefixes")
     parser.add_argument("--tag", action="append", default=[])
     parser.add_argument("--limit-cases", type=int)
     parser.add_argument("--jobs", type=int, default=1)
@@ -244,6 +248,9 @@ def main() -> int:
     binary = str(Path(args.binary).expanduser())
     base_extra_args = [*shlex.split(args.base_extra_args), *args.base_extra_arg]
     fast_extra_args = [*shlex.split(args.fast_extra_args), *args.fast_extra_arg]
+    if args.rule:
+        base_extra_args.extend(["--rule", args.rule])
+        fast_extra_args.extend(["--rule", args.rule])
     started = time.perf_counter()
     results: list[dict[str, Any]] = []
     jobs = max(1, args.jobs)

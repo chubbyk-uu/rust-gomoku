@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import re
-import select
 import shlex
 import shutil
 import subprocess
@@ -17,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
 from typing import Any
+
+from gomocup_response import ResponseReader
 
 BOARD_SIZE = 15
 BLACK = 1
@@ -158,6 +159,7 @@ class GomocupEngine:
         info: list[tuple[str, str]],
         restart_each_move: bool,
     ) -> None:
+        self.move_deadline: float | None = None
         self.name = name
         self.command = command
         self.cwd = cwd
@@ -171,6 +173,7 @@ class GomocupEngine:
         argv = shlex.split(self.command)
         if not argv:
             raise RuntimeError(f"{self.name}: empty command")
+        self.reader = ResponseReader()
         self.proc = subprocess.Popen(
             argv,
             cwd=self.cwd,
@@ -204,27 +207,25 @@ class GomocupEngine:
         self.start()
         assert self.proc is not None and self.proc.stdout is not None
         messages: list[dict[str, Any]] = []
-        saw_output = False
-        while True:
-            if not saw_output and timeout_sec is not None and timeout_sec > 0:
-                readable, _, _ = select.select([self.proc.stdout], [], [], timeout_sec)
-                if not readable:
-                    self.kill()
-                    raise TimeoutError(f"{self.name}: no response within {timeout_sec:.1f}s")
-            line = self.proc.stdout.readline()
-            if not line:
-                stderr = ""
-                if self.proc.stderr is not None:
-                    stderr = self.proc.stderr.read()
-                raise RuntimeError(f"{self.name}: process exited: {stderr.strip()}")
-            saw_output = True
-            text = line.strip()
-            if not text:
-                continue
-            if text.upper().startswith("MESSAGE"):
-                messages.append(parse_engine_message(text))
-                continue
-            return text, messages
+        deadline = self.move_deadline
+        if timeout_sec is not None and timeout_sec > 0:
+            requested = time.monotonic() + timeout_sec
+            deadline = requested if deadline is None else min(requested, deadline)
+        try:
+            for text in self.reader.lines(self.proc.stdout, deadline):
+                if not text:
+                    continue
+                if text.upper().startswith("MESSAGE"):
+                    messages.append(parse_engine_message(text))
+                    continue
+                return text, messages
+        except TimeoutError as exc:
+            self.kill()
+            raise TimeoutError(f"{self.name}: {exc}") from exc
+        detail = ""
+        if self.proc.poll() is not None and self.proc.stderr is not None:
+            detail = self.proc.stderr.read().strip()
+        raise RuntimeError(f"{self.name}: engine closed its output. {detail}".rstrip())
 
     def read(self, timeout_sec: float | None = None) -> str:
         response, _messages = self.read_with_messages(timeout_sec)
@@ -243,6 +244,7 @@ class GomocupEngine:
         side_to_move: int,
         move_timeout_sec: float,
     ) -> tuple[tuple[int, int], float, list[dict[str, Any]]]:
+        self.move_deadline = time.monotonic() + move_timeout_sec if move_timeout_sec > 0 else None
         if self.restart_each_move:
             self.restart()
         else:
@@ -256,6 +258,7 @@ class GomocupEngine:
         response, messages = self.read_with_messages(
             None if move_timeout_sec <= 0 else move_timeout_sec
         )
+        self.move_deadline = None
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         if "," not in response:
             raise RuntimeError(f"{self.name}: unexpected move response: {response}")
@@ -266,6 +269,7 @@ class GomocupEngine:
         proc = self.proc
         if proc is not None and proc.poll() is None:
             proc.kill()
+            proc.wait()
         self.proc = None
 
     def close(self) -> None:
@@ -531,17 +535,25 @@ def run_match_task(
 
         while len(moves) < max_moves:
             engine_name = side_to_engine[side]
-            if game_timeout_sec > 0 and time.perf_counter() - game_started > game_timeout_sec:
+            remaining_game = game_timeout_sec - (time.perf_counter() - game_started)
+            if game_timeout_sec > 0 and remaining_game <= 0:
                 error = f"game timeout after {game_timeout_sec:.1f}s"
                 winner_engine = "timeout"
                 break
+            game_limits_move = game_timeout_sec > 0 and (
+                move_timeout_sec <= 0 or remaining_game < move_timeout_sec
+            )
             try:
                 (mx, my), elapsed_ms, messages = engines[engine_name].move(
                     moves,
                     side,
-                    move_timeout_sec,
+                    remaining_game if game_limits_move else move_timeout_sec,
                 )
             except TimeoutError as exc:
+                if game_limits_move:
+                    winner_engine = "timeout"
+                    error = f"game timeout after {game_timeout_sec:.1f}s"
+                    break
                 error = str(exc)
                 winner_engine = side_to_engine[opposite(side)]
                 winner_side = opposite(side)

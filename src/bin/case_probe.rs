@@ -14,6 +14,8 @@ use rust_gomoku::{
 
 #[derive(Debug, Deserialize)]
 struct MatchCase {
+    #[serde(alias = "rule")]
+    rule_set: Option<String>,
     name: Option<String>,
     moves: Vec<CaseMove>,
     side_to_move: Option<CaseSide>,
@@ -58,6 +60,7 @@ impl CaseSide {
 
 #[derive(Debug)]
 struct ProbeArgs {
+    rule: Option<rust_gomoku::RuleSet>,
     case_path: Option<PathBuf>,
     case_json: Option<String>,
     profile: EngineProfile,
@@ -71,6 +74,7 @@ struct ProbeArgs {
 
 #[derive(Serialize)]
 struct ProbeOutput {
+    rule_set: String,
     case_name: String,
     tags: Vec<String>,
     prefix_plies: usize,
@@ -268,6 +272,7 @@ fn main() {
 
 fn parse_args() -> Result<ProbeArgs, String> {
     let mut args = std::env::args().skip(1);
+    let mut rule = None;
     let mut case_path = None;
     let mut case_json = None;
     let mut profile = EngineProfile::Base;
@@ -279,6 +284,13 @@ fn parse_args() -> Result<ProbeArgs, String> {
     let mut fast_history_ordering = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--rule" => {
+                rule = Some(
+                    args.next()
+                        .ok_or("--rule requires freestyle or renju")?
+                        .parse()?,
+                );
+            }
             "--case" => {
                 case_path = Some(PathBuf::from(
                     args.next()
@@ -353,6 +365,7 @@ fn parse_args() -> Result<ProbeArgs, String> {
         return Err("provide exactly one of --case or --case-json".to_string());
     }
     Ok(ProbeArgs {
+        rule,
         case_path,
         case_json,
         profile,
@@ -400,6 +413,15 @@ fn move_xy(move_: &CaseMove) -> (i32, i32, Option<CaseSide>) {
 }
 
 fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
+    let case_rule = case.rule_set.as_deref().map(str::parse).transpose()?;
+    if let (Some(declared), Some(requested)) = (case_rule, args.rule) {
+        if declared != requested {
+            return Err("case rule conflicts with --rule".into());
+        }
+    }
+    let rule = case_rule
+        .or(args.rule)
+        .unwrap_or(rust_gomoku::RuleSet::Freestyle);
     let mut board = Board::new();
     for (index, move_) in case.moves.iter().enumerate() {
         let (x, y, side) = move_xy(move_);
@@ -413,7 +435,7 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
         let move_ = xy_to_move(x as usize, y as usize)
             .map_err(|_| format!("move {} is out of bounds: [{x},{y}]", index + 1))?;
         board
-            .play(move_, Some(expected_side))
+            .play_for_rule(move_, Some(expected_side), rule)
             .map_err(|err| format!("move {} is illegal: {err:?}", index + 1))?;
     }
     let expected_side = side_for_index(case.moves.len());
@@ -429,6 +451,7 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
     }
 
     let mut config = load_config_for_profile(args.profile);
+    config.rule_set = rule;
     config.runtime.root_profile = args.root_profile;
     if let Some(vct_strict_and_memo_key) = args.vct_strict_and_memo_key {
         config.runtime.vct_strict_and_memo_key = vct_strict_and_memo_key;
@@ -460,6 +483,7 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
     let trace = searcher.last_trace.clone().unwrap_or_default();
 
     Ok(ProbeOutput {
+        rule_set: rule.as_str().to_owned(),
         case_name: case.name.unwrap_or_else(|| "unnamed".to_string()),
         tags: case.tags,
         prefix_plies: board.move_count(),
