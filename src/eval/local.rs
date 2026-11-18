@@ -5,7 +5,7 @@ use crate::config::EngineConfig;
 use crate::constants::{BLACK, BOARD_AREA, BOARD_SIZE, DSHAPE_SIZE, EMPTY, WHITE};
 use crate::eval::caches::EvalCaches;
 use crate::patterns::buckets::bucket_for_lines;
-use crate::patterns::line::shape_raw_from_board_point_hypothetical;
+use crate::patterns::line::{shape_raw_from_board_point_hypothetical, PackedLine};
 use crate::patterns::shapes::{ShapeLabel, DIAGONAL_DOWN, DIAGONAL_UP, HORIZONTAL, VERTICAL};
 use crate::rules::{classify_forbidden_move, RuleSet};
 use crate::types::Move;
@@ -270,7 +270,6 @@ pub fn value_wide_compute_for_rule(
     changed: (usize, usize),
     rule: RuleSet,
 ) {
-    let size = board.size();
     if !caches.initialized || caches.rule_set != rule {
         recompute_all_for_rule(board, caches, rule);
         return;
@@ -286,20 +285,38 @@ pub fn value_wide_compute_for_rule(
     let mut dirty = [0 as Move; BOARD_SIZE * BOARD_SIZE];
     let mut dirty_len = 0_usize;
 
-    {
-        let grid = board.grid_rows();
-        mark_dirty_cell(&mut comp, &mut dirty, &mut dirty_len, cx, cy, 15);
-        let radius = if rule == RuleSet::Renju { 5 } else { 4 };
-        mark_cell_neighbors(
-            &mut comp,
-            &mut dirty,
-            &mut dirty_len,
-            grid,
-            cx,
-            cy,
-            size,
-            radius,
-        );
+    let grid = board.grid_rows();
+    let horizontal = PackedLine::through(grid, cx, cy, 0, 1);
+    let vertical = PackedLine::through(grid, cx, cy, 1, 0);
+    let diagonal_down = PackedLine::through(grid, cx, cy, -1, 1);
+    let diagonal_up = PackedLine::through(grid, cx, cy, -1, -1);
+    let renju = rule == RuleSet::Renju;
+    let radius = if renju { 5 } else { 4 };
+    mark_dirty_cell(&mut comp, &mut dirty, &mut dirty_len, cx, cy, 15);
+    let (up_forward, up_backward) = diagonal_up.neighbor_counts(BOARD_SIZE - 1 - cy, radius);
+    for (dx, dy, flag, (forward, backward)) in [
+        (
+            0,
+            1,
+            horizontal_flag,
+            horizontal.neighbor_counts(cy, radius),
+        ),
+        (1, 0, vertical_flag, vertical.neighbor_counts(cx, radius)),
+        (
+            -1,
+            1,
+            diag_down_flag,
+            diagonal_down.neighbor_counts(cy, radius),
+        ),
+        (1, 1, diag_up_flag, (up_backward, up_forward)),
+    ] {
+        for (dx, dy, count) in [(dx, dy, forward), (-dx, -dy, backward)] {
+            for step in 1..=count as isize {
+                let x = (cx as isize + step * dx) as usize;
+                let y = (cy as isize + step * dy) as usize;
+                mark_dirty_cell(&mut comp, &mut dirty, &mut dirty_len, x, y, flag);
+            }
+        }
     }
 
     let old_cell = caches.board_shadow[cx][cy];
@@ -318,25 +335,49 @@ pub fn value_wide_compute_for_rule(
             if flags & horizontal_flag != 0 {
                 merge_changed_player(
                     &mut changed_player,
-                    update_direction_cache(board, caches, x, y, HORIZONTAL, rule),
+                    update_direction_cache(
+                        caches,
+                        x,
+                        y,
+                        HORIZONTAL,
+                        horizontal.hypothetical_shapes(y, renju),
+                    ),
                 );
             }
             if flags & vertical_flag != 0 {
                 merge_changed_player(
                     &mut changed_player,
-                    update_direction_cache(board, caches, x, y, VERTICAL, rule),
+                    update_direction_cache(
+                        caches,
+                        x,
+                        y,
+                        VERTICAL,
+                        vertical.hypothetical_shapes(x, renju),
+                    ),
                 );
             }
             if flags & diag_down_flag != 0 {
                 merge_changed_player(
                     &mut changed_player,
-                    update_direction_cache(board, caches, x, y, DIAGONAL_DOWN, rule),
+                    update_direction_cache(
+                        caches,
+                        x,
+                        y,
+                        DIAGONAL_DOWN,
+                        diagonal_down.hypothetical_shapes(y, renju),
+                    ),
                 );
             }
             if flags & diag_up_flag != 0 {
                 merge_changed_player(
                     &mut changed_player,
-                    update_direction_cache(board, caches, x, y, DIAGONAL_UP, rule),
+                    update_direction_cache(
+                        caches,
+                        x,
+                        y,
+                        DIAGONAL_UP,
+                        diagonal_up.hypothetical_shapes(BOARD_SIZE - 1 - y, renju),
+                    ),
                 );
             }
             for (player, changed) in changed_player.into_iter().enumerate() {
@@ -374,128 +415,6 @@ fn mark_dirty_cell(
         *dirty_len += 1;
     }
     comp[x][y] |= flags;
-}
-
-fn mark_cell_neighbors(
-    comp: &mut [[u8; BOARD_SIZE]; BOARD_SIZE],
-    dirty: &mut [Move; BOARD_SIZE * BOARD_SIZE],
-    dirty_len: &mut usize,
-    grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
-    x: usize,
-    y: usize,
-    size: usize,
-    radius: isize,
-) {
-    const H: u8 = 1;
-    const V: u8 = 2;
-    const DD: u8 = 4;
-    const DU: u8 = 8;
-
-    let fixed = x;
-    let mut seen = 0_i8;
-    for yy in (y + 1)..usize::min(size, y + radius as usize + 1) {
-        let value = grid[yy][fixed];
-        if seen == 0 {
-            seen = value;
-        } else if value != EMPTY && value != seen {
-            break;
-        }
-        mark_dirty_cell(comp, dirty, dirty_len, fixed, yy, H);
-    }
-    seen = 0;
-    for yy in (0..y).rev().take(radius as usize) {
-        let value = grid[yy][fixed];
-        if seen == 0 {
-            seen = value;
-        } else if value != EMPTY && value != seen {
-            break;
-        }
-        mark_dirty_cell(comp, dirty, dirty_len, fixed, yy, H);
-    }
-
-    let fixed = y;
-    seen = 0;
-    for xx in (x + 1)..usize::min(size, x + radius as usize + 1) {
-        let value = grid[fixed][xx];
-        if seen == 0 {
-            seen = value;
-        } else if value != EMPTY && value != seen {
-            break;
-        }
-        mark_dirty_cell(comp, dirty, dirty_len, xx, fixed, V);
-    }
-    seen = 0;
-    for xx in (0..x).rev().take(radius as usize) {
-        let value = grid[fixed][xx];
-        if seen == 0 {
-            seen = value;
-        } else if value != EMPTY && value != seen {
-            break;
-        }
-        mark_dirty_cell(comp, dirty, dirty_len, xx, fixed, V);
-    }
-
-    let mut seen = 0_i8;
-    let mut xx = x as isize - 1;
-    let mut yy = y as isize + 1;
-    while xx >= 0 && yy < size as isize && xx >= x as isize - radius && yy <= y as isize + radius {
-        let value = grid[yy as usize][xx as usize];
-        if seen == 0 {
-            seen = value;
-        } else if value != EMPTY && value != seen {
-            break;
-        }
-        mark_dirty_cell(comp, dirty, dirty_len, xx as usize, yy as usize, DD);
-        xx -= 1;
-        yy += 1;
-    }
-    seen = 0;
-    xx = x as isize + 1;
-    yy = y as isize - 1;
-    while xx < size as isize && yy >= 0 && xx <= x as isize + radius && yy >= y as isize - radius {
-        let value = grid[yy as usize][xx as usize];
-        if seen == 0 {
-            seen = value;
-        } else if value != EMPTY && value != seen {
-            break;
-        }
-        mark_dirty_cell(comp, dirty, dirty_len, xx as usize, yy as usize, DD);
-        xx += 1;
-        yy -= 1;
-    }
-
-    seen = 0;
-    xx = x as isize + 1;
-    yy = y as isize + 1;
-    while xx < size as isize
-        && yy < size as isize
-        && xx <= x as isize + radius
-        && yy <= y as isize + radius
-    {
-        let value = grid[yy as usize][xx as usize];
-        if seen == 0 {
-            seen = value;
-        } else if value != EMPTY && value != seen {
-            break;
-        }
-        mark_dirty_cell(comp, dirty, dirty_len, xx as usize, yy as usize, DU);
-        xx += 1;
-        yy += 1;
-    }
-    seen = 0;
-    xx = x as isize - 1;
-    yy = y as isize - 1;
-    while xx >= 0 && yy >= 0 && xx >= x as isize - radius && yy >= y as isize - radius {
-        let value = grid[yy as usize][xx as usize];
-        if seen == 0 {
-            seen = value;
-        } else if value != EMPTY && value != seen {
-            break;
-        }
-        mark_dirty_cell(comp, dirty, dirty_len, xx as usize, yy as usize, DU);
-        xx -= 1;
-        yy -= 1;
-    }
 }
 
 pub fn move_value(caches: &EvalCaches, x: usize, y: usize, side: i8, config: &EngineConfig) -> f64 {
@@ -634,16 +553,14 @@ fn merge_changed_player(accumulator: &mut [bool; 2], changed: [bool; 2]) {
 }
 
 fn update_direction_cache(
-    board: &Board,
     caches: &mut EvalCaches,
     x: usize,
     y: usize,
     direction: i32,
-    rule: RuleSet,
+    shapes: [i32; 2],
 ) -> [bool; 2] {
     let mut changed = [false; 2];
-    for (side, player) in [(BLACK, 0_usize), (WHITE, 1_usize)] {
-        let new_shape = compute_direction_shape_for_rule(board, x, y, direction, side, rule);
+    for (player, new_shape) in shapes.into_iter().enumerate() {
         let direction_index = direction as usize;
         let old = caches.shape_cache[player][x][y][direction_index];
         if old != new_shape {

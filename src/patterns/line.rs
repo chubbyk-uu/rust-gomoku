@@ -263,30 +263,114 @@ fn shape_raw_from_hypothetical_offsets(
     let (blocker_fwd, own_fwd) = directional_masks(grid, x, y, dx, dy, stone);
     let (blocker_bwd, own_bwd) = directional_masks(grid, x, y, -dx, -dy, stone);
 
-    let sj = if blocker_fwd == 0 {
-        5
-    } else {
-        blocker_fwd.trailing_zeros() as i32
-    };
-    let si = if blocker_bwd == 0 {
-        5
-    } else {
-        blocker_bwd.trailing_zeros() as i32
-    };
+    let row = usize::from(side == BLACK && !freestyle);
+    shape_raw_from_masks(blocker_fwd, own_fwd, blocker_bwd, own_bwd, row)
+}
 
+#[inline(always)]
+fn shape_raw_from_masks(
+    blocker_fwd: u32,
+    own_fwd: u32,
+    blocker_bwd: u32,
+    own_bwd: u32,
+    row: usize,
+) -> i32 {
+    let sj = blocker_fwd.trailing_zeros().min(5);
+    let si = blocker_bwd.trailing_zeros().min(5);
     let fwd_ssp = REVERSE5[(own_fwd & ((1_u32 << sj) - 1)) as usize];
     let bwd_ssp = ((own_bwd & ((1_u32 << si) - 1)) as i32) << 5;
     let mut ssp = fwd_ssp | bwd_ssp;
     ssp >>= 5 - sj;
 
     let table_index = (1 << si) * ((1 << sj) + 62) - 63 + ssp;
-    let row = if stone == i32::from(BLACK) && !freestyle {
-        1
-    } else {
-        0
-    };
-    let trt = shape_table_lookup(row as usize, table_index as usize);
+    let trt = shape_table_lookup(row, table_index as usize);
     ((trt & 0xF0) << 12) | (trt & 0xF)
+}
+
+/// Masks for one of the four lines intersecting a changed cell. Five padding
+/// bits on each end let a shift extract any cell's complete radius-five window.
+pub(crate) struct PackedLine {
+    stones: [u32; 2],
+    on_board: u32,
+}
+
+impl PackedLine {
+    #[inline(always)]
+    pub(crate) fn through(
+        grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
+        x: usize,
+        y: usize,
+        dx: isize,
+        dy: isize,
+    ) -> Self {
+        // Line indices agree with the engine's directional pattern coordinates.
+        let anchor = match dy {
+            1 => y,
+            -1 => BOARD_SIZE - 1 - y,
+            _ => x,
+        } as isize;
+        let origin_x = x as isize - anchor * dx;
+        let origin_y = y as isize - anchor * dy;
+        let mut line = Self {
+            stones: [0; 2],
+            on_board: 0,
+        };
+        for i in 0..BOARD_SIZE {
+            let xx = (origin_x + i as isize * dx) as usize;
+            let yy = (origin_y + i as isize * dy) as usize;
+            if xx < BOARD_SIZE && yy < BOARD_SIZE {
+                let bit = 1_u32 << (i + 5);
+                let cell = grid[yy][xx];
+                line.stones[0] |= u32::from(cell == BLACK) << (i + 5);
+                line.stones[1] |= u32::from(cell == WHITE) << (i + 5);
+                line.on_board |= bit;
+            }
+        }
+        line
+    }
+
+    #[inline(always)]
+    pub(crate) fn neighbor_counts(&self, index: usize, radius: u32) -> (u32, u32) {
+        // The second color encountered stops the original dirty-point scan.
+        // Off-board bits stop it at the edge, independently of stone colors.
+        let forward = |mask: u32| (mask >> (index + 6)).trailing_zeros();
+        let backward = |mask: u32| ((mask >> index) & 31).leading_zeros() - 27;
+        let forward_count = forward(self.stones[0])
+            .max(forward(self.stones[1]))
+            .min(forward(!self.on_board))
+            .min(radius);
+        let backward_count = backward(self.stones[0])
+            .max(backward(self.stones[1]))
+            .min(backward(!self.on_board))
+            .min(radius);
+        (forward_count, backward_count)
+    }
+
+    #[inline(always)]
+    pub(crate) fn hypothetical_shapes(&self, index: usize, renju: bool) -> [i32; 2] {
+        let black_forward = self.stones[0] >> (index + 6) & 31;
+        let white_forward = self.stones[1] >> (index + 6) & 31;
+        let edge_forward = !self.on_board >> (index + 6) & 31;
+        let black_backward = REVERSE5[(self.stones[0] >> index & 31) as usize] as u32;
+        let white_backward = REVERSE5[(self.stones[1] >> index & 31) as usize] as u32;
+        let edge_backward = REVERSE5[(!self.on_board >> index & 31) as usize] as u32;
+        [
+            shape_raw_from_masks(
+                white_forward | edge_forward,
+                black_forward,
+                white_backward | edge_backward,
+                black_backward,
+                usize::from(renju),
+            ),
+            shape_raw_from_masks(
+                black_forward | edge_forward,
+                white_forward,
+                black_backward | edge_backward,
+                white_backward,
+                0,
+            ),
+        ]
+    }
 }
 
 #[cfg(test)]
@@ -605,6 +689,16 @@ mod tests {
                                     DIAGONAL_UP => (BOARD_SIZE - 1 - y + x, BOARD_SIZE - 1 - y),
                                     _ => unreachable!(),
                                 };
+                                let (dx, dy) = match direction {
+                                    HORIZONTAL => (0, 1),
+                                    VERTICAL => (1, 0),
+                                    DIAGONAL_DOWN => (-1, 1),
+                                    DIAGONAL_UP => (-1, -1),
+                                    _ => unreachable!(),
+                                };
+                                let line = PackedLine::through(board.grid_rows(), x, y, dx, dy);
+                                let shapes = line.hypothetical_shapes(point_index, !freestyle);
+                                assert_eq!(shapes[usize::from(side == WHITE)], hypothetical);
                                 board.grid_rows_mut()[y][x] = side;
                                 let full = shape_raw_from_board_python(
                                     &board,
