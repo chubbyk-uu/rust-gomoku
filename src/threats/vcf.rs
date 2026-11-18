@@ -163,7 +163,7 @@ impl VCFSearcher {
 
         let (opponent_b4, opponent_ambiguous) = view.broken_four_point_for_side(-side);
         if let Some(opponent_b4) = opponent_b4 {
-            if !opponent_ambiguous {
+            if !opponent_ambiguous && view.is_rule_legal(opponent_b4, side) {
                 view.play(opponent_b4, side);
                 let (tx, ty) = crate::board::move_to_xy(opponent_b4).expect("move stays valid");
                 if view.board.winner() == side || view.has_winning_a4(tx, ty) {

@@ -469,3 +469,39 @@ fn vcf_search_with_multi_reply_restores_previous_mode() {
     assert!(result.found);
     assert!(!searcher.multi_reply);
 }
+
+#[test]
+fn renju_vcf_defends_the_exact_five_end_of_a_black_four() {
+    let case: serde_json::Value = serde_json::from_str(include_str!(
+        "../cases/renju/vcf_overline_counter_four.json"
+    ))
+    .unwrap();
+    let moves: Vec<[usize; 2]> = serde_json::from_value(case["moves"].clone()).unwrap();
+    let mut board = Board::new();
+    for [x, y] in moves {
+        board
+            .play_for_rule(xy_to_move(x, y).unwrap(), None, RuleSet::Renju)
+            .unwrap();
+    }
+    let losing = xy_to_move(7, 7).unwrap();
+    let mut view = ThreatBoardView::from_board_with_rule(board.clone(), RuleSet::Renju);
+    view.play(losing, 1);
+    assert_eq!(
+        view.broken_four_legal_replies_for_side(7, 7, -1).as_slice(),
+        &[xy_to_move(9, 7).unwrap()]
+    );
+    for multi in [false, true] {
+        let result = VCFSearcher::default().search_with_multi_reply_for_rule(
+            &board,
+            1,
+            8,
+            multi,
+            RuleSet::Renju,
+        );
+        assert_ne!(result.move_, Some(losing));
+    }
+    let mut config = rust_gomoku::load_default_config();
+    config.rule_set = RuleSet::Renju;
+    let result = rust_gomoku::RootSearcher::new(config).search(&mut board, None);
+    assert_ne!(result.move_, losing);
+}

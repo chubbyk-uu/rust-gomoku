@@ -578,6 +578,20 @@ impl ThreatBoardView {
         let counts = [l1.b4p(p1), l2.b4p(p2), l3.b4p(p3), l4.b4p(p4)];
         let mut replies = BrokenFourReplies::new();
 
+        // For a black Renju four the pattern encoding can point at an overline
+        // end and omit the only exact-five end. Reconstruct its actual wins.
+        if self.rule_set == RuleSet::Renju
+            && self.board.grid_rows()[y][x] == BLACK
+            && counts.iter().any(|&encoded| encoded != 0)
+        {
+            for completion in self.legal_win_completions(x, y, BLACK) {
+                if self.is_rule_legal(completion, side) {
+                    replies.push_unique(completion);
+                }
+            }
+            return replies;
+        }
+
         for (index, encoded) in counts.iter().enumerate() {
             if *encoded >= (1 << 16) {
                 push_legal_line_replies(
@@ -942,7 +956,7 @@ impl ThreatBoardView {
     /// Empty points where `side` could play next to win immediately under the
     /// active rule (exact five for black in Renju, five-or-more otherwise),
     /// restricted to the lines passing through the just-played stone `(x, y)`.
-    fn legal_win_completions(&mut self, x: usize, y: usize, side: Side) -> Vec<Move> {
+    fn legal_win_completions(&self, x: usize, y: usize, side: Side) -> Vec<Move> {
         const AXES: [(isize, isize); 4] = [(1, 0), (0, 1), (1, 1), (1, -1)];
         let size = self.board.size() as isize;
         let mut wins = Vec::new();
