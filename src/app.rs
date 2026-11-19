@@ -503,10 +503,12 @@ impl GameController {
                         self.last_trace = completion.trace;
                         self.last_search_ms =
                             Some((completion.elapsed_ms * 1000.0).round() / 1000.0);
-                        self.status = if self.board.winner() == EMPTY {
-                            "引擎已落子，轮到你。".to_string()
-                        } else {
+                        self.status = if self.board.winner() != EMPTY {
                             "引擎获胜。".to_string()
+                        } else if self.board.is_draw() {
+                            "和棋。".to_string()
+                        } else {
+                            "引擎已落子，轮到你。".to_string()
                         };
                     }
                     Err(err) => {
@@ -933,6 +935,27 @@ mod tests {
         let snapshot = controller.snapshot();
         assert_eq!(snapshot.winner, BLACK);
         assert_eq!(snapshot.status, "黑方胜。");
+        assert!(!snapshot.can_play);
+    }
+
+    #[test]
+    fn engine_move_that_fills_board_reports_draw_status() {
+        let mut controller = shallow_controller();
+        assert!(controller.new_game(WHITE, RuleSet::Freestyle, GameMode::VsEngine));
+        let (black, white): (Vec<u16>, Vec<u16>) =
+            (0..225).partition(|m| ((m % 15 + 2 * (m / 15)) % 4) < 2);
+        for i in 0..224 {
+            let stones = if i % 2 == 0 { &black } else { &white };
+            controller.board.play(stones[i / 2], None).unwrap();
+        }
+        assert_eq!(controller.board.side_to_move(), BLACK);
+        let completion = controller.prepare_engine_search().unwrap().run();
+        assert!(controller.commit_engine_search(completion));
+
+        let snapshot = controller.snapshot();
+        assert!(snapshot.draw);
+        assert_eq!(snapshot.winner, EMPTY);
+        assert_eq!(snapshot.status, "和棋。");
         assert!(!snapshot.can_play);
     }
 }

@@ -305,35 +305,117 @@ pub fn evaluate_next43_branch(
             ];
 
             board.grid_rows_mut()[y][x] = -side;
-            let mut encoded = 0_i32;
-            let mut direction = 0_usize;
+            let mut reply = None;
             for (pivot, direction_value, point_index, direction_id) in line_specs {
-                encoded = Line::from_board(board, pivot, direction_value)
+                let encoded = Line::from_board(board, pivot, direction_value)
                     .expect("direction id is valid")
                     .b4p(point_index);
-                if encoded > 0 {
-                    direction = direction_id;
+                if encoded <= 0 {
+                    continue;
+                }
+                let raw_replies = [ga(encoded), gb(encoded)];
+                let reply_count = if encoded >= (1 << 16) { 2 } else { 1 };
+                for &raw in &raw_replies[..reply_count] {
+                    let Some((rx, ry)) = decode_b4_reply_raw(size, x, y, direction_id, raw) else {
+                        continue;
+                    };
+                    if rx >= size || ry >= size || board.grid_rows()[ry][rx] != 0 {
+                        continue;
+                    }
+                    if config.rule_set == RuleSet::Renju
+                        && -side == BLACK
+                        && !board.is_winning_move_for_rule(rx, ry, BLACK, RuleSet::Renju)
+                    {
+                        continue;
+                    }
+                    reply = Some((rx, ry));
+                    break;
+                }
+                if reply.is_some() {
                     break;
                 }
             }
-            if direction == 0 {
-                board.grid_rows_mut()[y][x] = 0;
-                continue;
-            }
-            let Some((rx, ry)) = decode_b4_reply(size, x, y, direction, encoded) else {
+            let Some((rx, ry)) = reply else {
                 board.grid_rows_mut()[y][x] = 0;
                 continue;
             };
-            if rx >= size || ry >= size || board.grid_rows()[ry][rx] != 0 {
-                board.grid_rows_mut()[y][x] = 0;
-                continue;
+            if config.rule_set == RuleSet::Renju && side == BLACK {
+                let block = (ry * BOARD_SIZE + rx) as Move;
+                if classify_forbidden_move(board, block, BLACK, RuleSet::Renju)
+                    .is_ok_and(|kind| kind.is_forbidden())
+                {
+                    board.grid_rows_mut()[y][x] = 0;
+                    return true;
+                }
             }
             board.grid_rows_mut()[ry][rx] = side;
-            let has_followup = has_b4p_after_move(board, rx, ry);
+            let has_followup = has_b4p_after_move_for_rule(board, rx, ry, side, config.rule_set);
             board.grid_rows_mut()[ry][rx] = 0;
             board.grid_rows_mut()[y][x] = 0;
             if !has_followup {
                 return true;
+            }
+        }
+    }
+    false
+}
+
+fn has_b4p_after_move_for_rule(board: &Board, x: usize, y: usize, side: i8, rule: RuleSet) -> bool {
+    if !has_b4p_after_move(board, x, y) {
+        return false;
+    }
+    if rule != RuleSet::Renju || side != BLACK {
+        return true;
+    }
+    has_renju_black_four_through(board, x, y)
+}
+
+fn has_renju_black_four_through(board: &Board, x: usize, y: usize) -> bool {
+    const AXES: [(isize, isize); 4] = [(1, 0), (0, 1), (1, 1), (1, -1)];
+    let size = board.size() as isize;
+    let grid = board.grid_rows();
+    for (dx, dy) in AXES {
+        for step in -4_isize..=4 {
+            if step == 0 {
+                continue;
+            }
+            let cx = x as isize + dx * step;
+            let cy = y as isize + dy * step;
+            if cx < 0 || cy < 0 || cx >= size || cy >= size {
+                continue;
+            }
+            if grid[cy as usize][cx as usize] != EMPTY {
+                continue;
+            }
+            let mut neg = 0_isize;
+            loop {
+                let nx = cx - dx * (neg + 1);
+                let ny = cy - dy * (neg + 1);
+                if nx < 0 || ny < 0 || nx >= size || ny >= size {
+                    break;
+                }
+                if grid[ny as usize][nx as usize] != BLACK {
+                    break;
+                }
+                neg += 1;
+            }
+            let mut pos = 0_isize;
+            loop {
+                let nx = cx + dx * (pos + 1);
+                let ny = cy + dy * (pos + 1);
+                if nx < 0 || ny < 0 || nx >= size || ny >= size {
+                    break;
+                }
+                if grid[ny as usize][nx as usize] != BLACK {
+                    break;
+                }
+                pos += 1;
+            }
+            if neg + 1 + pos == 5 {
+                let anchor_offset = -step;
+                if anchor_offset >= -neg && anchor_offset <= pos {
+                    return true;
+                }
             }
         }
     }
@@ -359,25 +441,35 @@ fn has_b4p_after_move(board: &Board, x: usize, y: usize) -> bool {
             > 0
 }
 
-fn decode_b4_reply(
+fn decode_b4_reply_raw(
     board_size: usize,
     x: usize,
     y: usize,
     direction_index: usize,
-    encoded: i32,
+    raw: i32,
 ) -> Option<(usize, usize)> {
-    let r1 = ga(encoded) as usize;
+    let r1 = usize::try_from(raw).ok()?;
     match direction_index {
         1 => Some((x, r1)),
         2 => Some((r1, y)),
-        3 => Some((x + y - r1, r1)),
-        4 => Some((board_size - 1 + x - y - r1, board_size - 1 - r1)),
+        3 => Some((x.checked_add(y)?.checked_sub(r1)?, r1)),
+        4 => {
+            let rx = (board_size.checked_sub(1)? + x)
+                .checked_sub(y)?
+                .checked_sub(r1)?;
+            let ry = board_size.checked_sub(1)?.checked_sub(r1)?;
+            Some((rx, ry))
+        }
         _ => None,
     }
 }
 
 fn ga(value: i32) -> i32 {
     value & 0xFF
+}
+
+fn gb(value: i32) -> i32 {
+    (value >> 8) & 0xFF
 }
 
 #[cfg(test)]
@@ -503,6 +595,115 @@ mod tests {
         assert!(
             freestyle_score < f64::from(WIN),
             "freestyle white must not win outright, got {freestyle_score}"
+        );
+    }
+
+    #[test]
+    fn renju_next43_wins_when_black_block_is_forbidden() {
+        // White to move next (side = BLACK) has a 4-3 at (6, 7):
+        //   row 7: B(2,7), W(3,7), W(4,7), W(5,7) -> W(6,7) forces block at (7,7)
+        //   col 6: W(6,5), W(6,6) -> W(6,7) forms an open three.
+        // Black's only block (7, 7) creates a double-four (col 7 + main diag),
+        // which is a legal counter-four in freestyle but forbidden in Renju.
+        let stones = [
+            (2, 7, BLACK),
+            (3, 7, WHITE),
+            (4, 7, WHITE),
+            (5, 7, WHITE),
+            (6, 5, WHITE),
+            (6, 6, WHITE),
+            (7, 4, BLACK),
+            (7, 5, BLACK),
+            (7, 6, BLACK),
+            (8, 8, BLACK),
+            (9, 9, BLACK),
+            (10, 10, BLACK),
+        ];
+
+        let mut renju = load_default_config();
+        renju.rule_set = RuleSet::Renju;
+        let mut board_r = Board::new();
+        for (x, y, s) in stones {
+            board_r.grid_rows_mut()[y][x] = s;
+        }
+        let mut caches_r = EvalCaches::new();
+        recompute_all_for_rule(&mut board_r, &mut caches_r, RuleSet::Renju);
+        assert!(
+            evaluate_next43_branch(&mut board_r, &mut caches_r, BLACK, &renju),
+            "Renju: black cannot play forbidden double-four block (7,7)"
+        );
+        assert_eq!(
+            evaluate_board(&mut board_r, &mut caches_r, BLACK, 0, &renju),
+            -f64::from(WIN)
+        );
+
+        let freestyle = load_default_config();
+        let mut board_f = Board::new();
+        for (x, y, s) in stones {
+            board_f.grid_rows_mut()[y][x] = s;
+        }
+        let mut caches_f = EvalCaches::new();
+        recompute_all(&mut board_f, &mut caches_f);
+        assert!(
+            !evaluate_next43_branch(&mut board_f, &mut caches_f, BLACK, &freestyle),
+            "Freestyle: black legally counter-fours at (7,7)"
+        );
+    }
+
+    #[test]
+    fn renju_next43_ignores_fake_black_overline_counter_four() {
+        // White has a 4-3 at (6, 7): B(2,7), W(3,7), W(4,7), W(5,7) + open-3 W(6,5), W(6,6).
+        // Forced block is (7, 7). On col 7, Black has W(7,2), B(7,3), B(7,4), B(7,5), _(7,6),
+        // _(7,7), B(7,8), B(7,9)? Wait: B(7,3..=5) + B(7,7) + B(7,8) makes 6 when filling (7,6)!
+        // Check: W(7,2), B(7,3), B(7,4), B(7,5), _(7,6), [B(7,7)], B(7,8), W(7,9).
+        // Before (7,7): col 7 has 3 blacks (3,4,5) + gap (6,7) + 1 black (8), not a four.
+        // After Black plays (7,7): col 7 has W(2), B(3), B(4), B(5), _(6), B(7), B(8), W(9).
+        // Raw b4p sees B(4), B(5), _(6), B(7), B(8) -> four!
+        // Filling the only gap (7,6) gives B(3..=8) = 6 stones (overline!), so NOT a real Renju four!
+        let stones = [
+            (2, 7, BLACK),
+            (3, 7, WHITE),
+            (4, 7, WHITE),
+            (5, 7, WHITE),
+            (6, 5, WHITE),
+            (6, 6, WHITE),
+            (7, 2, WHITE),
+            (7, 3, BLACK),
+            (7, 4, BLACK),
+            (7, 5, BLACK),
+            (7, 8, BLACK),
+            (7, 9, WHITE),
+        ];
+
+        let mut renju = load_default_config();
+        renju.rule_set = RuleSet::Renju;
+        let mut board_r = Board::new();
+        for (x, y, s) in stones {
+            board_r.grid_rows_mut()[y][x] = s;
+        }
+        assert_eq!(
+            classify_forbidden_move(&board_r, xy_to_move(7, 7).unwrap(), BLACK, RuleSet::Renju)
+                .unwrap(),
+            crate::rules::ForbiddenKind::None,
+            "(7,7) itself must be legal for black"
+        );
+        let mut caches_r = EvalCaches::new();
+        recompute_all_for_rule(&mut board_r, &mut caches_r, RuleSet::Renju);
+        assert!(
+            evaluate_next43_branch(&mut board_r, &mut caches_r, BLACK, &renju),
+            "Renju: fake overline counter-four through (7,7) must not refute white's 4-3"
+        );
+
+        let freestyle = load_default_config();
+        let mut board_f = Board::new();
+        for (x, y, s) in stones {
+            board_f.grid_rows_mut()[y][x] = s;
+        }
+        let mut caches_f = EvalCaches::new();
+        recompute_all(&mut board_f, &mut caches_f);
+        assert!(
+            !evaluate_next43_branch(&mut board_f, &mut caches_f, BLACK, &freestyle),
+            "Freestyle: overline completion at (7,6) is a valid counter-four"
         );
     }
 

@@ -505,3 +505,43 @@ fn renju_vcf_defends_the_exact_five_end_of_a_black_four() {
     let result = rust_gomoku::RootSearcher::new(config).search(&mut board, None);
     assert_ne!(result.move_, losing);
 }
+
+#[test]
+fn freestyle_vcf_search_defender_stops_when_reply_completes_defender_five() {
+    let mut view = ThreatBoardView::from_board(Board::new());
+    for (x, y, side) in [
+        // Black already holds a separate four on row 9...
+        (3, 9, 1),
+        (4, 9, 1),
+        (5, 9, 1),
+        (6, 9, 1),
+        // ...and plays a broken four on column 7 forcing White to reply at (7, 5)...
+        (7, 0, -1),
+        (7, 1, 1),
+        (7, 2, 1),
+        (7, 3, 1),
+        (7, 4, 1),
+        // ...where White's block (7, 5) completes White's five on row 5.
+        (3, 5, -1),
+        (4, 5, -1),
+        (5, 5, -1),
+        (6, 5, -1),
+    ] {
+        view.play(xy_to_move(x, y).unwrap(), side);
+    }
+
+    let attacker_move = xy_to_move(7, 4).unwrap();
+    let result = VCFSearcher::default().search_defender(
+        &mut view,
+        1,
+        2,
+        attacker_move,
+        &[attacker_move],
+        &[],
+    );
+    assert!(
+        !result.found,
+        "attacker must not win after defender's reply makes five"
+    );
+    assert!(result.solved);
+}

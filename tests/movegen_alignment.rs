@@ -220,3 +220,107 @@ fn generate_candidates_matches_expected_casen_on_known_fallback_position() {
         .collect();
     assert_eq!(coords, HashSet::from([(8, 4), (8, 8)]));
 }
+
+#[test]
+fn generate_candidates_does_not_trigger_win_priority_from_disallowed_root_move() {
+    let mut board = Board::new();
+    for (x, y) in [
+        (5, 7),
+        (0, 0),
+        (6, 7),
+        (1, 0),
+        (7, 7),
+        (2, 0),
+        (8, 7),
+        (9, 7),
+    ] {
+        board.play(xy_to_move(x, y).unwrap(), None).unwrap();
+    }
+    let mut caches = EvalCaches::new();
+    recompute_all(&mut board, &mut caches);
+
+    let allowed = HashSet::from([xy_to_move(5, 8).unwrap(), xy_to_move(6, 8).unwrap()]);
+    let result = generate_candidates(
+        &board,
+        &caches,
+        1,
+        &load_default_config(),
+        Some(10),
+        Some(&allowed),
+        None,
+        true,
+    );
+    assert!(!result.win_priority);
+    assert!(!result.single_forcing);
+    assert_eq!(result.candidates.len(), 2);
+    for candidate in &result.candidates {
+        assert!(allowed.contains(&candidate.move_));
+    }
+}
+
+#[test]
+fn generate_candidates_preferred_move_cannot_override_win_priority_or_forcing_block() {
+    // 1) Immediate five-in-a-row win at (4, 7) must not be overridden by a quiet TT hint.
+    let mut win_board = Board::new();
+    for (x, y) in [
+        (5, 7),
+        (0, 0),
+        (6, 7),
+        (1, 0),
+        (7, 7),
+        (2, 0),
+        (8, 7),
+        (9, 7),
+    ] {
+        win_board.play(xy_to_move(x, y).unwrap(), None).unwrap();
+    }
+    let mut win_caches = EvalCaches::new();
+    recompute_all(&mut win_board, &mut win_caches);
+    let win_result = generate_candidates(
+        &win_board,
+        &win_caches,
+        1,
+        &load_default_config(),
+        Some(10),
+        None,
+        Some(xy_to_move(6, 8).unwrap()),
+        false,
+    );
+    assert!(win_result.win_priority);
+    assert_eq!(win_result.candidates.len(), 1);
+    assert_eq!(move_to_xy(win_result.candidates[0].move_).unwrap(), (4, 7));
+
+    // 2) Forced single block of opponent's four at (7, 7) must not be overridden by a quiet TT hint.
+    let mut defend_board = Board::new();
+    for (x, y) in [
+        (2, 7),
+        (3, 7),
+        (0, 0),
+        (4, 7),
+        (1, 0),
+        (5, 7),
+        (2, 0),
+        (6, 7),
+    ] {
+        defend_board.play(xy_to_move(x, y).unwrap(), None).unwrap();
+    }
+    let mut defend_caches = EvalCaches::new();
+    recompute_all(&mut defend_board, &mut defend_caches);
+    let defend_result = generate_candidates(
+        &defend_board,
+        &defend_caches,
+        1,
+        &load_default_config(),
+        Some(10),
+        None,
+        Some(xy_to_move(6, 8).unwrap()),
+        false,
+    );
+    assert!(defend_result.single_forcing);
+    assert!(!defend_result.win_priority);
+    assert_eq!(defend_result.candidates.len(), 1);
+    assert_eq!(
+        move_to_xy(defend_result.candidates[0].move_).unwrap(),
+        (7, 7)
+    );
+}

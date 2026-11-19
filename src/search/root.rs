@@ -660,6 +660,11 @@ impl RootSearcher {
                     opo: 1,
                     root: true,
                     root_allowed_moves: root_allowed_moves.as_ref(),
+                    root_preferred_move: if root_allowed_moves.is_some() {
+                        best_move
+                    } else {
+                        None
+                    },
                     ..SearchOptions::default()
                 },
             );

@@ -119,10 +119,15 @@ struct CoveredMovesBuf {
     len: usize,
 }
 
+const LEGAL_UNCHECKED: u8 = 0;
+const LEGAL_FALSE: u8 = 1;
+const LEGAL_TRUE: u8 = 2;
+
 struct MoveAnalysis {
     vbw_map: [f64; BOARD_AREA],
     self_attack_map: [i32; BOARD_AREA],
     opp_attack_map: [i32; BOARD_AREA],
+    legal_state: [u8; BOARD_AREA],
     sglflag: i32,
     hsflag: Option<Move>,
     winpri: bool,
@@ -134,9 +139,30 @@ impl MoveAnalysis {
             vbw_map: [0.0; BOARD_AREA],
             self_attack_map: [0; BOARD_AREA],
             opp_attack_map: [0; BOARD_AREA],
+            legal_state: [LEGAL_UNCHECKED; BOARD_AREA],
             sglflag: 0,
             hsflag: None,
             winpri: false,
+        }
+    }
+
+    fn is_rule_legal(
+        &mut self,
+        board: &Board,
+        caches: &EvalCaches,
+        move_: Move,
+        side: i8,
+        rule: RuleSet,
+    ) -> bool {
+        let index = move_ as usize;
+        match self.legal_state[index] {
+            LEGAL_TRUE => true,
+            LEGAL_FALSE => false,
+            _ => {
+                let legal = is_rule_legal_for_movegen(board, caches, move_, side, rule);
+                self.legal_state[index] = if legal { LEGAL_TRUE } else { LEGAL_FALSE };
+                legal
+            }
         }
     }
 }
@@ -337,9 +363,19 @@ pub fn diagnose_candidates(
     collect_covered_moves(board, &mut moves_buf);
     let moves = moves_buf.as_slice();
     let mut analysis = MoveAnalysis::new();
-    analyze_moves(board, caches, side, config, moves, &mut analysis);
+    analyze_moves(board, caches, side, config, None, moves, &mut analysis);
     let generated = select_candidates(
-        board, caches, side, config, None, None, None, false, true, moves, &analysis,
+        board,
+        caches,
+        side,
+        config,
+        None,
+        None,
+        None,
+        false,
+        true,
+        moves,
+        &mut analysis,
     );
     let ordered_candidates =
         crate::search::ordering::order_candidates(board, &generated.candidates, side, None);
@@ -447,7 +483,15 @@ fn generate_candidates_from_moves(
     moves: &[Move],
 ) -> CandidateGenerationResult {
     let mut analysis = MoveAnalysis::new();
-    analyze_moves(board, caches, side, config, moves, &mut analysis);
+    analyze_moves(
+        board,
+        caches,
+        side,
+        config,
+        root_allowed_moves,
+        moves,
+        &mut analysis,
+    );
     select_candidates(
         board,
         caches,
@@ -459,7 +503,7 @@ fn generate_candidates_from_moves(
         preserve_scan_order,
         presort_for_forcing,
         moves,
-        &analysis,
+        &mut analysis,
     )
 }
 
@@ -468,6 +512,7 @@ fn analyze_moves(
     caches: &EvalCaches,
     side: i8,
     config: &EngineConfig,
+    root_allowed_moves: Option<&HashSet<Move>>,
     moves: &[Move],
     analysis: &mut MoveAnalysis,
 ) {
@@ -484,7 +529,10 @@ fn analyze_moves(
         analysis.self_attack_map[move_index] = att1;
         analysis.opp_attack_map[move_index] = att2;
 
-        if vbw <= 0.0 {
+        if vbw <= 0.0
+            || root_allowed_moves.is_some_and(|allowed| !allowed.contains(&move_))
+            || !analysis.is_rule_legal(board, caches, move_, side, config.rule_set)
+        {
             at2pri = at2pri.max(att2);
             continue;
         }
@@ -517,18 +565,19 @@ fn select_candidates(
     preserve_scan_order: bool,
     presort_for_forcing: bool,
     moves: &[Move],
-    analysis: &MoveAnalysis,
+    analysis: &mut MoveAnalysis,
 ) -> CandidateGenerationResult {
     let _wide = wide.unwrap_or(config.root_search.wide as usize);
+    let forcing_collapse = analysis.winpri || analysis.sglflag > 0;
     let mut candidates = Vec::with_capacity(moves.len());
     for &move_ in moves {
-        if !is_rule_legal_for_movegen(board, caches, move_, side, config.rule_set) {
-            continue;
-        }
         if let Some(allowed) = root_allowed_moves {
             if !allowed.contains(&move_) {
                 continue;
             }
+        }
+        if !analysis.is_rule_legal(board, caches, move_, side, config.rule_set) {
+            continue;
         }
 
         let move_index = move_ as usize;
@@ -538,7 +587,7 @@ fn select_candidates(
         }
 
         let mut score = vbw - 300_000_000.0;
-        if preferred_move == Some(move_) {
+        if !forcing_collapse && preferred_move == Some(move_) {
             score = 100.0;
         }
         let candidate = Candidate {
@@ -567,7 +616,7 @@ fn select_candidates(
     }
 
     if analysis.winpri && !candidates.is_empty() {
-        let candidate = best_forcing_candidate(&candidates);
+        let candidate = best_win_priority_candidate(&candidates);
         return CandidateGenerationResult {
             candidates: vec![candidate],
             single_forcing: false,
@@ -670,6 +719,23 @@ fn renju_black_candidate_needs_full_detector(caches: &EvalCaches, x: usize, y: u
         return false;
     }
     overlines > 0 || fours >= 2 || open_threes >= 2
+}
+
+fn best_win_priority_candidate(candidates: &[Candidate]) -> Candidate {
+    candidates
+        .iter()
+        .copied()
+        .max_by(|a, b| {
+            a.self_attack
+                .cmp(&b.self_attack)
+                .then_with(|| {
+                    a.order_score
+                        .partial_cmp(&b.order_score)
+                        .expect("candidate scores are finite")
+                })
+                .then_with(|| b.move_.cmp(&a.move_))
+        })
+        .expect("caller checked non-empty candidates")
 }
 
 fn best_forcing_candidate(candidates: &[Candidate]) -> Candidate {

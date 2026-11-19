@@ -143,6 +143,20 @@ impl VCFSearcher {
                 solved: false,
             };
         }
+        if view.board.winner() == side {
+            return VCFResult {
+                move_: None,
+                found: true,
+                solved: true,
+            };
+        }
+        if view.board.winner() == -side {
+            return VCFResult {
+                move_: None,
+                found: false,
+                solved: true,
+            };
+        }
 
         let sequence_key = Self::canonical_sequence_key(attacker_moves, defender_moves);
         let key = (side, sequence_key.0, sequence_key.1);

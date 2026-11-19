@@ -97,6 +97,7 @@ pub struct SearchOptions<'a> {
     pub ply: i32,
     pub root: bool,
     pub root_allowed_moves: Option<&'a HashSet<Move>>,
+    pub root_preferred_move: Option<Move>,
     pub downf: i32,
     pub root_depth: Option<f64>,
     pub priority_base: Option<i32>,
@@ -325,10 +326,19 @@ impl AlphaBetaSearcher {
             return (score, None);
         }
 
+        let root_allowed_moves = if options.root {
+            options.root_allowed_moves
+        } else {
+            None
+        };
+        let root_restricted = root_allowed_moves.is_some();
+
         // Quiet last moves can have zero static value and be dropped by movegen.
         if board.move_count() == BOARD_AREA - 1 {
-            let last = (0..BOARD_AREA as Move)
-                .find(|&m| board.is_legal_move_for_rule(m, side, self.config.rule_set));
+            let last = (0..BOARD_AREA as Move).find(|&m| {
+                root_allowed_moves.is_none_or(|allowed| allowed.contains(&m))
+                    && board.is_legal_move_for_rule(m, side, self.config.rule_set)
+            });
             if let Some(m) = last {
                 let (x, y) = move_to_xy(m).expect("board move");
                 let score = if board.is_winning_move_for_rule(x, y, side, self.config.rule_set) {
@@ -338,6 +348,7 @@ impl AlphaBetaSearcher {
                 };
                 return (score, Some(m));
             }
+            return (-INF + options.ply, None);
         }
 
         // Stored depths round down. Round the requirement up so a leaf never
@@ -352,7 +363,7 @@ impl AlphaBetaSearcher {
                 stats.tt_bestmove_old_generation += 1;
             }
         }
-        if probe.hit && probe.value.is_some() {
+        if !root_restricted && probe.hit && probe.value.is_some() {
             stats.tt_hits += 1;
             return (probe.value.expect("checked above"), probe.best_move);
         }
@@ -382,18 +393,23 @@ impl AlphaBetaSearcher {
             return (score, None);
         }
 
+        let tt_best_move = if let Some(allowed) = root_allowed_moves {
+            options
+                .root_preferred_move
+                .filter(|move_| allowed.contains(move_))
+                .or_else(|| probe.best_move.filter(|move_| allowed.contains(move_)))
+        } else {
+            probe.best_move
+        };
+
         let generated = generate_candidates_with_coverage(
             board,
             caches,
             side,
             &self.config,
             Some(wide),
-            if options.root {
-                options.root_allowed_moves
-            } else {
-                None
-            },
-            probe.best_move,
+            root_allowed_moves,
+            tt_best_move,
             options.root,
             coverage,
         );
@@ -408,7 +424,7 @@ impl AlphaBetaSearcher {
                 board,
                 generated.candidates,
                 side,
-                probe.best_move,
+                tt_best_move,
                 options.ply.max(0) as usize,
                 hostile_threat,
                 &self.killer_moves,
@@ -421,7 +437,7 @@ impl AlphaBetaSearcher {
             stats.history_hits += ordering_stats.history_hits;
             ordered
         } else {
-            order_candidates_owned(board, generated.candidates, side, probe.best_move)
+            order_candidates_owned(board, generated.candidates, side, tt_best_move)
         };
         if win_priority && !ordered.is_empty() {
             return (INF, Some(ordered[0].move_));
@@ -480,7 +496,8 @@ impl AlphaBetaSearcher {
             return (-INF - 1, None);
         }
 
-        let mut current = -INF - 1;
+        let mut current = i32::MIN;
+        let mut has_score = false;
         let mut best_move = None;
         let original_alpha = alpha;
         let mut hash_flag = HASHF_ALPHA;
@@ -550,6 +567,7 @@ impl AlphaBetaSearcher {
                     ply: options.ply + 1,
                     root: false,
                     root_allowed_moves: None,
+                    root_preferred_move: None,
                     downf: local_downf,
                     root_depth: Some(root_depth),
                     priority_base: Some(priority_base),
@@ -676,6 +694,10 @@ impl AlphaBetaSearcher {
 
             if score > current {
                 current = score;
+                has_score = true;
+                if options.root && !found_pv {
+                    best_move = Some(candidate.move_);
+                }
             }
             let improved = score > alpha;
             if score > alpha {
@@ -740,6 +762,9 @@ impl AlphaBetaSearcher {
             }
         }
 
+        if !has_score {
+            current = -INF - 1;
+        }
         if current <= original_alpha && hash_flag != HASHF_BETA {
             hash_flag = HASHF_ALPHA;
         }
@@ -747,22 +772,24 @@ impl AlphaBetaSearcher {
             return (current, best_move);
         }
 
-        let mut store_depth = hash_depth;
-        if (current >= WIN && current > original_alpha)
-            || (current <= -WIN && current < original_beta)
-        {
-            hash_flag = HASHF_EXACT;
-            store_depth += 10;
+        if !root_restricted {
+            let mut store_depth = hash_depth;
+            if (current >= WIN && current > original_alpha)
+                || (current <= -WIN && current < original_beta)
+            {
+                hash_flag = HASHF_EXACT;
+                store_depth += 10;
+            }
+            self.tt.store(TTEntry {
+                key: board.zobrist_key(),
+                value: current,
+                flag: hash_flag,
+                depth: store_depth,
+                priority: priority_base * 10 + hash_depth,
+                best_move,
+                generation: self.tt_generation,
+            });
         }
-        self.tt.store(TTEntry {
-            key: board.zobrist_key(),
-            value: current,
-            flag: hash_flag,
-            depth: store_depth,
-            priority: priority_base * 10 + hash_depth,
-            best_move,
-            generation: self.tt_generation,
-        });
         (current, best_move)
     }
 }
