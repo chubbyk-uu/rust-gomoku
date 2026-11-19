@@ -10,10 +10,42 @@ Do not repeat these directions unless new evidence invalidates the decision:
 - Lazy SMP, root YBWC, root split, and aspiration window: rejected as default paths after poor speed/strength or maintenance tradeoffs.
 - Early stop and broad dynamic pruning: only revisit with a concrete tactical safety proof and fast-vs-base validation.
 - VCF memo-key allocation and VCT/VCF as a per-node hotspot: confirmed non-bottleneck by the 2026-07-02 VCT-path profile (`or_node` 0.27% cumulative, the `(Side, Vec<Move>, Vec<Move>)` memo alloc + sort below the 0.8% floor). Do not pursue memo-key micro-optimization.
+- Root LMR clamp (`net <= 1` for `self_attack >= 3` at root): rejected for default `base` after 100-game real Renju center-opening validation (`48-48-4` overall, `36-37-3` on 38 unseen holdout openings, `+6.3%` avg and `61.7s -> 144.3s` max regression).
 
 Current active target:
 
 - Final-depth late root candidates. Future analysis should explain why they are expensive, not re-confirm that they are expensive.
+
+## 2026-11-19 — Renju center-opening case-10 LMR clamp experiment & 100-game baseline check
+
+Context:
+
+- Trigger: `23b72d6` vs `v0.1.13` (`edd8973`) on 12 Renjunet center openings (24 games, Renju, depth 8 / width 40, untimed, `--reuse-engine-state`) scored `11-13` (`11` splits + `1` double loss on case 10, `renjunet_center_g64692_ply3`).
+- Replay analysis (`target/match-results/center24-v013.dDFkOo/review-case10/`):
+  - Cold depth-8 search misses `(5,3)` on both `v0.1.13` and `23b72d6` (both pick `(5,5)` at d8/d9; `(5,3)` is found as `+19985` only at cold d10).
+  - In the warm match, `v0.1.13` only found `(5,3)` because its pre-`de7ec6e` restricted-root TT cutoff skipped ply-13 d1–d6, leaving `(5,3)` as the ply-15 d7 TT hint and warming deep child TT entries under `(5,3)`. At ply-15 d8, both versions had `(5,5)` at `#0` and `(5,3)` at `#20` (0-based).
+  - At `#20`, `alphabeta.rs`'s carry-accumulator `running_downf = (running_downf + index) % 15` hit `10 + 20 = 30 -> net = 2` (`depthdown = 3.0`, `attempt_depth = 5.0`), the first 3-ply reduction in the list, causing `(5,3)` (`self_attack = 3`, `atdown = 3`) to fail low without re-search.
+
+Experiment tested (reverted):
+
+- Minimal change in `src/search/alphabeta.rs`: at root only (`options.root && candidate.self_attack >= 3 && net > 1`), clamp `net = 1` without altering `running_downf` carry propagation.
+- `center24` vs `v0.1.13` (24 games, `--reuse-engine-state`, 12 jobs): `12-12` (`WW=0, WL=12, LL=0`), case 10 recovered, `avg=1249.0ms`, `p95=5098.1ms` (`v0.1.13`: `1549.1ms / 6223.5ms`).
+- Full 50 Renjunet center openings (`center_50_prefixes.jsonl`, 100 games, `cand` vs `23b72d6`, `--reuse-engine-state`, 12 jobs):
+  - Overall (50 pairs): `48-48-4` (`50.00% ± 3.17%`, `WW=1` on case 10, `WD=0`, `WL/DD=47`, `LD=2` on cases 3 and 34, `LL=0`), `0` errors/timeouts/capped pairs.
+  - Strictly unseen 38 holdout openings (76 games): `36-37-3` (`49.34%`, `WW=0, LD=1`), timing flat (`avg 2727.5ms vs 2763.4ms`, `p95 10607.9ms vs 10654.6ms`).
+  - Only 7/50 pairs diverged, but case 3 (black 225-ply draw) produced five 51s–144s moves, pushing overall `avg_ms` from `2732.7ms` to `2905.2ms` (`+6.3%`) and `max_ms` from `61.7s` to `144.3s`. Both stop-loss thresholds fired.
+
+100-game baseline verification (`23b72d6` vs `v0.1.13`):
+
+- Full 50 Renjunet center openings (`center_50_prefixes.jsonl`, 100 games, Renju d8/w40, `--reuse-engine-state`, 20 jobs):
+  - Overall: `48-47-5` (`50.50% ± 3.82%`, `+3.47 Elo`, CI `[-23.1, +30.1]`, `WW=1, WD=2, WL/DD=45, LD=1, LL=1`), `0` errors/timeouts/capped pairs.
+  - Unseen 38 holdout openings (76 games): `37-34-5` (`51.97%`, `WW=1, WD=2, WL/DD=34, LD=1, LL=0`).
+  - Timing (20 concurrent jobs): `23b72d6` `avg 3226.3ms / med 1365.3ms / p95 12322.5ms / max 65251.5ms` vs `v0.1.13` `avg 3262.3ms / med 1519.9ms / p95 12668.5ms / max 46140.2ms`.
+
+Decision:
+
+- Revert the root `self_attack >= 3` LMR clamp; keep `23b72d6` clean.
+- Confirmed `23b72d6` has no strength regression against `v0.1.13` on 100 real Renju center-opening games while preserving faster avg/median/p95 and all `de7ec6e`–`23b72d6` correctness fixes. Future ordering/LMR experiments should target `fast` profile and gate on real center openings rather than tuning to single-case replays.
 
 ## 2026-07-03 — VCT6 slow-case legality-cache cleanup
 
