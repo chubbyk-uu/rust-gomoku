@@ -286,12 +286,14 @@ fn order_candidates_fast_history_in_place(
             result[start..end].sort_unstable_by(|a, b| {
                 let a_index = a.move_ as usize;
                 let b_index = b.move_ as usize;
-                let a_mi = cached_getmi(board, a.move_, side, &mut mi_cache);
-                let b_mi = cached_getmi(board, b.move_, side, &mut mi_cache);
                 killer_ranks[b_index]
                     .cmp(&killer_ranks[a_index])
                     .then_with(|| history_values[b_index].cmp(&history_values[a_index]))
-                    .then_with(|| b_mi.cmp(&a_mi))
+                    .then_with(|| {
+                        let a_mi = cached_getmi(board, a.move_, side, &mut mi_cache);
+                        let b_mi = cached_getmi(board, b.move_, side, &mut mi_cache);
+                        b_mi.cmp(&a_mi)
+                    })
                     .then_with(|| a.move_.cmp(&b.move_))
             });
         }

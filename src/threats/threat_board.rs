@@ -103,7 +103,7 @@ struct LegalityCacheEntry {
 }
 
 #[derive(Clone, Debug)]
-struct LegalityCache {
+pub(crate) struct LegalityCache {
     entries: Vec<LegalityCacheEntry>,
 }
 
@@ -305,6 +305,14 @@ impl ThreatBoardView {
     }
 
     pub fn from_board_with_rule(board: Board, rule_set: RuleSet) -> Self {
+        Self::from_board_with_rule_and_cache(board, rule_set, None)
+    }
+
+    pub(crate) fn from_board_with_rule_and_cache(
+        board: Board,
+        rule_set: RuleSet,
+        legality_cache: Option<Box<LegalityCache>>,
+    ) -> Self {
         let size = board.size();
         let grid = board.grid_rows();
         let x1 = (0..size)
@@ -347,11 +355,13 @@ impl ThreatBoardView {
             x4,
             rule_set,
             previous_sides: Vec::new(),
-            legality_cache: RefCell::new(
-                (rule_set == RuleSet::Renju).then(|| Box::new(LegalityCache::new())),
-            ),
+            legality_cache: RefCell::new(legality_cache),
             adjacency,
         }
+    }
+
+    pub(crate) fn take_legality_cache(&mut self) -> Option<Box<LegalityCache>> {
+        self.legality_cache.get_mut().take()
     }
 
     #[inline]

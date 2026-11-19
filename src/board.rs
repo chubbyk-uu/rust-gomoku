@@ -61,7 +61,7 @@ pub struct Board {
     move_history: Vec<PlayedMove>,
     side_to_move: Side,
     winner: Side,
-    zobrist_table: ZobristTable,
+    zobrist_table: &'static ZobristTable,
     zobrist_key: u64,
 }
 
@@ -84,7 +84,7 @@ impl Board {
             move_history: Vec::new(),
             side_to_move,
             winner: EMPTY,
-            zobrist_table: DEFAULT_ZOBRIST.clone(),
+            zobrist_table: &DEFAULT_ZOBRIST,
             zobrist_key: 0,
         })
     }
@@ -408,5 +408,14 @@ mod tests {
 
         assert_eq!(board.at(8, 7), Ok(BLACK));
         assert_eq!(board.winner(), EMPTY);
+    }
+
+    #[test]
+    fn board_stays_compact_without_inline_zobrist_table() {
+        assert!(
+            std::mem::size_of::<Board>() < 1024,
+            "Board unexpectedly large: {} bytes",
+            std::mem::size_of::<Board>()
+        );
     }
 }

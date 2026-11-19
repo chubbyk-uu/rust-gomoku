@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::board::Board;
 use crate::rules::RuleSet;
 use crate::search::budget::MoveBudget;
-use crate::threats::threat_board::ThreatBoardView;
+use crate::threats::threat_board::{LegalityCache, ThreatBoardView};
 use crate::types::{Move, Side};
 
 pub const NO_MOVE: Move = u16::MAX;
@@ -29,6 +29,7 @@ pub struct VCFSearcher {
     pub(crate) budget: MoveBudget,
     pub memo: HashMap<(Side, Vec<Move>, Vec<Move>), VcfMemoEntry>,
     pub multi_reply: bool,
+    legality_cache: Option<Box<LegalityCache>>,
 }
 
 impl VCFSearcher {
@@ -58,11 +59,15 @@ impl VCFSearcher {
             return VCFResult::default();
         }
         let effective_depth = Self::normalize_begin_depth(depth);
-        self.search_begin(
-            &mut ThreatBoardView::from_board_with_rule(board.clone(), rule),
-            side,
-            effective_depth,
-        )
+        let cache = (rule == RuleSet::Renju)
+            .then(|| self.legality_cache.take())
+            .flatten();
+        let mut view = ThreatBoardView::from_board_with_rule_and_cache(board.clone(), rule, cache);
+        let result = self.search_begin(&mut view, side, effective_depth);
+        if let Some(cache) = view.take_legality_cache() {
+            self.legality_cache = Some(cache);
+        }
+        result
     }
 
     pub fn search_with_multi_reply(

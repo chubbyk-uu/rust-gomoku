@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shlex
@@ -510,6 +511,7 @@ def run_match_task(
     times_ms = {engine_a.name: [], engine_b.name: []}
     winner_engine: str | None = None
     winner_side: int | None = None
+    termination: str | None = None
     error: str | None = None
     referee = (
         RenjuReferee(referee_command, referee_cwd) if rule == "renju" else None
@@ -539,6 +541,7 @@ def run_match_task(
             if game_timeout_sec > 0 and remaining_game <= 0:
                 error = f"game timeout after {game_timeout_sec:.1f}s"
                 winner_engine = "timeout"
+                termination = "game_timeout"
                 break
             game_limits_move = game_timeout_sec > 0 and (
                 move_timeout_sec <= 0 or remaining_game < move_timeout_sec
@@ -552,21 +555,31 @@ def run_match_task(
             except TimeoutError as exc:
                 if game_limits_move:
                     winner_engine = "timeout"
+                    termination = "game_timeout"
                     error = f"game timeout after {game_timeout_sec:.1f}s"
                     break
                 error = str(exc)
                 winner_engine = side_to_engine[opposite(side)]
                 winner_side = opposite(side)
+                termination = "move_timeout"
+                break
+            except Exception as exc:
+                error = str(exc)
+                winner_engine = side_to_engine[opposite(side)]
+                winner_side = opposite(side)
+                termination = "error"
                 break
             if not in_bounds(mx, my):
                 error = f"{engine_name} returned out-of-bounds move {(mx, my)}"
                 winner_engine = side_to_engine[opposite(side)]
                 winner_side = opposite(side)
+                termination = "illegal_move"
                 break
             if (mx, my) in occupied:
                 error = f"{engine_name} returned occupied move {(mx, my)}"
                 winner_engine = side_to_engine[opposite(side)]
                 winner_side = opposite(side)
+                termination = "illegal_move"
                 break
 
             referee_result = (
@@ -579,6 +592,7 @@ def run_match_task(
                 error = f"{engine_name} played forbidden move {(mx, my)}: {forbidden}"
                 winner_engine = side_to_engine[opposite(side)]
                 winner_side = opposite(side)
+                termination = "illegal_move"
                 break
 
             move = {
@@ -613,11 +627,17 @@ def run_match_task(
             if won:
                 winner_engine = engine_name
                 winner_side = side
+                termination = "win"
                 break
             side = opposite(side)
 
         if winner_engine is None and len(moves) >= max_moves:
             winner_engine = "draw"
+            termination = (
+                "board_full_draw"
+                if len(moves) >= BOARD_SIZE * BOARD_SIZE
+                else "max_moves_cap"
+            )
         elapsed_s = time.perf_counter() - game_started
     finally:
         for engine in engines.values():
@@ -634,6 +654,7 @@ def run_match_task(
         "engine_b_side": side_name(opposite(task.engine_a_side)),
         "winner_engine": winner_engine,
         "winner_side": None if winner_side is None else side_name(winner_side),
+        "termination": termination,
         "error": error,
         "plies": len(moves),
         "elapsed_s": round(elapsed_s, 3),
@@ -648,12 +669,96 @@ def run_match_task(
     }
 
 
+def elo_from_score(score: float) -> float | None:
+    if score <= 0.0 or score >= 1.0:
+        return None
+    return round(-400.0 * math.log10(1.0 / score - 1.0), 2)
+
+
+def summarize_paired(
+    games: list[dict[str, Any]],
+    engine_names: tuple[str, str],
+) -> dict[str, Any]:
+    engine_a, engine_b = engine_names
+    by_case: dict[int, dict[str, str | None]] = {}
+    for game in games:
+        case_idx = game.get("case_index")
+        side = game.get("engine_a_side")
+        if case_idx is None or side not in ("black", "white"):
+            continue
+        by_case.setdefault(int(case_idx), {})[side] = game.get("winner_engine")
+
+    def points_for_a(winner: str | None) -> float | None:
+        if winner == engine_a:
+            return 1.0
+        if winner == engine_b:
+            return 0.0
+        if winner == "draw":
+            return 0.5
+        return None
+
+    pentanomial = {"WW": 0, "WD": 0, "WL_or_DD": 0, "LD": 0, "LL": 0}
+    pair_scores: list[float] = []
+    for pair in by_case.values():
+        if "black" not in pair or "white" not in pair:
+            continue
+        p_black = points_for_a(pair["black"])
+        p_white = points_for_a(pair["white"])
+        if p_black is None or p_white is None:
+            continue
+        total = p_black + p_white
+        if total == 2.0:
+            pentanomial["WW"] += 1
+        elif total == 1.5:
+            pentanomial["WD"] += 1
+        elif total == 1.0:
+            pentanomial["WL_or_DD"] += 1
+        elif total == 0.5:
+            pentanomial["LD"] += 1
+        else:
+            pentanomial["LL"] += 1
+        pair_scores.append(total / 2.0)
+
+    n = len(pair_scores)
+    if n == 0:
+        return {
+            "pairs": 0,
+            "pentanomial": pentanomial,
+            "score_pct": None,
+            "ci95_pct": None,
+            "elo": None,
+            "elo_ci95_low": None,
+            "elo_ci95_high": None,
+        }
+
+    mean = sum(pair_scores) / n
+    if n > 1:
+        variance = sum((s - mean) ** 2 for s in pair_scores) / (n - 1)
+        stderr = math.sqrt(variance / n)
+    else:
+        stderr = 0.0
+    margin = 1.96 * stderr
+    return {
+        "pairs": n,
+        "pentanomial": pentanomial,
+        "score_pct": round(mean * 100.0, 2),
+        "ci95_pct": round(margin * 100.0, 2),
+        "elo": elo_from_score(mean),
+        "elo_ci95_low": elo_from_score(mean - margin),
+        "elo_ci95_high": elo_from_score(mean + margin),
+    }
+
+
 def summarize(games: list[dict[str, Any]], engine_names: tuple[str, str]) -> dict[str, Any]:
     wins = {engine_names[0]: 0, engine_names[1]: 0, "draw": 0, "timeout": 0}
+    terminations: dict[str, int] = {}
     for game in games:
         winner = game["winner_engine"]
         if winner in wins:
             wins[winner] += 1
+        term = game.get("termination")
+        if term is not None:
+            terminations[term] = terminations.get(term, 0) + 1
     all_times = {engine_names[0]: [], engine_names[1]: []}
     tt_generation = {
         engine_names[0]: {"current": 0, "old": 0, "moves": 0, "old_pct": 0.0},
@@ -687,6 +792,8 @@ def summarize(games: list[dict[str, Any]], engine_names: tuple[str, str]) -> dic
     return {
         "wins": wins,
         "errors": sum(1 for game in games if game.get("error")),
+        "terminations": terminations,
+        "paired": summarize_paired(games, engine_names),
         "timing": timing,
         "tt_generation": tt_generation,
     }

@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::board::Board;
 use crate::rules::RuleSet;
 use crate::search::budget::MoveBudget;
-use crate::threats::threat_board::ThreatBoardView;
+use crate::threats::threat_board::{LegalityCache, ThreatBoardView};
 use crate::threats::types::{AttackMove, ThreatLevel};
 use crate::types::{Move, Side};
 
@@ -170,6 +170,7 @@ pub struct VCTSearcher {
     pub strict_and_memo_key: bool,
     and_memo_context_signatures: HashMap<(Side, i32, u64), u64>,
     and_memo_context_collision_keys: HashSet<(Side, i32, u64)>,
+    legality_cache: Option<Box<LegalityCache>>,
 }
 
 impl VCTSearcher {
@@ -202,7 +203,10 @@ impl VCTSearcher {
                 solved: true,
             };
         }
-        let mut view = ThreatBoardView::from_board_with_rule(board.clone(), rule);
+        let cache = (rule == RuleSet::Renju)
+            .then(|| self.legality_cache.take())
+            .flatten();
+        let mut view = ThreatBoardView::from_board_with_rule_and_cache(board.clone(), rule, cache);
         self.memo.clear();
         self.and_memo_context_signatures.clear();
         self.and_memo_context_collision_keys.clear();
@@ -220,6 +224,9 @@ impl VCTSearcher {
             result = self.or_node(&mut view, side, d);
             if self.budget.stopped() {
                 self.stats.elapsed_us = total_start.elapsed().as_micros();
+                if let Some(cache) = view.take_legality_cache() {
+                    self.legality_cache = Some(cache);
+                }
                 return VCTResult::default();
             }
             self.stats.depth_completed = d;
@@ -231,10 +238,16 @@ impl VCTSearcher {
             ));
             if result.found || result.solved {
                 self.stats.elapsed_us = total_start.elapsed().as_micros();
+                if let Some(cache) = view.take_legality_cache() {
+                    self.legality_cache = Some(cache);
+                }
                 return result;
             }
         }
         self.stats.elapsed_us = total_start.elapsed().as_micros();
+        if let Some(cache) = view.take_legality_cache() {
+            self.legality_cache = Some(cache);
+        }
         result
     }
 
@@ -372,7 +385,7 @@ impl VCTSearcher {
             {
                 cached
             } else {
-                self.and_node_for_attack(view, attacker, depth, &attack)
+                self.and_node_for_attack(view, attacker, depth, &attack, and_key, and_context)
             };
             view.undo();
 
@@ -489,17 +502,13 @@ impl VCTSearcher {
         attacker: Side,
         depth: i32,
         attack: &AttackMove,
+        key: u64,
+        context: u64,
     ) -> VCTResult {
         if !self.budget.enter() {
             return VCTResult::default();
         }
         self.stats.and_nodes += 1;
-
-        let key = view.board.zobrist_key();
-        let context = self.and_memo_context(attack);
-        if let Some(cached) = self.memo_lookup(AND_NODE, attacker, depth, key, context) {
-            return cached;
-        }
 
         let mut seen = std::collections::HashSet::new();
         let mut searched_any = false;

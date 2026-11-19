@@ -281,6 +281,7 @@ pub fn value_wide_compute_for_rule(
     let vertical_flag = 2_u8;
     let diag_down_flag = 4_u8;
     let diag_up_flag = 8_u8;
+    const BLACK_REFRESHED_FLAG: u8 = 0x10;
     let mut comp = [[0_u8; BOARD_SIZE]; BOARD_SIZE];
     let mut dirty = [0 as Move; BOARD_SIZE * BOARD_SIZE];
     let mut dirty_len = 0_usize;
@@ -382,23 +383,25 @@ pub fn value_wide_compute_for_rule(
             }
             for (player, changed) in changed_player.into_iter().enumerate() {
                 if changed {
-                    update_bucket_attack(board, caches, x, y, player, rule);
+                    let is_dt3 = update_bucket_attack(board, caches, x, y, player, rule);
+                    if renju && player == 0 {
+                        caches.set_dt3_present(x, y, is_dt3);
+                        comp[x][y] |= BLACK_REFRESHED_FLAG;
+                    }
                 }
             }
         } else {
             clear_occupied_point(caches, x, y);
+            if renju {
+                caches.set_dt3_present(x, y, false);
+            }
         }
         add_empty_bucket_contribution(board, caches, x, y);
         caches.board_shadow[x][y] = cell;
-        if rule == RuleSet::Renju {
-            // This point's black shapes (and thus its apparent-double-three
-            // membership) may have changed; keep the incremental set current.
-            refresh_dt3_membership(caches, board, x, y);
-        }
     }
 
-    if rule == RuleSet::Renju {
-        refresh_renju_apparent_double_three_points(board, caches);
+    if renju {
+        refresh_renju_apparent_double_three_points(board, caches, &comp, BLACK_REFRESHED_FLAG);
     }
 }
 
@@ -581,21 +584,30 @@ fn update_bucket_attack(
     y: usize,
     player: usize,
     rule: RuleSet,
-) {
+) -> bool {
     if board.grid_rows()[y][x] != EMPTY {
-        return;
+        return false;
     }
     let shapes = &caches.shape_cache[player][x][y];
     let side = if player == 0 { BLACK } else { WHITE };
-    let (bucket, attack) = compute_bucket_and_attack_for_rule(
-        board,
-        x,
-        y,
-        side,
-        rule,
-        (shapes[0], shapes[1], shapes[2], shapes[3]),
-    );
+    let counts = compute_bucket_attack_and_counts((shapes[0], shapes[1], shapes[2], shapes[3]));
+    let is_apparent_dt3 = counts.exact_fives == 0 && counts.open_threes >= 2;
+    let (bucket, attack) = if rule == RuleSet::Renju && side == BLACK && counts.exact_fives == 0 {
+        if counts.fours >= 2 || counts.overlines > 0 {
+            (0, 0)
+        } else if counts.open_threes >= 2
+            && classify_forbidden_move(board, (y * BOARD_SIZE + x) as Move, side, rule)
+                .is_ok_and(|kind| kind.is_forbidden())
+        {
+            (0, 0)
+        } else {
+            (counts.bucket, counts.attack)
+        }
+    } else {
+        (counts.bucket, counts.attack)
+    };
     set_bucket_attack(caches, x, y, player, bucket, attack);
+    is_apparent_dt3
 }
 
 fn set_bucket_attack(
@@ -635,19 +647,25 @@ fn refresh_dt3_membership(caches: &mut EvalCaches, board: &Board, x: usize, y: u
     caches.set_dt3_present(x, y, member);
 }
 
-fn refresh_renju_apparent_double_three_points(board: &Board, caches: &mut EvalCaches) {
+fn refresh_renju_apparent_double_three_points(
+    board: &Board,
+    caches: &mut EvalCaches,
+    comp: &[[u8; BOARD_SIZE]; BOARD_SIZE],
+    skip_flag: u8,
+) {
     let player = 0_usize;
 
     // Iterate only the maintained apparent-double-three candidates, re-evaluating
     // each one because a non-local move can flip its forbidden status without
     // changing its own shapes. `dt3_members` is append-only and may hold stale
-    // entries, so skip any whose membership flag is no longer set.
+    // entries, so skip any whose membership flag is no longer set, and skip
+    // dirty points that were already evaluated against the current board above.
     let member_count = caches.dt3_members.len();
     for i in 0..member_count {
         let move_ = caches.dt3_members[i] as usize;
         let x = move_ % BOARD_SIZE;
         let y = move_ / BOARD_SIZE;
-        if !caches.dt3_present[x][y] {
+        if !caches.dt3_present[x][y] || (comp[x][y] & skip_flag) != 0 {
             continue;
         }
 
