@@ -605,9 +605,12 @@ fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
     caches.nonzero_bucket_mask = [[0; 3]; 2];
     caches.occupied_moves = [0; BOARD_AREA];
     caches.occupied_len = 0;
-    caches.dgn_cc = [[0; BOARD_SIZE]; BOARD_SIZE];
     caches.dgn_sum = [0; 2];
-    caches.dgn_cc_log.clear();
+    let preserve_snapshot = caches.active_snapshot_count > 0;
+    if !preserve_snapshot {
+        caches.dgn_cc = [[0; BOARD_SIZE]; BOARD_SIZE];
+        caches.dgn_cc_log.clear();
+    }
 
     let size = board.size();
     let grid = board.grid_rows();
@@ -616,6 +619,9 @@ fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
             let cell = grid[y][x];
             caches.board_shadow[x][y] = cell;
             if cell == EMPTY {
+                if preserve_snapshot {
+                    caches.set_dgn_cc(x, y, 0);
+                }
                 for player in 0..2 {
                     let bucket = caches.value_cache[player][x][y] as usize;
                     caches.inc_empty_bucket(player, bucket);
@@ -627,7 +633,11 @@ fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
                 let player = side_index(cell);
                 let cc =
                     blocked_neighbor_count(grid, &caches.shape_cache[player], x, y, size) as u8;
-                caches.dgn_cc[x][y] = cc;
+                if preserve_snapshot {
+                    caches.set_dgn_cc(x, y, cc);
+                } else {
+                    caches.dgn_cc[x][y] = cc;
+                }
                 caches.dgn_sum[player] += dgn_contribution(cc);
             }
         }
@@ -1238,6 +1248,39 @@ mod tests {
                     forbidden,
                     "{}: Renju eval suppressed a detector-legal black point",
                     case.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recompute_all_under_active_snapshot_restores_dgn_cc_cleanly() {
+        use crate::board::xy_to_move;
+        use crate::config::load_default_config;
+        use crate::eval::{evaluate_board_main_cached, evaluate_board_main_scan};
+
+        let config = load_default_config();
+        for rule in [RuleSet::Freestyle, RuleSet::Renju] {
+            let mut board = Board::new();
+            let mut caches = EvalCaches::new();
+            board.play(xy_to_move(7, 7).unwrap(), Some(BLACK)).unwrap();
+            recompute_all_for_rule(&mut board, &mut caches, rule);
+
+            let snapshot = caches.snapshot();
+            board.play(xy_to_move(6, 6).unwrap(), Some(WHITE)).unwrap();
+            recompute_all_for_rule(&mut board, &mut caches, rule);
+            board.undo().unwrap();
+            caches.restore_snapshot(&snapshot);
+
+            board.play(xy_to_move(7, 6).unwrap(), Some(WHITE)).unwrap();
+            value_wide_compute_for_rule(&mut board, &mut caches, (7, 6), rule);
+
+            for side in [BLACK, WHITE] {
+                let cached = evaluate_board_main_cached(&board, &caches, side, &config);
+                let scan = evaluate_board_main_scan(&board, &caches, side, &config);
+                assert_eq!(
+                    cached, scan,
+                    "{rule:?} side={side}: incremental dgn must match scan after snapshot + recompute_all"
                 );
             }
         }
