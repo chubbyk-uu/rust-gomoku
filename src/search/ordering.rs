@@ -128,6 +128,14 @@ pub(crate) fn order_candidates_owned(
     candidates
 }
 
+pub(crate) fn order_candidates_primary_slice(candidates: &mut [Candidate]) {
+    candidates.sort_unstable_by(|a, b| {
+        b.order_score
+            .partial_cmp(&a.order_score)
+            .expect("candidate scores are finite")
+    });
+}
+
 pub(crate) fn order_candidates_primary_owned(
     mut candidates: Vec<Candidate>,
     tt_best_move: Option<Move>,

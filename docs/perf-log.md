@@ -12,11 +12,42 @@ Do not repeat these directions unless new evidence invalidates the decision:
 - VCF memo-key allocation and VCT/VCF as a per-node hotspot: confirmed non-bottleneck by the 2026-07-02 VCT-path profile (`or_node` 0.27% cumulative, the `(Side, Vec<Move>, Vec<Move>)` memo alloc + sort below the 0.8% floor). Do not pursue memo-key micro-optimization.
 - Root LMR clamp (`net <= 1` for `self_attack >= 3` at root): rejected for default `base` after 100-game real Renju center-opening validation (`48-48-4` overall, `36-37-3` on 38 unseen holdout openings, `+6.3%` avg and `61.7s -> 144.3s` max regression).
 - Restricting `extend_ratio` (`single_forcing || hostile_threat || case_count <= 8` and `ply < root_depth + 4`): rejected despite cutting `p95 -14.2%` and `max 57.4s -> 32.6s`, because 100-game real Renju center-opening strength dropped to `38-61-1` (`38.5%`, `-81.4 Elo`). Do not cut `extend_ratio` in midgame forcing chains.
-- `ThreatBoardView` incremental `win_moves` bitset maintained on every `play()`: rejected (`c25 p68` VCT6 regressed `15.4s -> 23.6s`, `+52.7%`) because trial plays vastly outnumber `first_counter_win` scans.
+- `ThreatBoardView` incremental `win_moves` bitset or `line_counts[88]` filter maintained on `play()`: rejected (`c25 p68` VCT6 regressed `+52.7%` / `+15.0%` / `+4.6%`) because trial plays dominate `first_counter_win` and dense midgame boards already fill most lines.
 
 Current active target:
 
 - Final-depth late root candidates. Future analysis should explain why they are expensive, not re-confirm that they are expensive.
+
+## 2026-11-19 (3) — Incremental `dgn`, sparse `bucket_dot`, deferred rest-sort, and 4-line direct `value_wide_compute`
+
+Context:
+
+- Post-`215a896` `perf` profiles showed two remaining behavior-equivalent Alpha-Beta hotspots:
+  - Dense late game (`c21 black p145`, 145 stones): `evaluate_board_main_cached` was **`47.4%`** of total CPU (`evaluate_dgn_from_occupied` scanned all 145 stones × 8 neighbors per leaf + `bucket_dot` scanned all 324 buckets).
+  - Midgame forcing (`c43 white p32`, 32 stones): `value_wide_compute_for_rule` + `compute_bucket_attack_and_counts` was **`33.5%`**, `generate_candidates` + `sort` + `trunc` was **`21.2%`**, and `evaluate_board_main_cached` was **`16.2%`**.
+
+Kept optimizations (100% behavior-equivalent):
+
+- `src/eval/caches.rs`, `src/eval/local.rs`, `src/eval/global_eval.rs`:
+  - Maintain per-stone `dgn_cc` and exact integer `dgn_sum: [i32; 2]` incrementally on center transitions and `shape_cache` zero/non-zero label flips (with `debug_assert_eq!` against `evaluate_dgn_from_occupied`), turning leaf `dgn` into O(1).
+  - Maintain `[u64; 3]` non-zero bucket bitmasks per side so `bucket_dot_sparse` visits only non-zero buckets in identical ascending order.
+  - Eliminate `comp[15][15]` / `dirty[225]` / division-modulo coordinate decoding in `value_wide_compute_for_rule` by traversing the 4 lines directly, updating `empty_bucket_counts` only when `changed_player` changes bucket, and computing triangular bucket indices inline without `% 13`.
+- `src/search/movegen.rs`, `src/search/ordering.rs`, `src/search/alphabeta.rs`:
+  - Swap `tt_best_move` to index 0 and defer sorting `ordered[1..]` until candidate #0 fails to beta-cutoff; inline `fast_trunc` to avoid libc `trunc()`; reuse `MoveAnalysis` scratch on `AlphaBetaSearcher` with compact `[i8; BOARD_AREA]` attack maps.
+
+Rejected experiment (reverted):
+
+- `ThreatBoardView` `line_counts[88]` + `lines_ge3/ge4` filter for `first_counter_win`: regressed `c25 p68` VCT6 `+15.0%` (line-scan) / `+4.6%` (flat-scan).
+
+Verification & A/B timing (5 slow cases at d7, `compute_vct=0`, single-threaded release):
+
+- `c43 white p32`: `7812.4ms -> 6893.4ms` (`-11.8%` vs `215a896`, **`-44.3%`** vs `23b72d6`), exact move `6,2`, score `-33`, nodes `5,295,482`.
+- `c25 white p68`: `5332.5ms -> 4199.2ms` (`-21.3%` vs `215a896`, **`-46.4%`** vs `23b72d6`), exact move `10,4`, score `141`, nodes `3,115,273`.
+- `c21 black p145`: `5644.1ms -> 3113.0ms` (`-44.8%` vs `215a896`, **`-48.6%`** vs `23b72d6`), exact move `2,14`, score `-10`, nodes `3,299,678`.
+- `c34 white p154`: `5691.6ms -> 3161.4ms` (`-44.5%` vs `215a896`, **`-47.5%`** vs `23b72d6`), exact move `14,11`, score `-26`, nodes `3,091,334`.
+- `c34 black p83`: `3816.7ms -> 2778.4ms` (`-27.2%` vs `215a896`, **`-50.1%`** vs `23b72d6`), exact move `6,13`, score `53`, nodes `2,496,885`.
+- Total across 5 slow cases: `28297.3ms -> 20145.4ms` (`-28.8%` vs `215a896`, **`-46.8%`** vs `23b72d6`).
+- Correctness: `cargo fmt --check`, full `cargo test` (with leaf `dgn` debug assertion), release builds, and `scripts/run_diff.py --profile all --check-baselines --jobs 8` (`13/13` passed) all green.
 
 ## 2026-11-19 (2) — Long-tail profiling & behavior-equivalent Alpha-Beta hot-path speedup
 

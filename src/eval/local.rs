@@ -3,7 +3,8 @@
 use crate::board::Board;
 use crate::config::EngineConfig;
 use crate::constants::{BLACK, BOARD_AREA, BOARD_SIZE, DSHAPE_SIZE, EMPTY, WHITE};
-use crate::eval::caches::EvalCaches;
+use crate::eval::caches::{dgn_contribution, EvalCaches};
+use crate::eval::global_eval::{blocked_neighbor_count, NEIGHBOR_CHECKS};
 use crate::patterns::buckets::bucket_for_lines;
 use crate::patterns::line::{shape_raw_from_board_point_hypothetical, PackedLine};
 use crate::patterns::shapes::{ShapeLabel, DIAGONAL_DOWN, DIAGONAL_UP, HORIZONTAL, VERTICAL};
@@ -85,6 +86,7 @@ struct ShapeCounts {
     overlines: i32,
 }
 
+#[inline(always)]
 fn compute_bucket_attack_and_counts(direction_shapes: (i32, i32, i32, i32)) -> ShapeCounts {
     let mut attack = 0;
     let mut exact_fives = 0;
@@ -104,25 +106,36 @@ fn compute_bucket_attack_and_counts(direction_shapes: (i32, i32, i32, i32)) -> S
     {
         let label = (shape >> 16) & 0xF;
         let aux = shape & 0xF;
-        lines[idx] = label % ShapeLabel::L6 as i32;
+        lines[idx] = if label >= ShapeLabel::L6 as i32 {
+            label - ShapeLabel::L6 as i32
+        } else {
+            label
+        };
 
-        if label == ShapeLabel::L3 as i32 || label == ShapeLabel::L3B as i32 {
-            open_threes += 1;
-            attack = attack.max(3);
-        } else if label == ShapeLabel::L4S as i32 {
-            fours += aux;
-            attack = attack.max(4);
-            if aux >= 2 {
-                lines[idx] = 8;
+        match label {
+            x if x == ShapeLabel::L3 as i32 || x == ShapeLabel::L3B as i32 => {
+                open_threes += 1;
+                attack = attack.max(3);
             }
-        } else if label == ShapeLabel::L5 as i32 {
-            attack = 6;
-            exact_fives += 1;
-        } else if label == ShapeLabel::L4 as i32 {
-            fours += 1;
-            attack = attack.max(5);
-        } else if label == ShapeLabel::L6 as i32 {
-            overlines += 1;
+            x if x == ShapeLabel::L4S as i32 => {
+                fours += aux;
+                attack = attack.max(4);
+                if aux >= 2 {
+                    lines[idx] = 8;
+                }
+            }
+            x if x == ShapeLabel::L5 as i32 => {
+                attack = 6;
+                exact_fives += 1;
+            }
+            x if x == ShapeLabel::L4 as i32 => {
+                fours += 1;
+                attack = attack.max(5);
+            }
+            x if x == ShapeLabel::L6 as i32 => {
+                overlines += 1;
+            }
+            _ => {}
         }
     }
 
@@ -143,7 +156,11 @@ fn compute_bucket_attack_and_counts(direction_shapes: (i32, i32, i32, i32)) -> S
         (lines[2], lines[0])
     };
 
-    let bucket = bucket_for_lines(top1, top2).expect("normalized line strengths are valid");
+    let bucket = ((top1 * (top1 + 1)) >> 1) + top2 + 1;
+    debug_assert_eq!(
+        bucket,
+        bucket_for_lines(top1, top2).expect("normalized line strengths are valid")
+    );
     ShapeCounts {
         bucket,
         attack,
@@ -277,15 +294,6 @@ pub fn value_wide_compute_for_rule(
     caches.rule_set = rule;
 
     let (cx, cy) = changed;
-    let horizontal_flag = 1_u8;
-    let vertical_flag = 2_u8;
-    let diag_down_flag = 4_u8;
-    let diag_up_flag = 8_u8;
-    const BLACK_REFRESHED_FLAG: u8 = 0x10;
-    let mut comp = [[0_u8; BOARD_SIZE]; BOARD_SIZE];
-    let mut dirty = [0 as Move; BOARD_SIZE * BOARD_SIZE];
-    let mut dirty_len = 0_usize;
-
     let grid = board.grid_rows();
     let horizontal = PackedLine::through(grid, cx, cy, 0, 1);
     let vertical = PackedLine::through(grid, cx, cy, 1, 0);
@@ -293,131 +301,262 @@ pub fn value_wide_compute_for_rule(
     let diagonal_up = PackedLine::through(grid, cx, cy, -1, -1);
     let renju = rule == RuleSet::Renju;
     let radius = if renju { 5 } else { 4 };
-    mark_dirty_cell(&mut comp, &mut dirty, &mut dirty_len, cx, cy, 15);
-    let (up_forward, up_backward) = diagonal_up.neighbor_counts(BOARD_SIZE - 1 - cy, radius);
-    for (dx, dy, flag, (forward, backward)) in [
-        (
-            0,
-            1,
-            horizontal_flag,
-            horizontal.neighbor_counts(cy, radius),
-        ),
-        (1, 0, vertical_flag, vertical.neighbor_counts(cx, radius)),
-        (
-            -1,
-            1,
-            diag_down_flag,
-            diagonal_down.neighbor_counts(cy, radius),
-        ),
-        (1, 1, diag_up_flag, (up_backward, up_forward)),
-    ] {
-        for (dx, dy, count) in [(dx, dy, forward), (-dx, -dy, backward)] {
-            for step in 1..=count as isize {
-                let x = (cx as isize + step * dx) as usize;
-                let y = (cy as isize + step * dy) as usize;
-                mark_dirty_cell(&mut comp, &mut dirty, &mut dirty_len, x, y, flag);
-            }
-        }
-    }
+    let mut black_refreshed = [0_u64; 4];
 
     let old_cell = caches.board_shadow[cx][cy];
     let new_cell = board.grid_rows()[cy][cx];
-    update_occupied_transition(caches, cx, cy, old_cell, new_cell);
-
-    for &move_ in &dirty[..dirty_len] {
-        let index = move_ as usize;
-        let x = index % BOARD_SIZE;
-        let y = index / BOARD_SIZE;
-        let flags = comp[x][y];
-        let cell = board.grid_rows()[y][x];
-        remove_empty_bucket_contribution(caches, x, y);
-        if cell == EMPTY {
-            let mut changed_player = [false; 2];
-            if flags & horizontal_flag != 0 {
-                merge_changed_player(
-                    &mut changed_player,
-                    update_direction_cache(
-                        caches,
-                        x,
-                        y,
-                        HORIZONTAL,
-                        horizontal.hypothetical_shapes(y, renju),
-                    ),
-                );
-            }
-            if flags & vertical_flag != 0 {
-                merge_changed_player(
-                    &mut changed_player,
-                    update_direction_cache(
-                        caches,
-                        x,
-                        y,
-                        VERTICAL,
-                        vertical.hypothetical_shapes(x, renju),
-                    ),
-                );
-            }
-            if flags & diag_down_flag != 0 {
-                merge_changed_player(
-                    &mut changed_player,
-                    update_direction_cache(
-                        caches,
-                        x,
-                        y,
-                        DIAGONAL_DOWN,
-                        diagonal_down.hypothetical_shapes(y, renju),
-                    ),
-                );
-            }
-            if flags & diag_up_flag != 0 {
-                merge_changed_player(
-                    &mut changed_player,
-                    update_direction_cache(
-                        caches,
-                        x,
-                        y,
-                        DIAGONAL_UP,
-                        diagonal_up.hypothetical_shapes(BOARD_SIZE - 1 - y, renju),
-                    ),
-                );
-            }
-            for (player, changed) in changed_player.into_iter().enumerate() {
-                if changed {
-                    let is_dt3 = update_bucket_attack(board, caches, x, y, player, rule);
-                    if renju && player == 0 {
-                        caches.set_dt3_present(x, y, is_dt3);
-                        comp[x][y] |= BLACK_REFRESHED_FLAG;
-                    }
-                }
-            }
-        } else {
-            clear_occupied_point(caches, x, y);
-            if renju {
-                caches.set_dt3_present(x, y, false);
+    let center_changed = old_cell != new_cell;
+    let mut old_center_zero = [[false; 4]; 2];
+    if center_changed {
+        for (player, row) in old_center_zero.iter_mut().enumerate() {
+            for (dir, slot) in row.iter_mut().enumerate() {
+                *slot = ((caches.shape_cache[player][cx][cy][dir] >> 16) & 15) == 0;
             }
         }
-        add_empty_bucket_contribution(board, caches, x, y);
-        caches.board_shadow[x][y] = cell;
+        if old_cell != EMPTY {
+            let old_player = side_index(old_cell);
+            let old_cc = caches.dgn_cc[cx][cy];
+            caches.dgn_sum[old_player] -= dgn_contribution(old_cc);
+            caches.set_dgn_cc(cx, cy, 0);
+        }
+    }
+    update_occupied_transition(caches, cx, cy, old_cell, new_cell);
+
+    let skip_stone = center_changed.then_some((cx, cy));
+    // Process center cell (cx, cy) directly (the sole intersection of all 4 lines).
+    remove_empty_bucket_contribution(caches, cx, cy);
+    if new_cell == EMPTY {
+        let notify_center_dgn = !center_changed;
+        let mut changed_player = [false; 2];
+        merge_changed_player(
+            &mut changed_player,
+            update_direction_cache(
+                board,
+                caches,
+                cx,
+                cy,
+                HORIZONTAL,
+                horizontal.hypothetical_shapes(cy, renju),
+                notify_center_dgn,
+                skip_stone,
+            ),
+        );
+        merge_changed_player(
+            &mut changed_player,
+            update_direction_cache(
+                board,
+                caches,
+                cx,
+                cy,
+                VERTICAL,
+                vertical.hypothetical_shapes(cx, renju),
+                notify_center_dgn,
+                skip_stone,
+            ),
+        );
+        merge_changed_player(
+            &mut changed_player,
+            update_direction_cache(
+                board,
+                caches,
+                cx,
+                cy,
+                DIAGONAL_DOWN,
+                diagonal_down.hypothetical_shapes(cy, renju),
+                notify_center_dgn,
+                skip_stone,
+            ),
+        );
+        merge_changed_player(
+            &mut changed_player,
+            update_direction_cache(
+                board,
+                caches,
+                cx,
+                cy,
+                DIAGONAL_UP,
+                diagonal_up.hypothetical_shapes(BOARD_SIZE - 1 - cy, renju),
+                notify_center_dgn,
+                skip_stone,
+            ),
+        );
+        for (player, changed) in changed_player.into_iter().enumerate() {
+            if changed {
+                let is_dt3 = update_bucket_attack(board, caches, cx, cy, player, rule);
+                if renju && player == 0 {
+                    caches.set_dt3_present(cx, cy, is_dt3);
+                    set_point_bit(&mut black_refreshed, cx, cy);
+                }
+            }
+        }
+    } else {
+        clear_occupied_point(caches, cx, cy);
+        if renju {
+            caches.set_dt3_present(cx, cy, false);
+        }
+    }
+    if center_changed {
+        update_center_neighbor_dgn(board, caches, cx, cy, old_cell, new_cell, &old_center_zero);
+    }
+    add_empty_bucket_contribution(board, caches, cx, cy);
+    caches.board_shadow[cx][cy] = new_cell;
+
+    // Non-center dirty points lie on strictly one of the 4 lines through (cx, cy).
+    let (h_fwd, h_bwd) = horizontal.neighbor_counts(cy, radius);
+    for (dy, count) in [(1_isize, h_fwd), (-1_isize, h_bwd)] {
+        for step in 1..=count as isize {
+            let y = (cy as isize + step * dy) as usize;
+            update_line_neighbor_point(
+                board,
+                caches,
+                cx,
+                y,
+                HORIZONTAL,
+                horizontal.hypothetical_shapes(y, renju),
+                rule,
+                renju,
+                skip_stone,
+                &mut black_refreshed,
+            );
+        }
+    }
+    let (v_fwd, v_bwd) = vertical.neighbor_counts(cx, radius);
+    for (dx, count) in [(1_isize, v_fwd), (-1_isize, v_bwd)] {
+        for step in 1..=count as isize {
+            let x = (cx as isize + step * dx) as usize;
+            update_line_neighbor_point(
+                board,
+                caches,
+                x,
+                cy,
+                VERTICAL,
+                vertical.hypothetical_shapes(x, renju),
+                rule,
+                renju,
+                skip_stone,
+                &mut black_refreshed,
+            );
+        }
+    }
+    let (dd_fwd, dd_bwd) = diagonal_down.neighbor_counts(cy, radius);
+    for (dx, dy, count) in [(-1_isize, 1_isize, dd_fwd), (1_isize, -1_isize, dd_bwd)] {
+        for step in 1..=count as isize {
+            let x = (cx as isize + step * dx) as usize;
+            let y = (cy as isize + step * dy) as usize;
+            update_line_neighbor_point(
+                board,
+                caches,
+                x,
+                y,
+                DIAGONAL_DOWN,
+                diagonal_down.hypothetical_shapes(y, renju),
+                rule,
+                renju,
+                skip_stone,
+                &mut black_refreshed,
+            );
+        }
+    }
+    let (up_fwd, up_bwd) = diagonal_up.neighbor_counts(BOARD_SIZE - 1 - cy, radius);
+    for (dx, dy, count) in [(1_isize, 1_isize, up_bwd), (-1_isize, -1_isize, up_fwd)] {
+        for step in 1..=count as isize {
+            let x = (cx as isize + step * dx) as usize;
+            let y = (cy as isize + step * dy) as usize;
+            update_line_neighbor_point(
+                board,
+                caches,
+                x,
+                y,
+                DIAGONAL_UP,
+                diagonal_up.hypothetical_shapes(BOARD_SIZE - 1 - y, renju),
+                rule,
+                renju,
+                skip_stone,
+                &mut black_refreshed,
+            );
+        }
+    }
+
+    if center_changed && new_cell != EMPTY {
+        let new_player = side_index(new_cell);
+        let cc = blocked_neighbor_count(
+            board.grid_rows(),
+            &caches.shape_cache[new_player],
+            cx,
+            cy,
+            board.size(),
+        ) as u8;
+        caches.set_dgn_cc(cx, cy, cc);
+        caches.dgn_sum[new_player] += dgn_contribution(cc);
     }
 
     if renju {
-        refresh_renju_apparent_double_three_points(board, caches, &comp, BLACK_REFRESHED_FLAG);
+        refresh_renju_apparent_double_three_points(board, caches, &black_refreshed);
     }
 }
 
-fn mark_dirty_cell(
-    comp: &mut [[u8; BOARD_SIZE]; BOARD_SIZE],
-    dirty: &mut [Move; BOARD_SIZE * BOARD_SIZE],
-    dirty_len: &mut usize,
+#[inline(always)]
+fn set_point_bit(bits: &mut [u64; 4], x: usize, y: usize) {
+    let idx = y * BOARD_SIZE + x;
+    bits[idx >> 6] |= 1_u64 << (idx & 63);
+}
+
+#[inline(always)]
+fn has_point_bit(bits: &[u64; 4], idx: usize) -> bool {
+    (bits[idx >> 6] & (1_u64 << (idx & 63))) != 0
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn update_line_neighbor_point(
+    board: &Board,
+    caches: &mut EvalCaches,
     x: usize,
     y: usize,
-    flags: u8,
+    direction: i32,
+    shapes: [i32; 2],
+    rule: RuleSet,
+    renju: bool,
+    skip_stone: Option<(usize, usize)>,
+    black_refreshed: &mut [u64; 4],
 ) {
-    if comp[x][y] == 0 {
-        dirty[*dirty_len] = (y * BOARD_SIZE + x) as Move;
-        *dirty_len += 1;
+    let cell = board.grid_rows()[y][x];
+    if cell == EMPTY {
+        let was_empty = caches.board_shadow[x][y] == EMPTY;
+        if !was_empty {
+            remove_empty_bucket_contribution(caches, x, y);
+        }
+        let changed_player =
+            update_direction_cache(board, caches, x, y, direction, shapes, true, skip_stone);
+        for (player, changed) in changed_player.into_iter().enumerate() {
+            if changed {
+                let old_bucket = caches.value_cache[player][x][y] as usize;
+                let is_dt3 = update_bucket_attack(board, caches, x, y, player, rule);
+                if was_empty {
+                    let new_bucket = caches.value_cache[player][x][y] as usize;
+                    if old_bucket != new_bucket {
+                        caches.dec_empty_bucket(player, old_bucket);
+                        caches.inc_empty_bucket(player, new_bucket);
+                    }
+                }
+                if renju && player == 0 {
+                    caches.set_dt3_present(x, y, is_dt3);
+                    set_point_bit(black_refreshed, x, y);
+                }
+            }
+        }
+        if !was_empty {
+            add_empty_bucket_contribution(board, caches, x, y);
+            caches.board_shadow[x][y] = EMPTY;
+        }
+    } else if caches.board_shadow[x][y] != cell {
+        remove_empty_bucket_contribution(caches, x, y);
+        clear_occupied_point(caches, x, y);
+        if renju {
+            caches.set_dt3_present(x, y, false);
+        }
+        caches.board_shadow[x][y] = cell;
     }
-    comp[x][y] |= flags;
 }
 
 pub fn move_value(caches: &EvalCaches, x: usize, y: usize, side: i8, config: &EngineConfig) -> f64 {
@@ -463,23 +602,33 @@ fn side_index(side: i8) -> usize {
 
 fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
     caches.empty_bucket_counts = [[0; DSHAPE_SIZE]; 2];
+    caches.nonzero_bucket_mask = [[0; 3]; 2];
     caches.occupied_moves = [0; BOARD_AREA];
     caches.occupied_len = 0;
+    caches.dgn_cc = [[0; BOARD_SIZE]; BOARD_SIZE];
+    caches.dgn_sum = [0; 2];
+    caches.dgn_cc_log.clear();
 
-    for x in 0..board.size() {
-        for y in 0..board.size() {
-            let cell = board.grid_rows()[y][x];
+    let size = board.size();
+    let grid = board.grid_rows();
+    for x in 0..size {
+        for y in 0..size {
+            let cell = grid[y][x];
             caches.board_shadow[x][y] = cell;
             if cell == EMPTY {
                 for player in 0..2 {
                     let bucket = caches.value_cache[player][x][y] as usize;
-                    debug_assert!(bucket < DSHAPE_SIZE);
-                    caches.empty_bucket_counts[player][bucket] += 1;
+                    caches.inc_empty_bucket(player, bucket);
                 }
             } else {
                 let move_ = (y * BOARD_SIZE + x) as Move;
                 caches.occupied_moves[caches.occupied_len] = move_;
                 caches.occupied_len += 1;
+                let player = side_index(cell);
+                let cc =
+                    blocked_neighbor_count(grid, &caches.shape_cache[player], x, y, size) as u8;
+                caches.dgn_cc[x][y] = cc;
+                caches.dgn_sum[player] += dgn_contribution(cc);
             }
         }
     }
@@ -491,9 +640,7 @@ fn remove_empty_bucket_contribution(caches: &mut EvalCaches, x: usize, y: usize)
     }
     for player in 0..2 {
         let bucket = caches.value_cache[player][x][y] as usize;
-        debug_assert!(bucket < DSHAPE_SIZE);
-        debug_assert!(caches.empty_bucket_counts[player][bucket] > 0);
-        caches.empty_bucket_counts[player][bucket] -= 1;
+        caches.dec_empty_bucket(player, bucket);
     }
 }
 
@@ -503,8 +650,7 @@ fn add_empty_bucket_contribution(board: &Board, caches: &mut EvalCaches, x: usiz
     }
     for player in 0..2 {
         let bucket = caches.value_cache[player][x][y] as usize;
-        debug_assert!(bucket < DSHAPE_SIZE);
-        caches.empty_bucket_counts[player][bucket] += 1;
+        caches.inc_empty_bucket(player, bucket);
     }
 }
 
@@ -555,16 +701,57 @@ fn merge_changed_player(accumulator: &mut [bool; 2], changed: [bool; 2]) {
     accumulator[1] |= changed[1];
 }
 
+const DIRECTION_STEPS: [(isize, isize); 4] = [(0, 1), (1, 0), (-1, 1), (1, 1)];
+
+fn update_center_neighbor_dgn(
+    board: &Board,
+    caches: &mut EvalCaches,
+    cx: usize,
+    cy: usize,
+    old_cell: i8,
+    new_cell: i8,
+    old_center_zero: &[[bool; 4]; 2],
+) {
+    let grid = board.grid_rows();
+    let size = board.size() as isize;
+    for &(dx, dy, dir) in &NEIGHBOR_CHECKS {
+        let ox = cx as isize + dx;
+        let oy = cy as isize + dy;
+        if ox < 0 || oy < 0 || ox >= size || oy >= size {
+            continue;
+        }
+        let (ux, uy) = (ox as usize, oy as usize);
+        let stone = grid[uy][ux];
+        if stone == EMPTY {
+            continue;
+        }
+        let player = side_index(stone);
+        let old_blocked = old_cell != EMPTY || old_center_zero[player][dir];
+        let new_blocked =
+            new_cell != EMPTY || ((caches.shape_cache[player][cx][cy][dir] >> 16) & 15) == 0;
+        if old_blocked != new_blocked {
+            caches.adjust_dgn_cc(ux, uy, player, if new_blocked { 1 } else { -1 });
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn update_direction_cache(
+    board: &Board,
     caches: &mut EvalCaches,
     x: usize,
     y: usize,
     direction: i32,
     shapes: [i32; 2],
+    notify_dgn: bool,
+    skip_stone: Option<(usize, usize)>,
 ) -> [bool; 2] {
     let mut changed = [false; 2];
+    let direction_index = direction as usize;
+    let (dx, dy) = DIRECTION_STEPS[direction_index];
+    let grid = board.grid_rows();
+    let size = board.size() as isize;
     for (player, new_shape) in shapes.into_iter().enumerate() {
-        let direction_index = direction as usize;
         let old = caches.shape_cache[player][x][y][direction_index];
         if old != new_shape {
             if caches.active_snapshot_count > 0 {
@@ -572,6 +759,28 @@ fn update_direction_cache(
             }
             caches.shape_cache[player][x][y][direction_index] = new_shape;
             changed[player] = true;
+            if notify_dgn {
+                let old_zero = ((old >> 16) & 15) == 0;
+                let new_zero = ((new_shape >> 16) & 15) == 0;
+                if old_zero != new_zero {
+                    let target_stone = if player == 0 { BLACK } else { WHITE };
+                    let delta = if new_zero { 1 } else { -1 };
+                    for sign in [-1_isize, 1_isize] {
+                        let ox = x as isize + sign * dx;
+                        let oy = y as isize + sign * dy;
+                        if ox < 0 || oy < 0 || ox >= size || oy >= size {
+                            continue;
+                        }
+                        let (ux, uy) = (ox as usize, oy as usize);
+                        if skip_stone == Some((ux, uy)) {
+                            continue;
+                        }
+                        if grid[uy][ux] == target_stone {
+                            caches.adjust_dgn_cc(ux, uy, player, delta);
+                        }
+                    }
+                }
+            }
         }
     }
     changed
@@ -650,8 +859,7 @@ fn refresh_dt3_membership(caches: &mut EvalCaches, board: &Board, x: usize, y: u
 fn refresh_renju_apparent_double_three_points(
     board: &Board,
     caches: &mut EvalCaches,
-    comp: &[[u8; BOARD_SIZE]; BOARD_SIZE],
-    skip_flag: u8,
+    black_refreshed: &[u64; 4],
 ) {
     let player = 0_usize;
 
@@ -665,7 +873,7 @@ fn refresh_renju_apparent_double_three_points(
         let move_ = caches.dt3_members[i] as usize;
         let x = move_ % BOARD_SIZE;
         let y = move_ / BOARD_SIZE;
-        if !caches.dt3_present[x][y] || (comp[x][y] & skip_flag) != 0 {
+        if !caches.dt3_present[x][y] || has_point_bit(black_refreshed, move_) {
             continue;
         }
 
@@ -687,11 +895,8 @@ fn refresh_renju_apparent_double_three_points(
 
         let old_bucket_index = old_bucket as usize;
         let new_bucket_index = bucket as usize;
-        debug_assert!(old_bucket_index < DSHAPE_SIZE);
-        debug_assert!(new_bucket_index < DSHAPE_SIZE);
-        debug_assert!(caches.empty_bucket_counts[player][old_bucket_index] > 0);
-        caches.empty_bucket_counts[player][old_bucket_index] -= 1;
-        caches.empty_bucket_counts[player][new_bucket_index] += 1;
+        caches.dec_empty_bucket(player, old_bucket_index);
+        caches.inc_empty_bucket(player, new_bucket_index);
         set_bucket_attack(caches, x, y, player, bucket, attack);
     }
 }

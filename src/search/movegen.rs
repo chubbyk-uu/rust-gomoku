@@ -123,10 +123,20 @@ const LEGAL_UNCHECKED: u8 = 0;
 const LEGAL_FALSE: u8 = 1;
 const LEGAL_TRUE: u8 = 2;
 
-struct MoveAnalysis {
+#[inline(always)]
+fn fast_trunc(v: f64) -> f64 {
+    if v.abs() < 4_503_599_627_370_496.0 {
+        (v as i64) as f64
+    } else {
+        v.trunc()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MoveAnalysis {
     vbw_map: [f64; BOARD_AREA],
-    self_attack_map: [i32; BOARD_AREA],
-    opp_attack_map: [i32; BOARD_AREA],
+    self_attack_map: [i8; BOARD_AREA],
+    opp_attack_map: [i8; BOARD_AREA],
     legal_state: [u8; BOARD_AREA],
     sglflag: i32,
     hsflag: Option<Move>,
@@ -134,7 +144,7 @@ struct MoveAnalysis {
 }
 
 impl MoveAnalysis {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             vbw_map: [0.0; BOARD_AREA],
             self_attack_map: [0; BOARD_AREA],
@@ -144,6 +154,13 @@ impl MoveAnalysis {
             hsflag: None,
             winpri: false,
         }
+    }
+
+    #[inline(always)]
+    fn reset_scalars(&mut self) {
+        self.sglflag = 0;
+        self.hsflag = None;
+        self.winpri = false;
     }
 
     fn is_rule_legal(
@@ -421,8 +438,8 @@ pub fn diagnose_candidates(
             move_,
             move_value: analysis.vbw_map[move_index],
             adjusted_move_value,
-            self_attack: analysis.self_attack_map[move_index],
-            opp_attack: analysis.opp_attack_map[move_index],
+            self_attack: i32::from(analysis.self_attack_map[move_index]),
+            opp_attack: i32::from(analysis.opp_attack_map[move_index]),
             requires_full_detector,
             forbidden_kind,
             rule_legal,
@@ -443,7 +460,8 @@ pub fn diagnose_candidates(
     }
 }
 
-pub(crate) fn generate_candidates_with_coverage(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_candidates_with_coverage_scratch(
     board: &Board,
     caches: &EvalCaches,
     side: i8,
@@ -453,10 +471,22 @@ pub(crate) fn generate_candidates_with_coverage(
     preferred_move: Option<Move>,
     preserve_scan_order: bool,
     coverage: &CoverageTracker,
+    analysis: &mut MoveAnalysis,
 ) -> CandidateGenerationResult {
     let mut moves_buf = CoveredMovesBuf::default();
     coverage.collect_moves(board, &mut moves_buf);
-    generate_candidates_from_moves(
+    let moves = moves_buf.as_slice();
+    analysis.reset_scalars();
+    analyze_moves(
+        board,
+        caches,
+        side,
+        config,
+        root_allowed_moves,
+        moves,
+        analysis,
+    );
+    select_candidates(
         board,
         caches,
         side,
@@ -466,10 +496,12 @@ pub(crate) fn generate_candidates_with_coverage(
         preferred_move,
         preserve_scan_order,
         false,
-        moves_buf.as_slice(),
+        moves,
+        analysis,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_candidates_from_moves(
     board: &Board,
     caches: &EvalCaches,
@@ -521,13 +553,14 @@ fn analyze_moves(
 
     for &move_ in moves {
         let (x, y) = move_to_xy(move_).expect("covered move is valid");
-        let vbw = move_value(caches, x, y, side, config).trunc();
+        let vbw = fast_trunc(move_value(caches, x, y, side, config));
         let att1 = attack_level(caches, x, y, side);
         let att2 = attack_level(caches, x, y, -side);
         let move_index = move_ as usize;
         analysis.vbw_map[move_index] = vbw;
-        analysis.self_attack_map[move_index] = att1;
-        analysis.opp_attack_map[move_index] = att2;
+        analysis.self_attack_map[move_index] = att1 as i8;
+        analysis.opp_attack_map[move_index] = att2 as i8;
+        analysis.legal_state[move_index] = LEGAL_UNCHECKED;
 
         if vbw <= 0.0
             || root_allowed_moves.is_some_and(|allowed| !allowed.contains(&move_))
@@ -593,8 +626,8 @@ fn select_candidates(
         let candidate = Candidate {
             move_,
             order_score: score,
-            self_attack: analysis.self_attack_map[move_index],
-            opp_attack: analysis.opp_attack_map[move_index],
+            self_attack: i32::from(analysis.self_attack_map[move_index]),
+            opp_attack: i32::from(analysis.opp_attack_map[move_index]),
         };
         if score >= f64::from(WIN) {
             candidates = vec![candidate];

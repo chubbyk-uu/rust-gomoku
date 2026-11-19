@@ -12,7 +12,7 @@ use crate::patterns::{DIAGONAL_DOWN, DIAGONAL_UP, HORIZONTAL, VERTICAL};
 use crate::rules::{classify_forbidden_move, RuleSet};
 use crate::types::Move;
 
-const NEIGHBOR_CHECKS: [(isize, isize, usize); 8] = [
+pub(crate) const NEIGHBOR_CHECKS: [(isize, isize, usize); 8] = [
     (-1, -1, 3),
     (-1, 0, 1),
     (-1, 1, 2),
@@ -141,27 +141,38 @@ pub fn evaluate_board_main_cached(
 
     let player = if side == BLACK { 0 } else { 1 };
     let opponent = 1 - player;
-    let offensive = bucket_dot(
+    let offensive = bucket_dot_sparse(
         &caches.empty_bucket_counts[player],
+        &caches.nonzero_bucket_mask[player],
         &config.eval_tables.last_eval,
     );
-    let defensive = bucket_dot(
+    let defensive = bucket_dot_sparse(
         &caches.empty_bucket_counts[opponent],
+        &caches.nonzero_bucket_mask[opponent],
         &config.eval_tables.next_eval,
     );
-    let dgn = evaluate_dgn_from_occupied(board, caches, side);
+    let dgn = caches.dgn_sum[opponent] - caches.dgn_sum[player];
+    #[cfg(debug_assertions)]
+    debug_assert_eq!(dgn, evaluate_dgn_from_occupied(board, caches, side));
     (offensive - defensive, dgn)
 }
 
 #[inline(always)]
-fn bucket_dot(counts: &[u16; DSHAPE_SIZE], values: &[f64]) -> f64 {
+fn bucket_dot_sparse(counts: &[u16; DSHAPE_SIZE], mask: &[u64; 3], values: &[f64]) -> f64 {
     let mut total = 0.0;
-    for bucket in 0..DSHAPE_SIZE {
-        total += f64::from(counts[bucket]) * values[bucket];
+    for (word_idx, &word) in mask.iter().enumerate() {
+        let mut bits = word;
+        let base = word_idx << 6;
+        while bits != 0 {
+            let bucket = base + bits.trailing_zeros() as usize;
+            total += f64::from(counts[bucket]) * values[bucket];
+            bits &= bits - 1;
+        }
     }
     total
 }
 
+#[cfg(debug_assertions)]
 fn evaluate_dgn_from_occupied(board: &Board, caches: &EvalCaches, side: i8) -> i32 {
     let player = if side == BLACK { 0 } else { 1 };
     let opponent = 1 - player;
@@ -199,7 +210,7 @@ fn evaluate_dgn_from_occupied(board: &Board, caches: &EvalCaches, side: i8) -> i
 }
 
 #[inline(always)]
-fn blocked_neighbor_count(
+pub(crate) fn blocked_neighbor_count(
     grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],
     shape_cache: &[[[i32; 4]; BOARD_SIZE]; BOARD_SIZE],
     x: usize,

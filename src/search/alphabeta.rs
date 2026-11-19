@@ -11,10 +11,13 @@ use crate::board::{move_to_xy, Board};
 use crate::config::{EngineConfig, EngineProfile};
 use crate::constants::{BOARD_AREA, HASHF_ALPHA, HASHF_BETA, HASHF_EXACT, INF, WIN};
 use crate::eval::{evaluate_board, value_wide_compute_for_rule, EvalCaches, EvalSnapshot};
-use crate::search::movegen::{generate_candidates_with_coverage, Candidate, CoverageTracker};
+use crate::search::movegen::{
+    generate_candidates_with_coverage_scratch, Candidate, CoverageTracker, MoveAnalysis,
+};
 use crate::search::ordering::{
     is_quiet_ordering_candidate, order_candidates_fast_history_owned, order_candidates_owned,
-    order_candidates_primary_owned, resolve_candidate_tie_group, NO_KILLER_MOVE, ORDERING_MAX_PLY,
+    order_candidates_primary_owned, order_candidates_primary_slice, resolve_candidate_tie_group,
+    NO_KILLER_MOVE, ORDERING_MAX_PLY,
 };
 use crate::search::{order_candidates_root_classic, TTEntry, TranspositionTable};
 use crate::threats::VCFSearcher;
@@ -212,6 +215,7 @@ pub struct AlphaBetaSearcher {
     killer_moves: [[Move; 2]; ORDERING_MAX_PLY],
     history_scores: [[i32; BOARD_AREA]; 2],
     tt_generation: u16,
+    movegen_scratch: MoveAnalysis,
 }
 
 impl AlphaBetaSearcher {
@@ -223,6 +227,7 @@ impl AlphaBetaSearcher {
             killer_moves: [[NO_KILLER_MOVE; 2]; ORDERING_MAX_PLY],
             history_scores: [[0; BOARD_AREA]; 2],
             tt_generation: 0,
+            movegen_scratch: MoveAnalysis::new(),
         }
     }
 
@@ -234,6 +239,7 @@ impl AlphaBetaSearcher {
             killer_moves: [[NO_KILLER_MOVE; 2]; ORDERING_MAX_PLY],
             history_scores: [[0; BOARD_AREA]; 2],
             tt_generation: 0,
+            movegen_scratch: MoveAnalysis::new(),
         }
     }
 
@@ -458,7 +464,7 @@ impl AlphaBetaSearcher {
             probe.best_move
         };
 
-        let generated = generate_candidates_with_coverage(
+        let generated = generate_candidates_with_coverage_scratch(
             board,
             caches,
             side,
@@ -468,6 +474,7 @@ impl AlphaBetaSearcher {
             tt_best_move,
             options.root,
             coverage,
+            &mut self.movegen_scratch,
         );
         let win_priority = generated.win_priority;
         let single_forcing = generated.single_forcing;
@@ -475,6 +482,7 @@ impl AlphaBetaSearcher {
         let use_fast_history_ordering = self.fast_history_ordering_enabled() && !options.root;
         let lazy_tie_ordering =
             !options.root && !use_fast_history_ordering && !self.config.runtime.nonroot_vcf;
+        let mut rest_primary_sorted = true;
         let mut ordered = if options.root {
             order_candidates_root_classic(board, &generated.candidates, side)
         } else if use_fast_history_ordering {
@@ -495,11 +503,31 @@ impl AlphaBetaSearcher {
             stats.history_hits += ordering_stats.history_hits;
             ordered
         } else if lazy_tie_ordering {
-            order_candidates_primary_owned(generated.candidates, tt_best_move)
+            let mut candidates = generated.candidates;
+            if !win_priority && !single_forcing && candidates.len() > 1 && tt_best_move.is_some() {
+                if let Some(pos) = candidates
+                    .iter()
+                    .position(|candidate| Some(candidate.move_) == tt_best_move)
+                {
+                    candidates.swap(0, pos);
+                    rest_primary_sorted = false;
+                    candidates
+                } else {
+                    order_candidates_primary_owned(candidates, tt_best_move)
+                }
+            } else {
+                order_candidates_primary_owned(candidates, tt_best_move)
+            }
         } else {
             order_candidates_owned(board, generated.candidates, side, tt_best_move)
         };
-        let mut tie_sorted_until = if lazy_tie_ordering { 0 } else { ordered.len() };
+        let mut tie_sorted_until = if !lazy_tie_ordering {
+            ordered.len()
+        } else if !rest_primary_sorted {
+            1
+        } else {
+            0
+        };
         if win_priority && !ordered.is_empty() {
             if lazy_tie_ordering && tie_sorted_until == 0 {
                 let _ = resolve_candidate_tie_group(board, &mut ordered, 0, side, tt_best_move);
@@ -584,6 +612,10 @@ impl AlphaBetaSearcher {
         let mut running_downf = options.downf;
 
         for index in 0..search_limit {
+            if !rest_primary_sorted && index == 1 {
+                order_candidates_primary_slice(&mut ordered[1..]);
+                rest_primary_sorted = true;
+            }
             if lazy_tie_ordering && index >= tie_sorted_until {
                 tie_sorted_until =
                     resolve_candidate_tie_group(board, &mut ordered, index, side, tt_best_move);
