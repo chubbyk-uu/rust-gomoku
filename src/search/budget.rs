@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use super::SearchLimits;
 
+const TIME_CHECK_MASK: usize = 0xFF;
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MoveBudget(Option<Arc<Limits>>);
 
@@ -40,7 +42,14 @@ impl MoveBudget {
 
     pub fn stopped(&self) -> bool {
         self.0.as_ref().is_some_and(|b| {
-            b.interrupted.load(Ordering::Relaxed) || b.deadline.is_some_and(|d| Instant::now() >= d)
+            if b.interrupted.load(Ordering::Relaxed) {
+                return true;
+            }
+            if b.deadline.is_some_and(|d| Instant::now() >= d) {
+                b.interrupted.store(true, Ordering::Relaxed);
+                return true;
+            }
+            false
         })
     }
 
@@ -48,12 +57,18 @@ impl MoveBudget {
         let Some(b) = &self.0 else {
             return true;
         };
-        if self.stopped() {
+        if b.interrupted.load(Ordering::Relaxed) {
             return false;
         }
         // Limited searches run serially, including all tactical subsearches.
         let count = b.nodes.load(Ordering::Relaxed);
         if b.max_nodes.is_some_and(|max| count >= max) {
+            b.interrupted.store(true, Ordering::Relaxed);
+            return false;
+        }
+        if b.deadline
+            .is_some_and(|d| (count == 0 || (count & TIME_CHECK_MASK) == 0) && Instant::now() >= d)
+        {
             b.interrupted.store(true, Ordering::Relaxed);
             return false;
         }
@@ -63,5 +78,35 @@ impl MoveBudget {
 
     pub fn nodes(&self) -> Option<usize> {
         self.0.as_ref().map(|b| b.nodes.load(Ordering::Relaxed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn move_budget_enforces_exact_node_limit() {
+        let budget = MoveBudget::new(SearchLimits {
+            node_limit: Some(3),
+            ..SearchLimits::default()
+        });
+        assert!(budget.enter());
+        assert!(budget.enter());
+        assert!(budget.enter());
+        assert!(!budget.enter());
+        assert!(budget.stopped());
+        assert_eq!(budget.nodes(), Some(3));
+    }
+
+    #[test]
+    fn move_budget_zero_ms_deadline_stops_on_first_enter() {
+        let budget = MoveBudget::new(SearchLimits {
+            time_limit_ms: Some(0.0),
+            ..SearchLimits::default()
+        });
+        assert!(!budget.enter());
+        assert!(budget.stopped());
+        assert_eq!(budget.nodes(), Some(0));
     }
 }

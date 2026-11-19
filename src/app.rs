@@ -6,8 +6,8 @@ use serde::Serialize;
 
 use crate::{
     apply_engine_profile, move_to_xy, xy_to_move, Board, EngineConfig, EngineProfile,
-    ForbiddenKind, RootSearcher, RootTrace, RuleSet, SearchLimits, SearchResult, Side, BLACK,
-    BOARD_SIZE, EMPTY, WHITE,
+    ForbiddenKind, RootSearcher, RootTrace, RuleSet, SearchLimits, SearchResult, Side,
+    TranspositionTable, BLACK, BOARD_SIZE, EMPTY, WHITE,
 };
 
 /// Who controls the two sides of the board.
@@ -135,6 +135,7 @@ pub struct GameController {
     last_search_ms: Option<f64>,
     difficulty: Option<SearchDifficulty>,
     generation: u64,
+    search_tt: Option<TranspositionTable>,
 }
 
 #[derive(Clone)]
@@ -143,6 +144,7 @@ pub struct EngineSearchTask {
     config: EngineConfig,
     limits: SearchLimits,
     generation: u64,
+    tt: TranspositionTable,
 }
 
 pub struct EngineSearchCompletion {
@@ -150,6 +152,7 @@ pub struct EngineSearchCompletion {
     trace: Option<RootTrace>,
     elapsed_ms: f64,
     generation: u64,
+    tt: TranspositionTable,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -255,6 +258,7 @@ impl GameController {
             last_search_ms: None,
             difficulty,
             generation: 0,
+            search_tt: None,
         }
     }
 
@@ -295,6 +299,7 @@ impl GameController {
         self.last_result = None;
         self.last_trace = None;
         self.last_search_ms = None;
+        self.search_tt = None;
         true
     }
 
@@ -382,6 +387,7 @@ impl GameController {
         }
 
         self.generation = self.generation.wrapping_add(1);
+        self.search_tt = None;
         if self.mode == GameMode::TwoPlayer {
             // Two humans alternate, so a single undo hands the turn back.
             let _ = self.board.undo();
@@ -472,11 +478,16 @@ impl GameController {
         self.engine_thinking = true;
         self.error = None;
         self.status = "引擎思考中...".to_string();
+        let tt = self
+            .search_tt
+            .get_or_insert_with(TranspositionTable::default)
+            .clone();
         Some(EngineSearchTask {
             board: self.board.clone(),
             config: self.config.clone(),
             limits: self.search_limits(),
             generation: self.generation,
+            tt,
         })
     }
 
@@ -484,6 +495,7 @@ impl GameController {
         if self.generation != completion.generation {
             return false;
         }
+        self.search_tt = Some(completion.tt);
         if self.board.winner() == EMPTY && self.board.side_to_move() != self.human_side {
             if !self.board.is_legal_move_for_rule(
                 completion.result.move_,
@@ -667,7 +679,7 @@ impl GameController {
 
 impl EngineSearchTask {
     pub fn run(mut self) -> EngineSearchCompletion {
-        let mut searcher = RootSearcher::new(self.config);
+        let mut searcher = RootSearcher::with_tt(self.config, self.tt);
         let start = Instant::now();
         let result = searcher
             .try_search(&mut self.board, Some(self.limits))
@@ -677,6 +689,7 @@ impl EngineSearchTask {
             trace: searcher.last_trace,
             elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
             generation: self.generation,
+            tt: searcher.tt,
         }
     }
 }
@@ -957,5 +970,57 @@ mod tests {
         assert_eq!(snapshot.winner, EMPTY);
         assert_eq!(snapshot.status, "和棋。");
         assert!(!snapshot.can_play);
+    }
+
+    #[test]
+    fn engine_search_reuses_tt_across_moves_and_resets_on_new_game_or_undo() {
+        let mut controller = shallow_controller();
+        assert!(controller.new_game(BLACK, RuleSet::Renju, GameMode::VsEngine));
+        assert!(controller.search_tt.is_none());
+
+        assert!(controller.play_human(7, 7));
+        let task1 = controller.prepare_engine_search().unwrap();
+        let tt1 = task1.tt.clone();
+        let completion1 = task1.run();
+        assert!(controller.commit_engine_search(completion1));
+
+        // Play another legal human move away from the engine's reply.
+        let next_xy = (0..BOARD_SIZE)
+            .flat_map(|y| (0..BOARD_SIZE).map(move |x| (x, y)))
+            .find(|&(x, y)| controller.board.at(x, y) == Ok(EMPTY))
+            .unwrap();
+        assert!(controller.play_human(next_xy.0, next_xy.1));
+
+        let task2 = controller.prepare_engine_search().unwrap();
+        assert!(
+            task2.tt.is_shared_with(&tt1),
+            "consecutive engine moves in the same game should reuse the same TT"
+        );
+        let completion2 = task2.run();
+        assert!(controller.commit_engine_search(completion2));
+
+        controller.undo_turn();
+        assert!(
+            controller.search_tt.is_none(),
+            "undo should clear TT to avoid stale priority entries"
+        );
+
+        assert!(controller.play_human(next_xy.0, next_xy.1));
+        let stale_task = controller.prepare_engine_search().unwrap();
+        let stale_tt = stale_task.tt.clone();
+        assert!(
+            !stale_tt.is_shared_with(&tt1),
+            "post-undo search should allocate a fresh TT"
+        );
+
+        // Start a new game while the stale task is in flight; committing it must not overwrite TT.
+        assert!(controller.new_game(BLACK, RuleSet::Freestyle, GameMode::VsEngine));
+        assert!(controller.search_tt.is_none());
+        let stale_completion = stale_task.run();
+        assert!(!controller.commit_engine_search(stale_completion));
+        assert!(
+            controller.search_tt.is_none(),
+            "stale completion must not repopulate search_tt after new_game"
+        );
     }
 }

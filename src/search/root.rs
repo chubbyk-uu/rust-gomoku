@@ -18,7 +18,7 @@ use crate::search::{
     AlphaBetaSearcher, RootCandidateProfile, SearchOptions, SearchStats, TranspositionTable,
 };
 use crate::threats::{
-    forcing_threat_moves_for_rule, has_vct_trigger_for_rule, VCFSearcher, VCTSearcher, VCTStats,
+    has_vct_trigger_for_rule, ThreatBoardView, VCFSearcher, VCTSearcher, VCTStats,
 };
 use crate::types::{Move, Side};
 
@@ -430,7 +430,15 @@ impl RootSearcher {
         if trial.winner() == side {
             return (true, None);
         }
-        if !forcing_threat_moves_for_rule(&trial, -side, self.config.rule_set).is_empty() {
+        let (mx, my) = move_to_xy(move_).expect("verified move stays in bounds");
+        let mut view = ThreatBoardView::from_board_with_rule(trial.clone(), self.config.rule_set);
+        if view.first_counter_win(-side, false).is_some() {
+            return (false, Some("opponent_forcing"));
+        }
+        if view.has_winning_a4(mx, my) {
+            return (true, None);
+        }
+        if !view.forcing_threat_moves(-side).is_empty() {
             return (false, Some("opponent_forcing"));
         }
         if self.config.runtime.compute_vcf
@@ -1193,5 +1201,106 @@ mod tests {
                 assert_eq!(result.score, INF);
             }
         }
+    }
+
+    #[test]
+    fn root_vct_verification_accepts_winning_open_four_against_opponent_non_immediate_forcing() {
+        for rule in [RuleSet::Freestyle, RuleSet::Renju] {
+            let mut board = Board::new();
+            // Black has three in a row at (6,7),(7,7),(8,7); playing (5,7) makes an unstoppable open four.
+            // White has three in a row at (6,10),(7,10),(8,10), so white has a forcing b4/a4 threat
+            // on row 10, but NO immediate 1-move five.
+            for (x, y, side) in [
+                (6, 7, BLACK),
+                (6, 10, WHITE),
+                (7, 7, BLACK),
+                (7, 10, WHITE),
+                (8, 7, BLACK),
+                (8, 10, WHITE),
+            ] {
+                board
+                    .play_for_rule(xy_to_move(x, y).unwrap(), Some(side), rule)
+                    .unwrap();
+            }
+
+            let mut config = load_default_config();
+            config.rule_set = rule;
+            let mut searcher = RootSearcher::new(config);
+            let (accepted, reason) =
+                searcher.verify_root_vct_move(&board, BLACK, xy_to_move(5, 7).unwrap());
+            assert!(
+                accepted,
+                "{rule:?}: winning open four should not be rejected when opponent has no immediate five (reason={reason:?})"
+            );
+            assert_eq!(reason, None);
+        }
+    }
+
+    #[test]
+    fn root_vct_verification_rejects_open_four_when_opponent_has_immediate_five() {
+        for rule in [RuleSet::Freestyle, RuleSet::Renju] {
+            let mut board = Board::new();
+            // Black can make an open four at (5,7), but White already has four in a row at
+            // (6,10)..(9,10) and wins immediately on the next move.
+            for (x, y, side) in [
+                (6, 7, BLACK),
+                (6, 10, WHITE),
+                (7, 7, BLACK),
+                (7, 10, WHITE),
+                (8, 7, BLACK),
+                (8, 10, WHITE),
+                (1, 1, BLACK),
+                (9, 10, WHITE),
+            ] {
+                board
+                    .play_for_rule(xy_to_move(x, y).unwrap(), Some(side), rule)
+                    .unwrap();
+            }
+
+            let mut config = load_default_config();
+            config.rule_set = rule;
+            // Even with compute_vcf disabled, immediate 1-move opponent five must be rejected.
+            config.runtime.compute_vcf = false;
+            let mut searcher = RootSearcher::new(config);
+            let (accepted, reason) =
+                searcher.verify_root_vct_move(&board, BLACK, xy_to_move(5, 7).unwrap());
+            assert!(
+                !accepted,
+                "{rule:?}: opponent immediate five must reject black open four"
+            );
+            assert_eq!(reason, Some("opponent_forcing"));
+        }
+    }
+
+    #[test]
+    fn renju_root_vct_verification_rejects_fake_open_four_with_overline_endpoint() {
+        let mut board = Board::new();
+        // Black stones at (6,7),(7,7),(8,7) plus (10,7): playing (5,7) makes an apparent open four
+        // (5,7)..(8,7), but the right endpoint (9,7) would complete a 6-in-a-row overline
+        // (5,7)..(10,7), so it is NOT a winning open four under Renju!
+        // White has three in a row on row 10 (forcing counter-threat).
+        for (x, y, side) in [
+            (6, 7, BLACK),
+            (6, 10, WHITE),
+            (7, 7, BLACK),
+            (7, 10, WHITE),
+            (8, 7, BLACK),
+            (8, 10, WHITE),
+            (10, 7, BLACK),
+            (1, 1, WHITE),
+        ] {
+            board.grid_rows_mut()[y][x] = side;
+        }
+
+        let mut config = load_default_config();
+        config.rule_set = RuleSet::Renju;
+        let mut searcher = RootSearcher::new(config);
+        let (accepted, reason) =
+            searcher.verify_root_vct_move(&board, BLACK, xy_to_move(5, 7).unwrap());
+        assert!(
+            !accepted,
+            "Renju fake open four with overline endpoint must not bypass opponent_forcing"
+        );
+        assert_eq!(reason, Some("opponent_forcing"));
     }
 }
