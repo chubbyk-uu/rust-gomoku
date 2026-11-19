@@ -10,11 +10,11 @@ use std::time::Instant;
 use crate::board::{move_to_xy, Board};
 use crate::config::{EngineConfig, EngineProfile};
 use crate::constants::{BOARD_AREA, HASHF_ALPHA, HASHF_BETA, HASHF_EXACT, INF, WIN};
-use crate::eval::{evaluate_board, value_wide_compute_for_rule, EvalCaches};
+use crate::eval::{evaluate_board, value_wide_compute_for_rule, EvalCaches, EvalSnapshot};
 use crate::search::movegen::{generate_candidates_with_coverage, Candidate, CoverageTracker};
 use crate::search::ordering::{
     is_quiet_ordering_candidate, order_candidates_fast_history_owned, order_candidates_owned,
-    NO_KILLER_MOVE, ORDERING_MAX_PLY,
+    order_candidates_primary_owned, resolve_candidate_tie_group, NO_KILLER_MOVE, ORDERING_MAX_PLY,
 };
 use crate::search::{order_candidates_root_classic, TTEntry, TranspositionTable};
 use crate::threats::VCFSearcher;
@@ -315,9 +315,11 @@ impl AlphaBetaSearcher {
             stats,
             options,
             &mut coverage,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn search_with_coverage(
         &mut self,
         board: &mut Board,
@@ -330,6 +332,7 @@ impl AlphaBetaSearcher {
         stats: &mut SearchStats,
         options: SearchOptions<'_>,
         coverage: &mut CoverageTracker,
+        pending_cache: Option<((usize, usize), &mut Option<EvalSnapshot>)>,
     ) -> (i32, Option<Move>) {
         let root_depth = options.root_depth.unwrap_or(depth);
         let priority_base = options.priority_base.unwrap_or(board.move_count() as i32);
@@ -418,6 +421,13 @@ impl AlphaBetaSearcher {
             beta = beta.min(score_from_tt(probe.window_beta, options.ply));
         }
 
+        if let Some(((mx, my), snapshot_slot)) = pending_cache {
+            if snapshot_slot.is_none() {
+                *snapshot_slot = Some(caches.snapshot());
+                value_wide_compute_for_rule(board, caches, (mx, my), self.config.rule_set);
+            }
+        }
+
         if depth <= 0.0 {
             stats.leaf_nodes += 1;
             let mut score =
@@ -463,6 +473,8 @@ impl AlphaBetaSearcher {
         let single_forcing = generated.single_forcing;
         let hostile_threat = generated.hostile_threat;
         let use_fast_history_ordering = self.fast_history_ordering_enabled() && !options.root;
+        let lazy_tie_ordering =
+            !options.root && !use_fast_history_ordering && !self.config.runtime.nonroot_vcf;
         let mut ordered = if options.root {
             order_candidates_root_classic(board, &generated.candidates, side)
         } else if use_fast_history_ordering {
@@ -482,10 +494,16 @@ impl AlphaBetaSearcher {
             stats.killer_hits += ordering_stats.killer_hits;
             stats.history_hits += ordering_stats.history_hits;
             ordered
+        } else if lazy_tie_ordering {
+            order_candidates_primary_owned(generated.candidates, tt_best_move)
         } else {
             order_candidates_owned(board, generated.candidates, side, tt_best_move)
         };
+        let mut tie_sorted_until = if lazy_tie_ordering { 0 } else { ordered.len() };
         if win_priority && !ordered.is_empty() {
+            if lazy_tie_ordering && tie_sorted_until == 0 {
+                let _ = resolve_candidate_tie_group(board, &mut ordered, 0, side, tt_best_move);
+            }
             return (INF - options.ply, Some(ordered[0].move_));
         }
 
@@ -535,10 +553,15 @@ impl AlphaBetaSearcher {
             stats.stop = true;
             return (0, None);
         }
-        if !win_priority && !single_forcing {
+        if !lazy_tie_ordering && !win_priority && !single_forcing {
             ordered.truncate(wide);
         }
-        if ordered.is_empty() {
+        let search_limit = if !win_priority && !single_forcing {
+            ordered.len().min(wide)
+        } else {
+            ordered.len()
+        };
+        if search_limit == 0 {
             return (-INF - 1, None);
         }
 
@@ -552,7 +575,7 @@ impl AlphaBetaSearcher {
             / self.config.root_search.ratio_den as usize)
             + 1)
         .min(wide);
-        let case_count = ordered.len();
+        let case_count = search_limit;
         let (pre_corner, pre_half) = if options.root {
             compute_corner_state(board)
         } else {
@@ -560,8 +583,13 @@ impl AlphaBetaSearcher {
         };
         let mut running_downf = options.downf;
 
-        for (index, candidate) in ordered.iter().copied().enumerate() {
-            let snapshot = caches.snapshot();
+        for index in 0..search_limit {
+            if lazy_tie_ordering && index >= tie_sorted_until {
+                tie_sorted_until =
+                    resolve_candidate_tie_group(board, &mut ordered, index, side, tt_best_move);
+            }
+            let candidate = ordered[index];
+            let mut candidate_snapshot: Option<EvalSnapshot> = None;
             let (mx, my) = move_to_xy(candidate.move_).expect("candidate move is valid");
             let profile_root_candidate = options.root && stats.root_profile;
             let profile_start = profile_root_candidate.then(Instant::now);
@@ -576,7 +604,6 @@ impl AlphaBetaSearcher {
                 .play_assuming_rule_legal(candidate.move_, Some(side), self.config.rule_set)
                 .expect("ordered candidate stays legal");
             coverage.add_move(candidate.move_);
-            value_wide_compute_for_rule(board, caches, (mx, my), self.config.rule_set);
 
             running_downf += index as i32;
             let mut local_downf = running_downf;
@@ -633,6 +660,7 @@ impl AlphaBetaSearcher {
                         stats,
                         child_options,
                         coverage,
+                        Some(((mx, my), &mut candidate_snapshot)),
                     );
                     if let Some(start) = narrow_start {
                         profile_zero_window_nodes +=
@@ -658,6 +686,7 @@ impl AlphaBetaSearcher {
                             stats,
                             child_options,
                             coverage,
+                            Some(((mx, my), &mut candidate_snapshot)),
                         );
                         if let Some(start) = full_start {
                             profile_full_window_nodes +=
@@ -685,6 +714,7 @@ impl AlphaBetaSearcher {
                         stats,
                         child_options,
                         coverage,
+                        Some(((mx, my), &mut candidate_snapshot)),
                     );
                     if let Some(start) = full_start {
                         profile_full_window_nodes += stats.nodes.saturating_sub(full_nodes_before);
@@ -708,7 +738,9 @@ impl AlphaBetaSearcher {
 
             board.undo().expect("ordered candidate was just played");
             coverage.remove_move(candidate.move_);
-            caches.restore_snapshot(&snapshot);
+            if let Some(snapshot) = candidate_snapshot {
+                caches.restore_snapshot(&snapshot);
+            }
             if stats.stop {
                 if profile_root_candidate {
                     stats.root_candidates.push(RootCandidateProfile {

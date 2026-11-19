@@ -128,6 +128,58 @@ pub(crate) fn order_candidates_owned(
     candidates
 }
 
+pub(crate) fn order_candidates_primary_owned(
+    mut candidates: Vec<Candidate>,
+    tt_best_move: Option<Move>,
+) -> Vec<Candidate> {
+    candidates.sort_unstable_by(|a, b| {
+        let a_tt = tt_best_move == Some(a.move_);
+        let b_tt = tt_best_move == Some(b.move_);
+        b_tt.cmp(&a_tt).then_with(|| {
+            b.order_score
+                .partial_cmp(&a.order_score)
+                .expect("candidate scores are finite")
+        })
+    });
+    candidates
+}
+
+pub(crate) fn resolve_candidate_tie_group(
+    board: &Board,
+    ordered: &mut [Candidate],
+    start: usize,
+    side: Side,
+    tt_best_move: Option<Move>,
+) -> usize {
+    let mut end = start + 1;
+    while end < ordered.len() && same_primary_key(ordered[start], ordered[end], tt_best_move) {
+        end += 1;
+    }
+    let group_len = end - start;
+    if group_len > 1 {
+        if group_len <= 16 {
+            let mut keyed = [(0_i32, ordered[start]); 16];
+            for (slot, &candidate) in keyed[..group_len].iter_mut().zip(&ordered[start..end]) {
+                let (x, y) = move_to_xy(candidate.move_).expect("candidate move is in range");
+                *slot = (getmi(board, x, y, side), candidate);
+            }
+            keyed[..group_len]
+                .sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.move_.cmp(&b.1.move_)));
+            for (dst, &(_, candidate)) in ordered[start..end].iter_mut().zip(&keyed[..group_len]) {
+                *dst = candidate;
+            }
+        } else {
+            let mut mi_cache = [0_i32; BOARD_AREA];
+            ordered[start..end].sort_unstable_by(|a, b| {
+                let a_mi = cached_getmi(board, a.move_, side, &mut mi_cache);
+                let b_mi = cached_getmi(board, b.move_, side, &mut mi_cache);
+                b_mi.cmp(&a_mi).then_with(|| a.move_.cmp(&b.move_))
+            });
+        }
+    }
+    end
+}
+
 pub(crate) fn order_candidates_fast_history_owned(
     board: &Board,
     mut candidates: Vec<Candidate>,
@@ -458,5 +510,34 @@ mod tests {
         assert_eq!(moves, vec![static_move, killer_move]);
         assert_eq!(stats.killer_hits, 0);
         assert_eq!(stats.history_hits, 0);
+    }
+
+    #[test]
+    fn lazy_tie_group_ordering_matches_full_order_candidates_owned() {
+        let mut board = Board::new();
+        board.play(xy_to_move(7, 7).unwrap(), Some(1)).unwrap();
+        board.play(xy_to_move(8, 7).unwrap(), Some(-1)).unwrap();
+        board.play(xy_to_move(6, 7).unwrap(), Some(1)).unwrap();
+        let tt_move = xy_to_move(5, 5).unwrap();
+        let raw = vec![
+            candidate(3, 3, 10.0, 0),
+            candidate(7, 6, 10.0, 0),
+            candidate(5, 5, 1.0, 0),
+            candidate(8, 8, 10.0, 0),
+            candidate(2, 2, 5.0, 0),
+            candidate(6, 6, 5.0, 0),
+            candidate(9, 9, 20.0, 0),
+        ];
+
+        let expected = order_candidates_owned(&board, raw.clone(), 1, Some(tt_move));
+        let mut lazy = order_candidates_primary_owned(raw, Some(tt_move));
+        let mut sorted_until = 0;
+        for idx in 0..lazy.len() {
+            if idx >= sorted_until {
+                sorted_until =
+                    resolve_candidate_tie_group(&board, &mut lazy, idx, 1, Some(tt_move));
+            }
+        }
+        assert_eq!(lazy, expected);
     }
 }

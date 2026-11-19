@@ -11,10 +11,44 @@ Do not repeat these directions unless new evidence invalidates the decision:
 - Early stop and broad dynamic pruning: only revisit with a concrete tactical safety proof and fast-vs-base validation.
 - VCF memo-key allocation and VCT/VCF as a per-node hotspot: confirmed non-bottleneck by the 2026-07-02 VCT-path profile (`or_node` 0.27% cumulative, the `(Side, Vec<Move>, Vec<Move>)` memo alloc + sort below the 0.8% floor). Do not pursue memo-key micro-optimization.
 - Root LMR clamp (`net <= 1` for `self_attack >= 3` at root): rejected for default `base` after 100-game real Renju center-opening validation (`48-48-4` overall, `36-37-3` on 38 unseen holdout openings, `+6.3%` avg and `61.7s -> 144.3s` max regression).
+- Restricting `extend_ratio` (`single_forcing || hostile_threat || case_count <= 8` and `ply < root_depth + 4`): rejected despite cutting `p95 -14.2%` and `max 57.4s -> 32.6s`, because 100-game real Renju center-opening strength dropped to `38-61-1` (`38.5%`, `-81.4 Elo`). Do not cut `extend_ratio` in midgame forcing chains.
+- `ThreatBoardView` incremental `win_moves` bitset maintained on every `play()`: rejected (`c25 p68` VCT6 regressed `15.4s -> 23.6s`, `+52.7%`) because trial plays vastly outnumber `first_counter_win` scans.
 
 Current active target:
 
 - Final-depth late root candidates. Future analysis should explain why they are expensive, not re-confirm that they are expensive.
+
+## 2026-11-19 (2) — Long-tail profiling & behavior-equivalent Alpha-Beta hot-path speedup
+
+Context:
+
+- Source: top 5 slowest moves from the 100-game Renju `center_50_prefixes.jsonl` match (`c43 p32` 55.6s / 26.7M nodes, `c25 p68` 53.9s = 16.0s VCT6 + 37.8s AB / 18.8M nodes, `c34 p154` 31.8s / 22.9M nodes, `c34 p83` 29.9s / 16.2M nodes, `c21 p145` 29.3s / 19.6M nodes).
+- `perf` CPU profile on `c43 p32` (12K samples, pure Alpha-Beta):
+  - `value_wide_compute_for_rule` (`32.0%`) + `compute_bucket_attack_and_counts` (`11.8%`) = **`43.8%`**.
+  - `generate_candidates_with_coverage` (`9.7%`) + `getmi` (`7.6%`) + `sort` (`6.5%`) = **`23.8%`**.
+- `perf` CPU profile on `c25 p68` (15K samples, VCT6):
+  - `Board::is_winning_move_for_rule` (`28.0%`) + `first_counter_win` (`20.0%`) = **`48.0%`**, `legal_win_completions` (`18.2%`).
+
+Rejected experiments (reverted):
+
+- TT two-slot same-key dedup + full-bucket probe: mixed on the 5 slow cases (`c21 p145` `-44%`, `c34 p154/p83` `+5%` to `+15%`).
+- `extend_ratio` tactical gate + `ply < root_depth + 4` cap: cut 5 slow cases up to `16x` and 100-game `p95 -14.2%` / `max -43.1%`, but lost `38-61-1` (`38.5%`, `-81.4 Elo`, `WW=3 / LL=14`) on `center_50_prefixes.jsonl`.
+- `ThreatBoardView` incremental `win_moves` bitset on `play()`: regressed `c25 p68` VCT6 `+52.7%` (`15.4s -> 23.6s`).
+
+Kept optimization (100% behavior-equivalent):
+
+- `src/search/alphabeta.rs`: defer `caches.snapshot()` + `value_wide_compute_for_rule()` until after child `terminal_score` and `tt.probe` miss (reusing the materialized snapshot across PVS / `net > 0` re-searches of the same candidate). Eliminates incremental eval updates and snapshot/restore on every TT-cutoff and terminal child.
+- `src/search/ordering.rs` + `src/search/alphabeta.rs`: for non-root, non-`fast_history_ordering`, non-`nonroot_vcf` nodes, run primary sort by `(tt_best_move, order_score)` only and resolve tie-group `getmi` sorting lazily when the candidate loop reaches each tie group.
+
+Verification & A/B timing (5 slow cases at d7, `compute_vct=0`, single-threaded release):
+
+- `c43 white p32`: `12381.2ms -> 7812.4ms` (**`-36.9%`**), identical move `6,2`, score `-33`, nodes `5,295,482`.
+- `c25 white p68`: `7838.6ms -> 5332.5ms` (**`-32.0%`**), identical move `10,4`, score `141`, nodes `3,115,273`.
+- `c34 black p83`: `5570.2ms -> 3816.7ms` (**`-31.5%`**), identical move `6,13`, score `53`, nodes `2,496,885`.
+- `c21 black p145`: `6060.6ms -> 5644.1ms` (**`-6.9%`**), identical move `2,14`, score `-10`, nodes `3,299,678`.
+- `c34 white p154`: `6022.2ms -> 5691.6ms` (**`-5.5%`**), identical move `14,11`, score `-26`, nodes `3,091,334`.
+- Total across 5 slow cases: `37872.8ms -> 28297.3ms` (**`-25.3%`**).
+- Correctness: `cargo fmt --check`, full `cargo test`, release builds, and `scripts/run_diff.py --profile all --check-baselines --jobs 8` (`13/13` passed) all green with zero move/score/node changes.
 
 ## 2026-11-19 — Renju center-opening case-10 LMR clamp experiment & 100-game baseline check
 
