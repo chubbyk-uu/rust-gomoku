@@ -669,6 +669,9 @@ def run_match_task(
     }
 
 
+INCOMPLETE_TERMINATIONS = {"max_moves_cap", "game_timeout"}
+
+
 def elo_from_score(score: float) -> float | None:
     if score <= 0.0 or score >= 1.0:
         return None
@@ -680,15 +683,18 @@ def summarize_paired(
     engine_names: tuple[str, str],
 ) -> dict[str, Any]:
     engine_a, engine_b = engine_names
-    by_case: dict[int, dict[str, str | None]] = {}
+    by_case: dict[int, dict[str, dict[str, Any]]] = {}
     for game in games:
         case_idx = game.get("case_index")
         side = game.get("engine_a_side")
         if case_idx is None or side not in ("black", "white"):
             continue
-        by_case.setdefault(int(case_idx), {})[side] = game.get("winner_engine")
+        by_case.setdefault(int(case_idx), {})[side] = game
 
-    def points_for_a(winner: str | None) -> float | None:
+    def points_for_a(game: dict[str, Any]) -> float | None:
+        if game.get("termination") in INCOMPLETE_TERMINATIONS:
+            return None
+        winner = game.get("winner_engine")
         if winner == engine_a:
             return 1.0
         if winner == engine_b:
@@ -699,12 +705,22 @@ def summarize_paired(
 
     pentanomial = {"WW": 0, "WD": 0, "WL_or_DD": 0, "LD": 0, "LL": 0}
     pair_scores: list[float] = []
+    incomplete_pairs = 0
+    capped_pairs = 0
     for pair in by_case.values():
         if "black" not in pair or "white" not in pair:
             continue
-        p_black = points_for_a(pair["black"])
-        p_white = points_for_a(pair["white"])
+        g_black = pair["black"]
+        g_white = pair["white"]
+        p_black = points_for_a(g_black)
+        p_white = points_for_a(g_white)
         if p_black is None or p_white is None:
+            incomplete_pairs += 1
+            if (
+                g_black.get("termination") == "max_moves_cap"
+                or g_white.get("termination") == "max_moves_cap"
+            ):
+                capped_pairs += 1
             continue
         total = p_black + p_white
         if total == 2.0:
@@ -723,6 +739,8 @@ def summarize_paired(
     if n == 0:
         return {
             "pairs": 0,
+            "incomplete_pairs": incomplete_pairs,
+            "capped_pairs": capped_pairs,
             "pentanomial": pentanomial,
             "score_pct": None,
             "ci95_pct": None,
@@ -732,14 +750,43 @@ def summarize_paired(
         }
 
     mean = sum(pair_scores) / n
-    if n > 1:
-        variance = sum((s - mean) ** 2 for s in pair_scores) / (n - 1)
-        stderr = math.sqrt(variance / n)
-    else:
-        stderr = 0.0
+    if n < 2:
+        return {
+            "pairs": n,
+            "incomplete_pairs": incomplete_pairs,
+            "capped_pairs": capped_pairs,
+            "pentanomial": pentanomial,
+            "score_pct": round(mean * 100.0, 2),
+            "ci95_pct": None,
+            "elo": elo_from_score(mean),
+            "elo_ci95_low": None,
+            "elo_ci95_high": None,
+        }
+
+    sample_var = sum((s - mean) ** 2 for s in pair_scores) / (n - 1)
+    # Regularize pentanomial variance with a weak symmetric Jeffreys prior
+    # (0.5 pseudo-count per bucket) so small-N or all-tied samples never
+    # collapse to a misleading ±0.0% confidence interval.
+    prior = 0.5
+    bucket_values = (
+        (0.0, pentanomial["LL"]),
+        (0.25, pentanomial["LD"]),
+        (0.5, pentanomial["WL_or_DD"]),
+        (0.75, pentanomial["WD"]),
+        (1.0, pentanomial["WW"]),
+    )
+    reg_total = n + prior * len(bucket_values)
+    reg_mean = sum(val * (count + prior) for val, count in bucket_values) / reg_total
+    reg_var = (
+        sum(((val - reg_mean) ** 2) * (count + prior) for val, count in bucket_values)
+        / reg_total
+    )
+    stderr = math.sqrt(max(sample_var, reg_var) / n)
     margin = 1.96 * stderr
     return {
         "pairs": n,
+        "incomplete_pairs": incomplete_pairs,
+        "capped_pairs": capped_pairs,
         "pentanomial": pentanomial,
         "score_pct": round(mean * 100.0, 2),
         "ci95_pct": round(margin * 100.0, 2),
