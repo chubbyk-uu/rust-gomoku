@@ -430,9 +430,9 @@ impl GameController {
             self.error = Some("引擎思考中，暂不能切换模式。".to_string());
             return;
         }
-        let changed = self.config.profile != profile;
+        let prev_config = self.config.clone();
         apply_engine_profile(&mut self.config, profile);
-        if changed {
+        if prev_config != self.config {
             self.search_tt = None;
         }
         self.error = None;
@@ -1043,6 +1043,15 @@ mod tests {
         assert!(
             controller.search_tt.is_none(),
             "changing profile should clear cached TT"
+        );
+        // Re-selecting Fast after mutating a runtime toggle must also clear TT.
+        controller.set_profile(EngineProfile::Fast);
+        controller.config.runtime.fast_history_ordering = false;
+        controller.search_tt = Some(tt1.clone());
+        controller.set_profile(EngineProfile::Fast);
+        assert!(
+            controller.search_tt.is_none(),
+            "re-applying Fast when runtime options changed should clear cached TT"
         );
 
         controller.search_tt = Some(tt1.clone());
