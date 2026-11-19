@@ -436,6 +436,9 @@ impl RootSearcher {
             return (false, Some("opponent_forcing"));
         }
         if view.has_winning_a4(mx, my) {
+            if self.vcf.budget.stopped() {
+                return (false, Some("budget"));
+            }
             return (true, None);
         }
         if !view.forcing_threat_moves(-side).is_empty() {
@@ -697,7 +700,7 @@ impl RootSearcher {
                 });
                 self.last_trace = Some(trace.clone());
             }
-            if stats.stop {
+            if stats.stop || (best_move.is_some() && self.vcf.budget.stopped()) {
                 break;
             }
             completed_depth = depth;
@@ -1302,5 +1305,34 @@ mod tests {
             "Renju fake open four with overline endpoint must not bypass opponent_forcing"
         );
         assert_eq!(reason, Some("opponent_forcing"));
+    }
+
+    #[test]
+    fn root_vct_verification_respects_expired_budget_even_on_winning_open_four() {
+        let mut board = Board::new();
+        for (x, y, side) in [
+            (6, 7, BLACK),
+            (6, 10, WHITE),
+            (7, 7, BLACK),
+            (7, 10, WHITE),
+            (8, 7, BLACK),
+            (8, 10, WHITE),
+        ] {
+            board
+                .play_for_rule(xy_to_move(x, y).unwrap(), Some(side), RuleSet::Renju)
+                .unwrap();
+        }
+
+        let mut config = load_default_config();
+        config.rule_set = RuleSet::Renju;
+        let mut searcher = RootSearcher::new(config);
+        searcher.vcf.budget = MoveBudget::new(SearchLimits {
+            time_limit_ms: Some(0.0),
+            ..SearchLimits::default()
+        });
+        let (accepted, reason) =
+            searcher.verify_root_vct_move(&board, BLACK, xy_to_move(5, 7).unwrap());
+        assert!(!accepted);
+        assert_eq!(reason, Some("budget"));
     }
 }

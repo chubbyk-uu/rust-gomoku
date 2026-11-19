@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::SearchLimits;
 
-const TIME_CHECK_MASK: usize = 0xFF;
+const TIME_CHECK_MASK: usize = 0x3F;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MoveBudget(Option<Arc<Limits>>);

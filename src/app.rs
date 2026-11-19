@@ -144,7 +144,7 @@ pub struct EngineSearchTask {
     config: EngineConfig,
     limits: SearchLimits,
     generation: u64,
-    tt: TranspositionTable,
+    tt: Option<TranspositionTable>,
 }
 
 pub struct EngineSearchCompletion {
@@ -430,7 +430,11 @@ impl GameController {
             self.error = Some("引擎思考中，暂不能切换模式。".to_string());
             return;
         }
+        let changed = self.config.profile != profile;
         apply_engine_profile(&mut self.config, profile);
+        if changed {
+            self.search_tt = None;
+        }
         self.error = None;
         self.last_result = None;
         self.last_trace = None;
@@ -449,9 +453,14 @@ impl GameController {
             self.error = Some("引擎思考中，暂不能切换难度。".to_string());
             return;
         }
+        let prev_config = self.config.clone();
+        let prev_difficulty = self.difficulty;
         let (depth, width, tactical, _) = difficulty.settings();
         difficulty.apply_to_config(&mut self.config);
         self.difficulty = Some(difficulty);
+        if prev_difficulty != self.difficulty || prev_config != self.config {
+            self.search_tt = None;
+        }
         self.error = None;
         self.last_result = None;
         self.last_trace = None;
@@ -478,16 +487,12 @@ impl GameController {
         self.engine_thinking = true;
         self.error = None;
         self.status = "引擎思考中...".to_string();
-        let tt = self
-            .search_tt
-            .get_or_insert_with(TranspositionTable::default)
-            .clone();
         Some(EngineSearchTask {
             board: self.board.clone(),
             config: self.config.clone(),
             limits: self.search_limits(),
             generation: self.generation,
-            tt,
+            tt: self.search_tt.clone(),
         })
     }
 
@@ -679,7 +684,8 @@ impl GameController {
 
 impl EngineSearchTask {
     pub fn run(mut self) -> EngineSearchCompletion {
-        let mut searcher = RootSearcher::with_tt(self.config, self.tt);
+        let tt = self.tt.unwrap_or_else(TranspositionTable::default);
+        let mut searcher = RootSearcher::with_tt(self.config, tt);
         let start = Instant::now();
         let result = searcher
             .try_search(&mut self.board, Some(self.limits))
@@ -980,9 +986,26 @@ mod tests {
 
         assert!(controller.play_human(7, 7));
         let task1 = controller.prepare_engine_search().unwrap();
-        let tt1 = task1.tt.clone();
+        assert!(
+            task1.tt.is_none(),
+            "first search should defer TT allocation to the background worker task"
+        );
+        assert!(controller.search_tt.is_none());
         let completion1 = task1.run();
+        let tt1 = completion1.tt.clone();
         assert!(controller.commit_engine_search(completion1));
+        assert!(controller
+            .search_tt
+            .as_ref()
+            .is_some_and(|tt| tt.is_shared_with(&tt1)));
+
+        // Re-selecting the same profile or difficulty keeps the TT intact.
+        let current_profile = controller.config.profile;
+        controller.set_profile(current_profile);
+        assert!(controller
+            .search_tt
+            .as_ref()
+            .is_some_and(|tt| tt.is_shared_with(&tt1)));
 
         // Play another legal human move away from the engine's reply.
         let next_xy = (0..BOARD_SIZE)
@@ -993,12 +1016,36 @@ mod tests {
 
         let task2 = controller.prepare_engine_search().unwrap();
         assert!(
-            task2.tt.is_shared_with(&tt1),
+            task2.tt.as_ref().is_some_and(|tt| tt.is_shared_with(&tt1)),
             "consecutive engine moves in the same game should reuse the same TT"
         );
         let completion2 = task2.run();
         assert!(controller.commit_engine_search(completion2));
 
+        // Changing difficulty or profile clears the TT so lower/different settings do not reuse stale depth entries.
+        controller.set_difficulty(SearchDifficulty::Beginner);
+        assert!(
+            controller.search_tt.is_none(),
+            "changing difficulty should clear cached TT"
+        );
+        // Re-populating TT, then verifying same-difficulty no-op keeps it and profile change clears it.
+        controller.search_tt = Some(tt1.clone());
+        controller.set_difficulty(SearchDifficulty::Beginner);
+        assert!(controller
+            .search_tt
+            .as_ref()
+            .is_some_and(|tt| tt.is_shared_with(&tt1)));
+        let other_profile = match controller.config.profile {
+            EngineProfile::Base => EngineProfile::Fast,
+            EngineProfile::Fast => EngineProfile::Base,
+        };
+        controller.set_profile(other_profile);
+        assert!(
+            controller.search_tt.is_none(),
+            "changing profile should clear cached TT"
+        );
+
+        controller.search_tt = Some(tt1.clone());
         controller.undo_turn();
         assert!(
             controller.search_tt.is_none(),
@@ -1007,11 +1054,7 @@ mod tests {
 
         assert!(controller.play_human(next_xy.0, next_xy.1));
         let stale_task = controller.prepare_engine_search().unwrap();
-        let stale_tt = stale_task.tt.clone();
-        assert!(
-            !stale_tt.is_shared_with(&tt1),
-            "post-undo search should allocate a fresh TT"
-        );
+        assert!(stale_task.tt.is_none());
 
         // Start a new game while the stale task is in flight; committing it must not overwrite TT.
         assert!(controller.new_game(BLACK, RuleSet::Freestyle, GameMode::VsEngine));
