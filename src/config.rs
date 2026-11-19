@@ -5,7 +5,6 @@ use std::sync::LazyLock;
 use crate::constants::DSHAPE_SIZE;
 use crate::rules::RuleSet;
 
-pub const DEFAULT_ENGINE_PROFILE: EngineProfile = EngineProfile::Base;
 pub const DEFAULT_RULE_SET: RuleSet = RuleSet::Freestyle;
 pub const DEFAULT_SEARCH_DEPTH: i32 = 8;
 pub const DEFAULT_SEARCH_WIDTH: i32 = 40;
@@ -22,11 +21,6 @@ pub const DEFAULT_ROOT_VCT_DEPTH: i32 = 6;
 pub const DEFAULT_VCT_STRICT_AND_MEMO_KEY: bool = true;
 pub const DEFAULT_ROOT_PROFILE: bool = false;
 pub const DEFAULT_OVERLAP_VCT_ALPHABETA: bool = false;
-pub const DEFAULT_FAST_HISTORY_ORDERING: bool = false;
-pub const DEFAULT_FAST_PROFILE_HISTORY_ORDERING: bool = true;
-pub const DEFAULT_FAST_KILLER_BONUS: i32 = 512;
-pub const DEFAULT_FAST_HISTORY_BONUS_SCALE: i32 = 4;
-pub const DEFAULT_FAST_HISTORY_BONUS_CAP: i32 = 1_024;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EvalBucketTables {
@@ -46,33 +40,6 @@ pub struct SearchParameters {
     pub extend_ratio: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EngineProfile {
-    Base,
-    Fast,
-}
-
-impl EngineProfile {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Base => "base",
-            Self::Fast => "fast",
-        }
-    }
-}
-
-impl std::str::FromStr for EngineProfile {
-    type Err = String;
-
-    fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        match raw.to_ascii_lowercase().as_str() {
-            "base" | "classic" | "classic/base" => Ok(Self::Base),
-            "fast" => Ok(Self::Fast),
-            _ => Err(format!("unknown engine profile: {raw}")),
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeOptions {
     pub read_config_each_move: bool,
@@ -88,10 +55,6 @@ pub struct RuntimeOptions {
     pub root_vct_depth: i32,
     pub vct_strict_and_memo_key: bool,
     pub overlap_vct_alphabeta: bool,
-    pub fast_history_ordering: bool,
-    pub fast_killer_bonus: i32,
-    pub fast_history_bonus_scale: i32,
-    pub fast_history_bonus_cap: i32,
     /// Optional root candidate timing probe. Defaults to off and must not
     /// affect search decisions.
     pub root_profile: bool,
@@ -109,7 +72,6 @@ pub struct RootSearchDefaults {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EngineConfig {
-    pub profile: EngineProfile,
     pub rule_set: RuleSet,
     pub eval_tables: EvalBucketTables,
     pub search: SearchParameters,
@@ -134,34 +96,13 @@ pub fn adjust_loaded_parameters(para: &[f64]) -> Vec<f64> {
 }
 
 pub fn load_default_config() -> EngineConfig {
-    load_config_for_profile(DEFAULT_ENGINE_PROFILE)
-}
-
-pub fn load_config_for_profile(profile: EngineProfile) -> EngineConfig {
     let para = default_eval_para();
-    let mut config = EngineConfig {
-        profile: DEFAULT_ENGINE_PROFILE,
+    EngineConfig {
         rule_set: DEFAULT_RULE_SET,
         eval_tables: slice_eval_tables(para),
         search: slice_search_parameters(para),
         runtime: default_runtime_options(para),
         root_search: default_root_search(),
-    };
-    apply_engine_profile(&mut config, profile);
-    config
-}
-
-pub fn apply_engine_profile(config: &mut EngineConfig, profile: EngineProfile) {
-    config.profile = profile;
-    match profile {
-        EngineProfile::Base => {
-            config.runtime.vcf_multi_reply = DEFAULT_VCF_MULTI_REPLY;
-            config.runtime.fast_history_ordering = DEFAULT_FAST_HISTORY_ORDERING;
-        }
-        EngineProfile::Fast => {
-            config.runtime.vcf_multi_reply = true;
-            config.runtime.fast_history_ordering = DEFAULT_FAST_PROFILE_HISTORY_ORDERING;
-        }
     }
 }
 
@@ -202,10 +143,6 @@ fn default_runtime_options(para: &[f64]) -> RuntimeOptions {
         root_vct_depth: DEFAULT_ROOT_VCT_DEPTH,
         vct_strict_and_memo_key: DEFAULT_VCT_STRICT_AND_MEMO_KEY,
         overlap_vct_alphabeta: DEFAULT_OVERLAP_VCT_ALPHABETA,
-        fast_history_ordering: DEFAULT_FAST_HISTORY_ORDERING,
-        fast_killer_bonus: DEFAULT_FAST_KILLER_BONUS,
-        fast_history_bonus_scale: DEFAULT_FAST_HISTORY_BONUS_SCALE,
-        fast_history_bonus_cap: DEFAULT_FAST_HISTORY_BONUS_CAP,
         root_profile: DEFAULT_ROOT_PROFILE,
     }
 }

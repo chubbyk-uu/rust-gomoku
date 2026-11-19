@@ -7,8 +7,8 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use rust_gomoku::{
-    load_config_for_profile, move_to_xy, xy_to_move, Board, EngineProfile, RootSearcher,
-    SearchLimits, TranspositionTable, VCTAndMemoCollisionSample, VCTDepthStats, VCTStats, BLACK,
+    load_default_config, move_to_xy, xy_to_move, Board, RootSearcher, SearchLimits,
+    TranspositionTable, VCTAndMemoCollisionSample, VCTDepthStats, VCTStats, BLACK,
     MAX_TT_BUCKET_BITS, WHITE,
 };
 
@@ -63,13 +63,11 @@ struct ProbeArgs {
     rule: Option<rust_gomoku::RuleSet>,
     case_path: Option<PathBuf>,
     case_json: Option<String>,
-    profile: EngineProfile,
     depth: Option<i32>,
     width: Option<usize>,
     tt_bits: Option<u32>,
     root_profile: bool,
     vct_strict_and_memo_key: Option<bool>,
-    fast_history_ordering: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -79,7 +77,6 @@ struct ProbeOutput {
     tags: Vec<String>,
     prefix_plies: usize,
     side_to_move: String,
-    profile: String,
     tt_bits: Option<u32>,
     limits: LimitsOutput,
     result: ResultOutput,
@@ -114,11 +111,6 @@ struct TraceOutput {
     vct_stats: Option<VctStatsOutput>,
     alphabeta_ms: Option<f64>,
     root_profile_depths: usize,
-    fast_history_ordering: bool,
-    killer_hits: usize,
-    history_hits: usize,
-    killer_updates: usize,
-    history_updates: usize,
     tt_bestmove_current_generation: usize,
     tt_bestmove_old_generation: usize,
 }
@@ -275,13 +267,11 @@ fn parse_args() -> Result<ProbeArgs, String> {
     let mut rule = None;
     let mut case_path = None;
     let mut case_json = None;
-    let mut profile = EngineProfile::Base;
     let mut depth = None;
     let mut width = None;
     let mut tt_bits = None;
     let mut root_profile = false;
     let mut vct_strict_and_memo_key = None;
-    let mut fast_history_ordering = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--rule" => {
@@ -302,12 +292,6 @@ fn parse_args() -> Result<ProbeArgs, String> {
                     args.next()
                         .ok_or_else(|| "--case-json requires a JSON object".to_string())?,
                 );
-            }
-            "--profile" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--profile requires base or fast".to_string())?;
-                profile = value.parse::<EngineProfile>()?;
             }
             "--depth" => {
                 let value = args
@@ -352,11 +336,11 @@ fn parse_args() -> Result<ProbeArgs, String> {
             "--no-vct-strict-and-memo-key" => {
                 vct_strict_and_memo_key = Some(false);
             }
-            "--fast-history-ordering" => {
-                fast_history_ordering = Some(true);
+            "--profile" | "--fast-history-ordering" | "--no-fast-history-ordering" => {
+                return Err(format!("{arg} was removed with the Fast profile"));
             }
-            "--no-fast-history-ordering" => {
-                fast_history_ordering = Some(false);
+            _ if arg.starts_with("--profile=") => {
+                return Err("--profile was removed with the Fast profile".to_string());
             }
             _ => {}
         }
@@ -368,13 +352,11 @@ fn parse_args() -> Result<ProbeArgs, String> {
         rule,
         case_path,
         case_json,
-        profile,
         depth,
         width,
         tt_bits,
         root_profile,
         vct_strict_and_memo_key,
-        fast_history_ordering,
     })
 }
 
@@ -450,14 +432,11 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
         }
     }
 
-    let mut config = load_config_for_profile(args.profile);
+    let mut config = load_default_config();
     config.rule_set = rule;
     config.runtime.root_profile = args.root_profile;
     if let Some(vct_strict_and_memo_key) = args.vct_strict_and_memo_key {
         config.runtime.vct_strict_and_memo_key = vct_strict_and_memo_key;
-    }
-    if let Some(fast_history_ordering) = args.fast_history_ordering {
-        config.runtime.fast_history_ordering = fast_history_ordering;
     }
     let default_limits = SearchLimits::fixed_from_config(&config);
     let limits = SearchLimits {
@@ -488,7 +467,6 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
         tags: case.tags,
         prefix_plies: board.move_count(),
         side_to_move: side_name(board.side_to_move()).to_string(),
-        profile: args.profile.as_str().to_string(),
         tt_bits: args.tt_bits,
         limits: LimitsOutput {
             max_depth: limits.max_depth,
@@ -512,11 +490,6 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
             vct_stats: trace.vct_stats.as_ref().map(vct_stats_output),
             alphabeta_ms: trace.alphabeta_ms,
             root_profile_depths: trace.root_profiles.len(),
-            fast_history_ordering: trace.fast_history_ordering,
-            killer_hits: trace.killer_hits,
-            history_hits: trace.history_hits,
-            killer_updates: trace.killer_updates,
-            history_updates: trace.history_updates,
             tt_bestmove_current_generation: trace.tt_bestmove_current_generation,
             tt_bestmove_old_generation: trace.tt_bestmove_old_generation,
         },

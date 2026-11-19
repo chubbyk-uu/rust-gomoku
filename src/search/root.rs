@@ -104,11 +104,6 @@ pub struct RootTrace {
     pub tt_snapshot_ms: Option<f64>,
     pub tactical_path: &'static str,
     pub root_profiles: Vec<RootDepthProfile>,
-    pub fast_history_ordering: bool,
-    pub killer_hits: usize,
-    pub history_hits: usize,
-    pub killer_updates: usize,
-    pub history_updates: usize,
     pub tt_bestmove_current_generation: usize,
     pub tt_bestmove_old_generation: usize,
 }
@@ -134,11 +129,6 @@ impl Default for RootTrace {
             tt_snapshot_ms: None,
             tactical_path: "alphabeta",
             root_profiles: Vec::new(),
-            fast_history_ordering: false,
-            killer_hits: 0,
-            history_hits: 0,
-            killer_updates: 0,
-            history_updates: 0,
             tt_bestmove_current_generation: 0,
             tt_bestmove_old_generation: 0,
         }
@@ -681,11 +671,6 @@ impl RootSearcher {
             );
             let depth_elapsed_us = depth_start.elapsed().as_micros();
             total_nodes += stats.nodes;
-            trace.fast_history_ordering |= stats.fast_history_ordering;
-            trace.killer_hits += stats.killer_hits;
-            trace.history_hits += stats.history_hits;
-            trace.killer_updates += stats.killer_updates;
-            trace.history_updates += stats.history_updates;
             trace.tt_bestmove_current_generation += stats.tt_bestmove_current_generation;
             trace.tt_bestmove_old_generation += stats.tt_bestmove_old_generation;
             if self.config.runtime.root_profile {
@@ -833,11 +818,6 @@ impl RootSearcher {
         self.fallback_rng = ab_result.searcher.fallback_rng;
         trace.alphabeta_ms = Some(ab_result.elapsed_ms);
         trace.root_profiles = ab_result.trace.root_profiles;
-        trace.fast_history_ordering = ab_result.trace.fast_history_ordering;
-        trace.killer_hits = ab_result.trace.killer_hits;
-        trace.history_hits = ab_result.trace.history_hits;
-        trace.killer_updates = ab_result.trace.killer_updates;
-        trace.history_updates = ab_result.trace.history_updates;
         trace.tt_bestmove_current_generation = ab_result.trace.tt_bestmove_current_generation;
         trace.tt_bestmove_old_generation = ab_result.trace.tt_bestmove_old_generation;
         self.last_trace = Some(trace);

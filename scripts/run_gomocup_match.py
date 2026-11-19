@@ -889,15 +889,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--move-timeout-sec", type=float, default=DEFAULT_MOVE_TIMEOUT_SEC)
     parser.add_argument("--game-timeout-sec", type=float, default=DEFAULT_GAME_TIMEOUT_SEC)
     parser.add_argument("--output", type=Path, default=Path("/tmp/gomocup_match.json"))
-    parser.add_argument("--engine-a-name", default="base")
-    parser.add_argument("--engine-b-name", default="fast")
+    parser.add_argument("--engine-a-name", default="engine_a")
+    parser.add_argument("--engine-b-name", default="engine_b")
     parser.add_argument(
         "--engine-a-command",
-        default=str(root / "target" / "release" / "gomocup_engine") + " --profile base",
+        default=str(root / "target" / "release" / "gomocup_engine"),
     )
     parser.add_argument(
         "--engine-b-command",
-        default=str(root / "target" / "release" / "gomocup_engine") + " --profile fast",
+        default=str(root / "target" / "release" / "gomocup_engine"),
     )
     parser.add_argument("--engine-a-cwd", type=Path, default=root)
     parser.add_argument("--engine-b-cwd", type=Path, default=root)
@@ -950,6 +950,13 @@ def main() -> int:
         )
     check_command(engine_a.command, engine_a.cwd, engine_a.name)
     check_command(engine_b.command, engine_b.cwd, engine_b.name)
+    same_configuration = (
+        shlex.split(engine_a.command) == shlex.split(engine_b.command)
+        and engine_a.cwd == engine_b.cwd
+        and engine_a.info == engine_b.info
+    )
+    if same_configuration:
+        print("Identical engine configurations. This run is a self-play smoke test.", flush=True)
 
     if args.case_file is not None:
         cases = load_case_file(args.case_file.expanduser().resolve())
@@ -1041,6 +1048,7 @@ def main() -> int:
         "matchup": f"{engine_a.name}_vs_{engine_b.name}",
         "settings": {
             "case_source": case_source,
+            "same_configuration": same_configuration,
             "opening_set": None if args.case_file else args.opening_set,
             "case_file": None if args.case_file is None else str(args.case_file),
             "tags": args.tag,

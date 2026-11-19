@@ -44,7 +44,7 @@
     document_.getElementById("btn-newgame").disabled = busy || engineThinking;
     document_.getElementById("btn-start").disabled = busy || engineThinking;
     for (const button of document_.querySelectorAll(
-      "#opt-gamemode button, #opt-side button, #opt-rule button, #opt-mode button",
+      "#opt-gamemode button, #opt-side button, #opt-rule button",
     )) {
       button.disabled = busy || engineThinking;
     }

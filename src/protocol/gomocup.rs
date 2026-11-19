@@ -1,7 +1,7 @@
 //! Gomocup protocol adapter aligned with the reference implementation.
 
 use crate::board::{move_to_xy, xy_to_move, Board};
-use crate::config::{apply_engine_profile, load_default_config, EngineConfig, EngineProfile};
+use crate::config::{load_default_config, EngineConfig};
 use crate::constants::{BOARD_AREA, BOARD_SIZE};
 use crate::rules::RuleSet;
 use crate::search::{RootSearcher, SearchLimits, TranspositionTable, MAX_TT_BUCKET_BITS};
@@ -376,12 +376,6 @@ impl GomocupProtocol {
                     self.searcher = None;
                 }
             }
-            "fast_history_ordering" => {
-                if let Some(parsed) = parse_one::<i32>(value) {
-                    self.config.runtime.fast_history_ordering = parsed != 0;
-                    self.searcher = None;
-                }
-            }
             "tt_bits" => {
                 if let Some(parsed) = parse_one::<u32>(value) {
                     if parsed <= MAX_TT_BUCKET_BITS {
@@ -391,12 +385,6 @@ impl GomocupProtocol {
                     } else {
                         self.pending_error = Some(PendingProtocolError::TtBitsOutOfRange);
                     }
-                }
-            }
-            "profile" => {
-                if let Ok(parsed) = value.parse::<EngineProfile>() {
-                    apply_engine_profile(&mut self.config, parsed);
-                    self.searcher = None;
                 }
             }
             "rule" => {

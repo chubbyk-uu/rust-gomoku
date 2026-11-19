@@ -8,7 +8,7 @@ Do not repeat these directions unless new evidence invalidates the decision:
 - TT best-move trust or generation ordering: deprioritized. Old-generation hints exist, but slow moves had lower old-generation percentage than average.
 - Shape reader LUT, indexed neighbor reader, and batch-lines: rejected as default paths after semantic-equivalent tests showed unstable or worse performance.
 - Lazy SMP, root YBWC, root split, and aspiration window: rejected as default paths after poor speed/strength or maintenance tradeoffs.
-- Early stop and broad dynamic pruning: only revisit with a concrete tactical safety proof and fast-vs-base validation.
+- Early stop and broad dynamic pruning: only revisit with a concrete tactical safety proof and validation against the current mainline.
 - VCF memo-key allocation and VCT/VCF as a per-node hotspot: confirmed non-bottleneck by the 2026-07-02 VCT-path profile (`or_node` 0.27% cumulative, the `(Side, Vec<Move>, Vec<Move>)` memo alloc + sort below the 0.8% floor). Do not pursue memo-key micro-optimization.
 - Root LMR clamp (`net <= 1` for `self_attack >= 3` at root): rejected for default `base` after 100-game real Renju center-opening validation (`48-48-4` overall, `36-37-3` on 38 unseen holdout openings, `+6.3%` avg and `61.7s -> 144.3s` max regression).
 - Restricting `extend_ratio` (`single_forcing || hostile_threat || case_count <= 8` and `ply < root_depth + 4`): rejected despite cutting `p95 -14.2%` and `max 57.4s -> 32.6s`, because 100-game real Renju center-opening strength dropped to `38-61-1` (`38.5%`, `-81.4 Elo`). Do not cut `extend_ratio` in midgame forcing chains.
@@ -23,7 +23,7 @@ Current active target:
 Context:
 
 - Post-`215a896` `perf` profiles showed two remaining behavior-equivalent Alpha-Beta hotspots:
-  - Dense late game (`c21 black p145`, 145 stones): `evaluate_board_main_cached` was **`47.4%`** of total CPU (`evaluate_dgn_from_occupied` scanned all 145 stones × 8 neighbors per leaf + `bucket_dot` scanned all 324 buckets).
+  - Dense late game (`c21 black p145`, 145 stones): `evaluate_board_main_cached` was **`47.4%`** of total CPU (`evaluate_dgn_from_occupied` scanned all 145 stones × 8 neighbors per leaf + `bucket_dot` visited 92 buckets per side).
   - Midgame forcing (`c43 white p32`, 32 stones): `value_wide_compute_for_rule` + `compute_bucket_attack_and_counts` was **`33.5%`**, `generate_candidates` + `sort` + `trunc` was **`21.2%`**, and `evaluate_board_main_cached` was **`16.2%`**.
 
 Kept optimizations (100% behavior-equivalent):
@@ -644,3 +644,88 @@ Decisions:
   root alignment unchanged, `root_alignment` nodes identical.
 - Accept the ~16% Renju single-move overhead as the correctness cost of the
   four-vs-open-four fix.
+
+### 2026-11-19: Long-tail speedup experiments after `eb58de8` (128 MiB TT, `fast` RFP/Futility, `fast` quiet LMR) — all reverted
+
+Context: after the 100% behavior-equivalent single-thread speedups (`215a896`,
+`aab2e69`, `eb58de8`, ~1.88x cumulative vs `23b72d6`), fixed-depth d8/w40 Renju
+center-opening games (`center_50_prefixes.jsonl`, 100 games, `--reuse-engine-state`)
+still had occasional 15s–36s single-move long tails (`base_eb58de8`: avg
+`1575.2ms`, median `740.9ms`, p95 `5998.8ms`, max `35990.0ms`). Three
+single-thread long-tail levers were tested and all rejected:
+
+1. **128 MiB TT (`TranspositionTable::new(22)` vs default 32 MiB `new(20)`)**:
+   - Hypothesis: larger TT reduces mid/late-game collisions on 15M–21M-node d8
+     long tails.
+   - Measured (`compute_vct=0`, d8/w40, single-thread release):
+     - `c43_p32`: `-7.9%`
+     - `c25_p68`: `-4.5%`
+     - `c34_p154`: **`+28.2%`**
+     - `c10_p15` (normal midgame): **`+6.0%`**
+   - Decision: reverted. L3 cache thrashing outweighs collision reduction.
+
+2. **`fast`-only Shallow Reverse Futility Pruning (`depth <= 2.0`, margin `35/65`) + Quiet Futility Pruning (`depth <= 1.0`, margin `40`)**:
+   - Note on eval scale: `rust_gomoku`'s `drift = 18.88`, `atdown3 = 2.35`,
+     `atdown4 = 3.67`, normal midgame eval `[-50, +50]`. Initial `120/220` +
+     `140` margins barely triggered (`-1.9%` to `+0.3%`). Rescaled `35/65` + `40`
+     (gated on `EngineProfile::Fast`, non-root, zero-window, `!win_priority`,
+     `!single_forcing`, `!hostile_threat`, `total.abs() < 32_768.0`).
+   - Fixed-position d8/w40 (`compute_vct=0`): `c43_p32 -23.5%`, `c25_p68 -10.7%`,
+     `c34_p154 -7.6%`, `c10_p15 -18.9%`, all same best move.
+   - 100-game Renju `center_50_prefixes.jsonl` match (`fast_rfp35_65_fut40` vs
+     `base_eb58de8`, d8/w40, `--reuse-engine-state`, 0 errors / 0 timeouts):
+     - Strength: **`47-52-1` (`47.50%`, `-17.39 Elo`, 95% CI `[-72.2, +36.6]`,
+       pentanomial `WW=6, WD=1, WL/DD=34, LD=0, LL=9`)** — failed `>= 50%` gate.
+     - Timing: `fast_rfp` was **slower** overall (`avg 1670.5ms`, `median 770.5ms`,
+       `p95 6229.3ms`, **`max 82313.2ms`**) vs `base_eb58de8` (`avg 1575.2ms`,
+       `median 740.9ms`, `p95 5998.8ms`, `max 35990.0ms`).
+   - Decision: reverted. Dropping shallow nodes in Gomoku misses tactical
+     counter-attacks and can steer games into worse/slower endgames.
+
+3. **`fast`-only Quiet LMR (`+1` at `index >= 3, depth >= 3.0`; `+2` at `index >= 10, depth >= 5.0`) with existing full-depth re-search (`score > alpha && net > 0`)**:
+   - Gated on `EngineProfile::Fast`, `found_pv`, `!options.root`, `!win_priority`,
+     `!single_forcing`, `!hostile_threat`, `self_attack == 0 && opp_attack == 0`,
+     non-killer.
+   - Fixed-position d8/w40 (`compute_vct=0`):
+     - `c2_p104`: `65840.9ms -> 77004.4ms` (**`+17.0%`**)
+     - `c43_p32`: `34074.8ms -> 35755.4ms` (**`+4.9%`**)
+     - `c25_p68`: `23437.2ms -> 22719.7ms` (`-3.1%`)
+     - `c10_p45`: `20989.1ms -> 11925.0ms` (`-43.2%`), **but selected `(7,10)`**,
+       which exact d8 proves is a forced loss (`-19987`) vs saving move `(5,10)`.
+     - `c34_p154`: `-32.1%`, `c10_p15`: `-32.7%`.
+   - Decision: reverted. Re-searches + shallower TT pollution slowed the worst
+     long tails (`+17.0%`), while hiding tactical refutations (`c10_p45`).
+
+Long-tail breakdown finding (`compute_vct=1` vs `compute_vct=0` + `--root-profile`):
+
+- On the 4 slowest moves from the 100-game match (`c2 p104` 68.3s, `c10 p46`
+  20.6s, `c10 p45` 21.0s, `c2 p71` 16.3s), **96%–100% of elapsed time is
+  Alpha-Beta** (VCT is only `0%–3.9%`).
+- Long tails split into (a) real tactical rescue re-searches (e.g. `c10 p45`:
+  d7 `0.47s` → d8 discovers d7 PV `(7,10)` loses `-19987` and PVS-researches
+  saving candidates), and (b) wide zero-window fail-low trees (e.g. `c2 p104`:
+  89% of time spent on root `index=1..19` fail-lows). Single-thread heuristic
+  pruning consistently loses strength or regresses worst-case tails; further
+  major long-tail reductions require either shared lock-free parallel Alpha-Beta
+  (e.g. ABDADA under an experimental path) or time-budgeted iterative deepening.
+
+### 2026-11-19: `fast` vs `base` re-evaluation on `eb58de8` and removal of `fast` profile / `fast_history_ordering`
+
+Context: after `215a896` + `aab2e69` added lazy tie-group `getmi` ordering and
+TT-best-move deferred primary sorting to the default `base` ordering path,
+`EngineProfile::Fast` differed from `Base` only by `fast_history_ordering = true`,
+which still eagerly computed `getmi` and fully sorted candidates on every node.
+
+100-game Renju `center_50_prefixes.jsonl` match (`fast_eb58de8` vs `base_eb58de8`,
+d8/w40, `--reuse-engine-state`, 20 jobs, 0 errors / 0 timeouts, 0 capped pairs):
+
+- **Strength**: `47-49-4` (**`49.00%`**, `-6.95 Elo`, 95% CI `[-49.8, +35.7]`,
+  pentanomial `WW=3, WD=3, WL/DD=38, LD=1, LL=5`) — below the `>= 50%` point-estimate gate, with no statistically resolved strength difference.
+- **Timing** (2331 moves each):
+  - `base_eb58de8`: avg **`1616.1ms`**, median **`802.8ms`**, p95 **`6216.6ms`**, max **`27736.9ms`**
+  - `fast_eb58de8`: avg `2093.4ms` (**`+29.5%`**), median `1019.3ms` (**`+27.0%`**), p95 `8221.6ms` (**`+32.3%`**), max `36445.3ms` (**`+31.4%`**)
+
+Decision: removed `EngineProfile` (`fast` profile) and `fast_history_ordering`
+(killer/history tables, CLI flags, Gomocup `INFO` toggles, and desktop and
+Android selectors). The former Fast profile took 29.5% longer per move in
+this match without demonstrating a strength gain.

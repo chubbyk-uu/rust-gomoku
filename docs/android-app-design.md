@@ -33,11 +33,10 @@ Implementation progress on `feature/android-app`:
 - Phase 6 mobile UI is complete and device-confirmed by the Phase 8 pass.
 - Phase 7 automated validation is complete.
 - Phase 8 real-device validation is complete.
-- Phase 9 GitHub distribution is complete; the latest published package is
-  `v0.1.3`.
+- Phase 9 GitHub distribution was completed with `v0.1.3`.
 - The desktop HTTP GUI now uses `GameController`.
-- Controller tests cover forbidden input, first-move search, undo, profile
-  switching, invalid sides, and stale search completion.
+- Controller tests cover forbidden input, first-move search, undo, difficulty
+  changes, invalid sides, and stale search completion.
 - Full Rust tests, Linux release builds, ARM64 Android cross-build, all 11 root
   diff cases, and a desktop HTTP workflow smoke passed after the refactor.
 - Gradle 9.4.1, Android Gradle Plugin 9.2.0, Kotlin Activity,
@@ -66,7 +65,7 @@ Implementation progress on `feature/android-app`:
   `app.js`): a status row, a JS-sized square board (kept square at
   `min(width, height)` and redrawn at `devicePixelRatio` for crisp lines), and a
   bottom action bar, with a new-game sheet (match mode vs-engine/two-player,
-  side, rule, Base/Fast profile, difficulty; the side/profile/difficulty rows
+  side, rule, difficulty; the side/difficulty rows
   hide in two-player mode) and a "more" sheet
   holding the optional all-move-numbers switch and a collapsed advanced panel
   (score, depth, nodes, thinking time from the snapshot's `last_result`). The
@@ -74,7 +73,7 @@ Implementation progress on `feature/android-app`:
   tap-to-preview then tap-the-same-point-to-confirm to cut mis-taps; taps snap to
   the nearest intersection and are rejected beyond ~0.6 cell; forbidden points
   are rejected with a toast and a light vibration (new `VIBRATE` permission).
-- Base/Fast remains a search-ordering mode. The separate five-level difficulty
+- The five-level difficulty
   selector maps Beginner to `d1/w10` without VCF/VCT, Junior to `d2/w10`
   without VCF/VCT, Intermediate to `d4/w20` without VCF/VCT, Senior to
   `d6/w30` with VCF/VCT and `root_vct_depth=6`, and Master to `d8/w40` with
@@ -149,7 +148,7 @@ owns:
 - human side and rule
 - status and user-facing errors
 - last move, search result, and optional diagnostics
-- new game, play, undo, and profile operations
+- new game, play, undo, and difficulty operations
 - forbidden-point calculation
 - serializable state snapshots
 - search snapshot creation and search-result commit
@@ -198,7 +197,6 @@ state
 new_game
 play
 undo
-set_profile
 set_difficulty
 engine_move
 ```
@@ -211,7 +209,6 @@ Request examples:
 {"op":"new_game","human_side":"black","rule":"renju","mode":"two_player"}
 {"op":"play","x":7,"y":7}
 {"op":"undo"}
-{"op":"set_profile","profile":"base"}
 {"op":"set_difficulty","difficulty":"master"}
 {"op":"engine_move"}
 ```
@@ -232,7 +229,7 @@ Rules:
 - Each handle owns an `Arc<Mutex<GameController>>`.
 - Search must run without holding the controller mutex for its full duration.
 - JNI functions catch Rust panics and return structured errors.
-- Invalid handles, JSON, coordinates, sides, profiles, and rules return errors
+- Invalid handles, JSON, coordinates, sides, difficulty values, and rules return errors
   instead of aborting the process.
 - `nativeDestroy` invalidates the handle while allowing any already-running
   worker to finish without accessing freed state.
@@ -251,7 +248,7 @@ Planned components:
 Required behavior:
 
 - Never run engine search on the Android main thread.
-- Disable play, undo, rule, side, and profile changes while search is active.
+- Disable play, undo, rule, side, and difficulty changes while search is active.
 - Preserve the game and an active search across normal screen rotation.
 - Ignore stale search results after new game, undo, or controller destruction.
 - Release the native handle when the owning ViewModel is permanently cleared.
@@ -311,7 +308,6 @@ and must not resize when status text or engine state changes.
 
 - Play black or white.
 - Freestyle or Renju.
-- Base or Fast profile.
 - Beginner, Junior, Intermediate, Senior, or Master difficulty.
 - Start game.
 
@@ -327,7 +323,6 @@ The following desktop diagnostics move into an advanced/diagnostic sheet:
 - TT information
 - alpha-beta and VCT timing
 - static/dynamic board settings
-- history/killer counters
 
 Move numbers should default to only marking the latest move on small phones.
 Displaying every move number can remain an optional visual setting.
@@ -424,7 +419,7 @@ Tests:
 - exact-five and forbidden input
 - black/white starts
 - undo
-- profile switching while idle
+- difficulty changes while idle
 - rejection while searching
 - stale result after restart or undo
 - state snapshot serialization
@@ -466,7 +461,7 @@ Gate:
 
 - JNI library is an AArch64 Android ELF shared object and all three expected
   JNI symbols are present in the stripped APK copy.
-- Invalid JSON, operations, fields, coordinates, sides, rules, profiles, and
+- Invalid JSON, operations, fields, coordinates, sides, rules, difficulty values, and
   destroyed handles return structured errors.
 - Requests are capped at 64 KiB and Rust panics are contained before crossing
   the FFI boundary.
@@ -481,7 +476,7 @@ Status: complete.
 
 1. Add `GameViewModel`, executor, and bridge.
 2. Connect page load to `state`.
-3. Implement new game, play, undo, and profile requests.
+3. Implement new game, play, undo, and difficulty requests.
 4. Run engine search on the executor.
 5. Return results to the WebView on the main thread.
 6. Handle rotation and stale search generations.
@@ -557,7 +552,7 @@ Manual checklist:
 2. Play both colors under Renju: confirmed.
 3. Verify overline, double-four, and double-three marks and rejection:
    confirmed through forbidden crosses and forbidden-tap rejection.
-4. Verify undo, restart, profile switch, difficulty switch, and screen
+4. Verify undo, restart, difficulty changes, and screen
    rotation: confirmed.
 5. Put the application in the background during search and return: confirmed
    through the search-time locking/thinking checks.
@@ -646,6 +641,6 @@ Stop and diagnose before proceeding when:
 ## Next Implementation Step
 
 Continue the Phase 8 real-device gate when a device is available: confirm both
-colors under both rules, forbidden marks and rejection, undo/restart/profile,
+colors under both rules, forbidden marks and rejection, undo, restart, difficulty changes,
 rotation and backgrounding during search, responsive framing, sustained
 temperature, and representative search duration.

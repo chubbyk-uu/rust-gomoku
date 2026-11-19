@@ -346,18 +346,6 @@ fn handle_client(
             state.lock().expect("state lock").undo_turn();
             json_response(&state.lock().expect("state lock").snapshot())
         }
-        ("POST", "/profile") => {
-            let profile = query_param(query, "value").and_then(|value| value.parse().ok());
-            {
-                let mut game = state.lock().expect("state lock");
-                if let Some(profile) = profile {
-                    game.set_profile(profile);
-                } else {
-                    game.set_error("未知模式，请选择 base 或 fast。");
-                }
-            }
-            json_response(&state.lock().expect("state lock").snapshot())
-        }
         ("POST", "/difficulty") => {
             let difficulty = query_param(query, "value")
                 .and_then(|value| value.parse::<SearchDifficulty>().ok());
@@ -592,7 +580,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       grid-template-columns: 1fr 1fr;
       gap: 12px;
     }
-    .profile-switch, .rule-switch, .mode-switch {
+    .rule-switch, .mode-switch {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 8px;
@@ -759,13 +747,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <button id="rule-renju" class="secondary" onclick="selectRule('renju')">有禁手</button>
             </div>
           </div>
-          <div class="setting-row" id="row-profile">
-            <span class="setting-label">引擎</span>
-            <div class="profile-switch">
-              <button id="profile-base" class="secondary" onclick="setProfile('base')">Base</button>
-              <button id="profile-fast" class="secondary" onclick="setProfile('fast')">Fast</button>
-            </div>
-          </div>
           <label class="setting-row" id="row-difficulty" for="difficulty-select">
             <span class="setting-label">难度</span>
             <select id="difficulty-select" onchange="setDifficulty(this.value)">
@@ -791,7 +772,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="actions">
           <button id="undo-btn" class="warn" onclick="undo()">悔棋</button>
         </div>
-        <div class="hint">棋盘会自动刷新；规则只在新局生效。难度控制深度、宽度和 VCF/VCT，Base/Fast 控制搜索排序；两者都在下一次引擎思考生效。关闭网页后一段时间，后台服务会自动退出。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
+        <div class="hint">棋盘会自动刷新；规则只在新局生效。难度控制深度、宽度和 VCF/VCT，在下一次引擎思考生效。关闭网页后一段时间，后台服务会自动退出。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
       </div>
       <div class="kv" id="info"></div>
     </aside>
@@ -897,7 +878,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function refresh() { api('/state').catch(showError); }
     function newGame(side) { api('/new?side=' + side + '&rule=' + selectedRule + '&mode=' + selectedMode).catch(showError); }
     function startTwoPlayer() { newGame('black'); }
-    function setProfile(profile) { api('/profile?value=' + profile).catch(showError); }
     function setDifficulty(difficulty) { api('/difficulty?value=' + difficulty).catch(showError); }
     function selectRule(rule) {
       selectedRule = rule;
@@ -918,7 +898,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
       document.getElementById('start-vs-engine').hidden = twoPlayer;
       document.getElementById('start-two-player').hidden = !twoPlayer;
       // Engine-only settings are meaningless in two-player mode.
-      document.getElementById('row-profile').hidden = twoPlayer;
       document.getElementById('row-difficulty').hidden = twoPlayer;
     }
     function restartSameSide() {
@@ -1104,14 +1083,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const r = state.last_result;
       const t = state.last_trace;
       const p = state.params;
-      const baseButton = document.getElementById('profile-base');
-      const fastButton = document.getElementById('profile-fast');
-      if (baseButton && fastButton) {
-        baseButton.className = 'secondary' + (p.profile === 'base' ? ' active' : '');
-        fastButton.className = 'secondary' + (p.profile === 'fast' ? ' active' : '');
-        baseButton.disabled = !!state.engine_thinking;
-        fastButton.disabled = !!state.engine_thinking;
-      }
       const difficultySelect = document.getElementById('difficulty-select');
       if (p.difficulty !== 'custom') difficultySelect.value = p.difficulty;
       difficultySelect.disabled = !!state.engine_thinking;
@@ -1136,7 +1107,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
         ['胜者', sideName(state.winner)],
         ['手数', state.move_count],
         ['规则', p.rule === 'renju' ? '有禁手' : '无禁手'],
-        ['引擎模式', `${p.profile === 'fast' ? 'Fast' : 'Base'}${p.fast_history_ordering ? ' / history+killer' : ''}`],
         ['难度', {
           beginner: '入门',
           junior: '初级',
@@ -1154,7 +1124,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
         ['VCT 使用/触发', t ? `${yesNo(t.used_vct)} / ${yesNo(t.vct_triggered)}` : '-'],
         ['VCT 结果/耗时', t ? `${yesNo(t.vct_found)} / ${t.vct_ms == null ? '-' : t.vct_ms.toFixed(3) + ' ms'}` : '-'],
         ['AB 耗时', t && t.alphabeta_ms != null ? `${t.alphabeta_ms.toFixed(3)} ms` : '-'],
-        ['Fast ordering', t ? `${yesNo(t.fast_history_ordering)} / killer ${t.killer_hits}, history ${t.history_hits}` : '-'],
         ['Overlap', t ? `${yesNo(t.overlap_used)} / AB ${t.overlap_ab_ms == null ? '-' : t.overlap_ab_ms.toFixed(3) + ' ms'}` : '-'],
         ['Overlap 等待/TT', t ? `${t.overlap_wait_ms == null ? '-' : t.overlap_wait_ms.toFixed(3) + ' ms'} / ${t.tt_snapshot_ms == null ? '-' : t.tt_snapshot_ms.toFixed(3) + ' ms'}` : '-'],
       ];

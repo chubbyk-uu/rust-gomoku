@@ -37,10 +37,9 @@ Completed:
 - Renju black forbidden-move handling for overline, double-four, and recursive true double-three, with exact-five priority; freestyle remains the default.
 - Rule-aware root VCF and root-only VCT trigger/verify/trace.
 - Gomocup stdin/stdout engine entry point and a local Web GUI.
-- Rust/reference diff harness, Rust/reference matches, base/fast matches, and same-position benchmark scaffolding.
+- Rust/reference diff harness, Rust/reference matches, head-to-head matches, and same-position benchmark scaffolding.
 - Renju oracle, dense-stress, exhaustive-line, candidate-diagnostic, performance, and rule-aware match-referee tooling.
-- Non-root candidate ordering cost optimization: keeps the original ordering key while reducing `getmi` and candidate copy overhead.
-- Fast profile enables third-generation history/killer ordering by default: only reorders quiet moves within the same static-ordering group; base is unaffected.
+- Non-root candidate ordering cost optimization: keeps the original ordering key while reducing `getmi` and candidate copy overhead (lazy tie-group `getmi` + TT-best-move deferred primary sort).
 - External reference engines such as SlowRenju and Rapfi are used from local
   checkouts when needed; bundled lightweight opponents are no longer committed.
 
@@ -77,7 +76,6 @@ The main defaults live in `src/config.rs`.
 | TT bucket bits | `20` |
 | `compute_vcf` / `compute_vct` | enabled |
 | `overlap_vct_alphabeta` | off; GUI entry turns it on |
-| `fast_history_ordering` | off in base, on in fast |
 | `nonroot_vcf` | off |
 | `static_board` | on |
 | `dynamic_board_margin` | `4` |
@@ -92,13 +90,9 @@ The desktop GUI and Android app expose five shared difficulty presets:
 | Senior | `d6 / w30` | on, `root_vct_depth=6` |
 | Master | `d8 / w40` | on, `root_vct_depth=6` |
 
-Intermediate is the default for the desktop GUI and Android app. Difficulty is
-independent from the Base/Fast profile: difficulty controls depth, width, and
-tactical search, while Base/Fast controls ordering behavior.
+Intermediate is the default for the desktop GUI and Android app. Difficulty controls depth, width, and tactical search.
 
 For strict diffs against the Python reference or reproducing reference experiments, `depth=6,width=20,root_vct_depth=4` is typically passed explicitly.
-
-The default profile is `base`, used to preserve classic semantics and reference diffs. `--profile fast` currently enables `fast_history_ordering` by default; pass `--no-fast-history-ordering` to disable it for comparison.
 
 Renju mode implements alternating play plus black forbidden moves. Renju opening protocols such as RIF, Yamaguchi, Soosorv, and Swap2 are not implemented.
 
@@ -157,7 +151,7 @@ Launch the GUI:
 cargo run --release --bin gomoku_gui
 ```
 
-The GUI opens `http://127.0.0.1:18080` in the default browser automatically; pass `--no-open-browser` to disable that behavior. It supports a vs-engine mode (playing black/white) and a two-player mode (two humans alternating on the same board with no engine), freestyle or Renju rules, five difficulty levels, undo, restart, Base/Fast mode switching, async thinking, move number display, a result dialog, and a status panel; shortcuts: `U` to undo, `R` to restart. The engine-only controls (side, Base/Fast, difficulty) are hidden in two-player mode. Rule selection applies only when starting a new game. During a Renju black turn, forbidden intersections are marked with red crosses and forbidden input is rejected without placing a stone (this holds in both modes). Difficulty and Base/Fast can only change while the engine is idle and affect the next engine think without resetting the board.
+The GUI opens `http://127.0.0.1:18080` in the default browser automatically; pass `--no-open-browser` to disable that behavior. It supports a vs-engine mode (playing black/white) and a two-player mode (two humans alternating on the same board with no engine), freestyle or Renju rules, five difficulty levels, undo, restart, async thinking, move number display, a result dialog, and a status panel; shortcuts: `U` to undo, `R` to restart. The engine-only controls (side, difficulty) are hidden in two-player mode. Rule selection applies only when starting a new game. During a Renju black turn, forbidden intersections are marked with red crosses and forbidden input is rejected without placing a stone (this holds in both modes). Difficulty can only change while the engine is idle and affects the next engine think without resetting the board.
 
 Gomocup engine:
 
@@ -166,7 +160,6 @@ cargo run --release --bin gomocup_engine
 target/release/gomocup_engine --depth 8 --width 40
 target/release/gomocup_engine --depth 6 --width 20 --root-profile
 target/release/gomocup_engine --tt-bits 22
-target/release/gomocup_engine --profile fast
 ```
 
 Common `INFO` commands:
@@ -175,7 +168,6 @@ Common `INFO` commands:
 - `INFO timeout_turn N`
 - `INFO time_left N`
 - `INFO max_node N`
-- `INFO profile base|fast`
 - `INFO compute_vcf 0|1`
 - `INFO root_vcf_depth N`
 - `INFO opponent_vcf_depth N`
@@ -184,7 +176,6 @@ Common `INFO` commands:
 - `INFO compute_vct 0|1`
 - `INFO root_vct_depth N`
 - `INFO vct_strict_and_memo_key 0|1`
-- `INFO fast_history_ordering 0|1`
 - `INFO nonroot_vcf 0|1`
 - `INFO overlap_vct_alphabeta 0|1`
 - `INFO tt_bits N`
@@ -224,27 +215,35 @@ python3 scripts/run_engine_match.py \
 
 Generic engine match:
 
+Set `BASELINE_DIR` to the directory containing the baseline release builds of `gomocup_engine` and `case_probe`.
+
 ```bash
+cargo build --release --bin gomocup_engine --bin case_probe
+BASELINE_DIR=/path/to/baseline/bin
 python3 scripts/run_gomocup_match.py \
   --case-file cases/match/smoke_quick.jsonl \
-  --jobs 12 \
-  --max-moves 80 \
-  --move-timeout-sec 90 \
-  --game-timeout-sec 600 \
-  --output /tmp/base_fast_smoke_quick.json
+  --engine-a-side both \
+  --engine-a-command 'target/release/gomocup_engine --depth 6 --width 20' \
+  --engine-b-command "\"$BASELINE_DIR/gomocup_engine\" --depth 6 --width 20" \
+  --output /tmp/engine_version_match.json
 ```
 
 Same-position single-move benchmark:
 
 ```bash
-cargo build --release --bin case_probe
 python3 scripts/bench_match_cases.py \
   --case-file cases/match/standard.jsonl \
-  --jobs 16 \
-  --output /tmp/base_fast_standard_bench.json
+  --baseline-binary "$BASELINE_DIR/case_probe" \
+  --candidate-binary target/release/case_probe \
+  --jobs 1 \
+  --output /tmp/engine_version_bench.json
 ```
 
 `run_gomocup_match.py` is used for real matches and strength evaluation; `bench_match_cases.py` is used for single-move searches on the same batch of prefix positions. To judge whether an optimization is genuinely faster, look at the same-position benchmark first, then at match win rate and long-tail latency.
+
+Without distinct engines or options, the match and benchmark scripts flag identical configurations as self-play or repeatability checks.
+
+The former Fast profile and its CLI options (`--profile`, `--fast-history-ordering`, and `--no-fast-history-ordering`) have been removed from the engine and `case_probe`. Use the default engine configuration. Legacy Gomocup `INFO profile` and `INFO fast_history_ordering` are ignored as unknown options. The benchmark JSON uses `baseline` and `candidate` labels.
 
 For Renju matches, pass `--rule renju`. The match runner then configures both
 engines with Gomocup rule `4` and uses the rule-aware referee to reject illegal
@@ -256,7 +255,8 @@ python3 scripts/run_gomocup_match.py \
   --rule renju \
   --case-file cases/renju/strength_100_prefixes.jsonl \
   --engine-a-side both \
-  --engine-a-command 'target/release/gomocup_engine --depth 8 --width 40'
+  --engine-a-command 'target/release/gomocup_engine --depth 8 --width 40' \
+  --engine-b-command "\"$BASELINE_DIR/gomocup_engine\" --depth 8 --width 40"
 ```
 
 The full Renju design, validation evidence, SlowRenju comparison contract, and
@@ -281,7 +281,7 @@ tests/               Rust automated tests
 1. Preserve the completed 100-game fixed-depth Renju-vs-SlowRenju gate; future expansion should add independent source games rather than nearby prefixes from the same trajectories.
 2. Continue reducing the remaining Renju per-node overhead and VCF/VCT long tails from the current post-optimization baseline; keep performance changes behind oracle, root-diff, and strength gates.
 3. Audit Rapfi primarily to improve playing strength, focusing on candidate ordering, evaluation, tactical search, TT, pruning/extensions, and time management. Line-pattern and forbidden-table ideas are also relevant when they enable deeper search.
-4. Preserve the completed 100-game freestyle gates: Rust-vs-SlowRenju, current-vs-pre-Renju sequence equivalence, classic reference/Rust diffs, and fast-vs-base strength checks.
+4. Preserve the completed 100-game freestyle gates: Rust-vs-SlowRenju, current-vs-pre-Renju sequence equivalence, classic reference/Rust diffs, and compare experimental builds with the current mainline when evaluating search changes.
 5. All performance experiments must report correctness, latency, nodes, and any changes to move/score/trace together.
 
 ## License

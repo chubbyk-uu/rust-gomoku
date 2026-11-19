@@ -2,21 +2,16 @@
 
 use std::io::{self, BufRead, Write};
 
-use rust_gomoku::{
-    load_config_for_profile, EngineProfile, GomocupProtocol, SearchLimits, MAX_TT_BUCKET_BITS,
-};
+use rust_gomoku::{load_default_config, GomocupProtocol, SearchLimits, MAX_TT_BUCKET_BITS};
 
 fn main() {
     let args = parse_args().unwrap_or_else(|message| {
         eprintln!("{message}");
         std::process::exit(2);
     });
-    let mut config = load_config_for_profile(args.profile);
+    let mut config = load_default_config();
     if let Some(root_profile) = args.root_profile {
         config.runtime.root_profile = root_profile;
-    }
-    if let Some(fast_history_ordering) = args.fast_history_ordering {
-        config.runtime.fast_history_ordering = fast_history_ordering;
     }
     let search_limits = if args.depth.is_some() || args.width.is_some() {
         let fixed = SearchLimits::fixed_from_config(&config);
@@ -52,18 +47,14 @@ struct CliArgs {
     depth: Option<i32>,
     width: Option<usize>,
     root_profile: Option<bool>,
-    fast_history_ordering: Option<bool>,
     tt_bits: Option<u32>,
-    profile: EngineProfile,
 }
 
 fn parse_args() -> Result<CliArgs, String> {
     let mut depth = None;
     let mut width = None;
     let mut root_profile = None;
-    let mut fast_history_ordering = None;
     let mut tt_bits = None;
-    let mut profile = EngineProfile::Base;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -83,12 +74,6 @@ fn parse_args() -> Result<CliArgs, String> {
             "--no-root-profile" => {
                 root_profile = Some(false);
             }
-            "--fast-history-ordering" => {
-                fast_history_ordering = Some(true);
-            }
-            "--no-fast-history-ordering" => {
-                fast_history_ordering = Some(false);
-            }
             "--tt-bits" => {
                 let Some(value) = args.next() else {
                     return Err("--tt-bits requires an integer".to_string());
@@ -103,11 +88,11 @@ fn parse_args() -> Result<CliArgs, String> {
                 }
                 tt_bits = Some(bits);
             }
-            "--profile" => {
-                let Some(value) = args.next() else {
-                    return Err("--profile requires base or fast".to_string());
-                };
-                profile = value.parse::<EngineProfile>()?;
+            "--profile" | "--fast-history-ordering" | "--no-fast-history-ordering" => {
+                return Err(format!("{arg} was removed with the Fast profile"));
+            }
+            _ if arg.starts_with("--profile=") => {
+                return Err("--profile was removed with the Fast profile".to_string());
             }
             _ => {}
         }
@@ -116,8 +101,6 @@ fn parse_args() -> Result<CliArgs, String> {
         depth,
         width,
         root_profile,
-        fast_history_ordering,
         tt_bits,
-        profile,
     })
 }

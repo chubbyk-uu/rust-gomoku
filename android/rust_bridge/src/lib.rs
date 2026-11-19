@@ -9,8 +9,8 @@ use jni::objects::{JClass, JString};
 use jni::sys::{jlong, jstring};
 use jni::JNIEnv;
 use rust_gomoku::{
-    load_default_config, EngineProfile, GameController, GameMode, RuleSet, SearchDifficulty, BLACK,
-    BOARD_SIZE, WHITE,
+    load_default_config, GameController, GameMode, RuleSet, SearchDifficulty, BLACK, BOARD_SIZE,
+    WHITE,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -36,10 +36,14 @@ enum BridgeRequest {
         rule: String,
         mode: Option<String>,
     },
-    Play { x: usize, y: usize },
+    Play {
+        x: usize,
+        y: usize,
+    },
     Undo,
-    SetProfile { profile: String },
-    SetDifficulty { difficulty: String },
+    SetDifficulty {
+        difficulty: String,
+    },
     EngineMove,
 }
 
@@ -137,7 +141,6 @@ fn parse_request(request_json: &str) -> Result<BridgeRequest, BridgeError> {
         "state" | "undo" | "engine_move" => &["op"],
         "new_game" => &["op", "human_side", "rule", "mode"],
         "play" => &["op", "x", "y"],
-        "set_profile" => &["op", "profile"],
         "set_difficulty" => &["op", "difficulty"],
         _ => {
             return Err(BridgeError::invalid_request(format!(
@@ -194,14 +197,6 @@ fn dispatch_request(
                 .lock()
                 .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
                 .undo_turn();
-            snapshot_response(&controller)
-        }
-        BridgeRequest::SetProfile { profile } => {
-            let profile = parse_profile(&profile)?;
-            controller
-                .lock()
-                .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
-                .set_profile(profile);
             snapshot_response(&controller)
         }
         BridgeRequest::SetDifficulty { difficulty } => {
@@ -264,12 +259,6 @@ fn parse_rule(value: &str) -> Result<RuleSet, BridgeError> {
     value
         .parse()
         .map_err(|_| BridgeError::invalid_request("rule must be \"freestyle\" or \"renju\"."))
-}
-
-fn parse_profile(value: &str) -> Result<EngineProfile, BridgeError> {
-    value
-        .parse()
-        .map_err(|_| BridgeError::invalid_request("profile must be \"base\" or \"fast\"."))
 }
 
 fn parse_difficulty(value: &str) -> Result<SearchDifficulty, BridgeError> {
@@ -389,13 +378,6 @@ mod tests {
         let undone = response(&registry, handle, r#"{"op":"undo"}"#);
         assert_eq!(undone["state"]["move_count"], 0);
 
-        let profile = response(
-            &registry,
-            handle,
-            r#"{"op":"set_profile","profile":"fast"}"#,
-        );
-        assert_eq!(profile["state"]["params"]["profile"], "fast");
-
         let difficulty = response(
             &registry,
             handle,
@@ -461,10 +443,6 @@ mod tests {
                 "invalid_request",
             ),
             (r#"{"op":"play","x":15,"y":0}"#, "invalid_request"),
-            (
-                r#"{"op":"set_profile","profile":"turbo"}"#,
-                "invalid_request",
-            ),
             (
                 r#"{"op":"set_difficulty","difficulty":"impossible"}"#,
                 "invalid_request",

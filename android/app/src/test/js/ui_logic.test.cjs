@@ -71,7 +71,7 @@ function fakeDocument() {
     querySelectorAll: (selector) => {
       assert.equal(
         selector,
-        "#opt-gamemode button, #opt-side button, #opt-rule button, #opt-mode button",
+        "#opt-gamemode button, #opt-side button, #opt-rule button",
       );
       return options;
     },

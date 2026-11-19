@@ -1,10 +1,9 @@
 use rust_gomoku::{
-    xy_to_move, EngineProfile, GomocupProtocol, RuleSet, SearchLimits, BLACK,
-    DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_OVERLAP_VCT_ALPHABETA,
-    DEFAULT_ROOT_PROFILE, DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH,
-    DEFAULT_SEARCH_WIDTH, DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
-    DEFAULT_VCF_MULTI_REPLY, DEFAULT_VCT_STRICT_AND_MEMO_KEY,
-    DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH, WHITE,
+    xy_to_move, GomocupProtocol, RuleSet, SearchLimits, BLACK, DEFAULT_DYNAMIC_BOARD_MARGIN,
+    DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_OVERLAP_VCT_ALPHABETA, DEFAULT_ROOT_PROFILE,
+    DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
+    DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH, DEFAULT_VCF_MULTI_REPLY,
+    DEFAULT_VCT_STRICT_AND_MEMO_KEY, DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH, WHITE,
 };
 
 fn proto() -> GomocupProtocol {
@@ -312,16 +311,6 @@ fn protocol_info_overlap_vct_alphabeta_updates_runtime() {
 }
 
 #[test]
-fn protocol_info_fast_history_ordering_updates_runtime() {
-    let mut proto = proto();
-    assert!(!proto.config.runtime.fast_history_ordering);
-    proto.handle_line("INFO fast_history_ordering 1");
-    assert!(proto.config.runtime.fast_history_ordering);
-    proto.handle_line("INFO fast_history_ordering 0");
-    assert!(!proto.config.runtime.fast_history_ordering);
-}
-
-#[test]
 fn protocol_info_tt_bits_updates_engine_option() {
     let mut proto = proto();
     proto.handle_line("INFO tt_bits 24");
@@ -356,23 +345,6 @@ fn protocol_accepts_valid_info_after_correcting_a_rejected_value() {
     proto.handle_line("INFO timeout_turn 1e308");
     proto.handle_line("INFO timeout_turn 500");
     assert_last_xy(&proto.handle_line("BEGIN"));
-}
-
-#[test]
-fn protocol_info_profile_updates_config_profile() {
-    let mut proto = proto();
-    assert_eq!(proto.config.profile, EngineProfile::Base);
-    proto.handle_line("INFO profile fast");
-    assert_eq!(proto.config.profile, EngineProfile::Fast);
-    assert!(proto.config.runtime.vcf_multi_reply);
-    assert!(proto.config.runtime.fast_history_ordering);
-    proto.handle_line("INFO profile classic");
-    assert_eq!(proto.config.profile, EngineProfile::Base);
-    assert_eq!(
-        proto.config.runtime.vcf_multi_reply,
-        DEFAULT_VCF_MULTI_REPLY
-    );
-    assert!(!proto.config.runtime.fast_history_ordering);
 }
 
 #[test]
@@ -550,7 +522,6 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
     proto.handle_line("INFO root_vct_depth nope");
     proto.handle_line("INFO vct_strict_and_memo_key nope");
     proto.handle_line("INFO overlap_vct_alphabeta nope");
-    proto.handle_line("INFO profile nope");
     proto.handle_line("INFO root_profile nope");
     proto.handle_line("INFO static zed");
     proto.handle_line("INFO dynamic_board_margin hmm");
@@ -583,7 +554,6 @@ fn protocol_info_invalid_numeric_values_are_ignored() {
         DEFAULT_OVERLAP_VCT_ALPHABETA
     );
     assert_eq!(proto.config.runtime.root_profile, DEFAULT_ROOT_PROFILE);
-    assert_eq!(proto.config.profile, EngineProfile::Base);
     assert!(proto.config.runtime.static_board);
     assert_eq!(
         proto.config.runtime.dynamic_board_margin,

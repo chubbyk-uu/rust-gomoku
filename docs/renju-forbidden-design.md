@@ -1353,7 +1353,7 @@ python3 scripts/run_gomocup_match.py \
     --engine-a-name rust \
     --engine-b-name slowrenju \
     --engine-a-command \
-      'target/release/gomocup_engine --depth 1 --width 8 --profile base' \
+      'target/release/gomocup_engine --depth 1 --width 8' \
     --engine-b-command \
       'target/release/slowrenju_linux --depth 1 --width 8' \
     --engine-a-info compute_vct=0 \
@@ -1593,8 +1593,8 @@ This lane complements rather than replaces the Python reference gates:
   move/score/nodes/trace alignment.
 - Rust-vs-SlowRenju freestyle matches detect practical playing-strength
   regressions that fixed-position diffs may not expose.
-- Fast-vs-base remains the direct gate for accepting experimental Rust search
-  changes.
+- Compare experimental Rust search builds with the current mainline before
+  accepting search changes.
 - Report wins/losses/draws, color split, avg/median/p95/max move time,
   timeouts, nodes when available, and the exact search/tactical settings.
 
@@ -1653,7 +1653,7 @@ Parallel timing was current avg/median/p95/max
 too small to call a performance regression under eight-way CPU contention;
 use same-position single-process benchmarks for that decision.
 
-The current fast-vs-base freestyle gate used the same 100 games:
+The historical check of the retired Fast profile used the same 100 games:
 
 - fast 52, base 44, draw 4, errors/timeouts 0;
 - fast as black: 28 wins, 18 losses, 4 draws;
@@ -1666,9 +1666,7 @@ The current fast-vs-base freestyle gate used the same 100 games:
 Parallel timing was fast avg/median/p95/max
 1176.237/454.412/3991.700/13259.241 ms versus base
 1114.297/339.188/4248.023/13863.986 ms. Fast improved p95/max in this batch
-but worsened avg/median and searched slightly more moves. Treat the strength
-gate as passed, while the performance case remains mixed until a same-position
-benchmark demonstrates a stable net benefit.
+but worsened avg/median and searched slightly more moves. The experiment passed its strength gate and had mixed performance results.
 
 ### Post-optimization re-run (bit-identical perf work)
 

@@ -315,7 +315,6 @@ function render(state) {
   syncNewGameMode();
   setSegmentValue("opt-side", state.human_side === WHITE ? "white" : "black");
   setSegmentValue("opt-rule", state.params.rule);
-  setSegmentValue("opt-mode", state.params.profile);
   if (state.params.difficulty !== "custom") {
     setDifficultyValue(state.params.difficulty);
   }
@@ -533,7 +532,6 @@ function bindEvents() {
   });
   bindSegmented("opt-side");
   bindSegmented("opt-rule");
-  bindSegmented("opt-mode");
   document.getElementById("opt-difficulty").addEventListener("click", () => {
     if (!busy && !(lastState && lastState.engine_thinking)) {
       setDifficultyOpen(true);
@@ -560,14 +558,12 @@ function bindEvents() {
     const mode = segValue("opt-gamemode");
     const human_side = segValue("opt-side");
     const rule = segValue("opt-rule");
-    const profile = segValue("opt-mode");
     const difficulty = document.getElementById("opt-difficulty").dataset.value;
     closeSheet("newgame");
     guarded(async () => {
       ghost = null;
       // Engine settings only matter when the engine plays.
       if (mode !== "two_player") {
-        await nativeRequest({ op: "set_profile", profile });
         await nativeRequest({ op: "set_difficulty", difficulty });
       }
       await applyAndContinue(await nativeRequest({ op: "new_game", human_side, rule, mode }));

@@ -5,9 +5,8 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::{
-    apply_engine_profile, move_to_xy, xy_to_move, Board, EngineConfig, EngineProfile,
-    ForbiddenKind, RootSearcher, RootTrace, RuleSet, SearchLimits, SearchResult, Side,
-    TranspositionTable, BLACK, BOARD_SIZE, EMPTY, WHITE,
+    move_to_xy, xy_to_move, Board, EngineConfig, ForbiddenKind, RootSearcher, RootTrace, RuleSet,
+    SearchLimits, SearchResult, Side, TranspositionTable, BLACK, BOARD_SIZE, EMPTY, WHITE,
 };
 
 /// Who controls the two sides of the board.
@@ -217,15 +216,11 @@ pub struct SearchTraceSnapshot {
     pub overlap_ab_cancelled: bool,
     pub overlap_wait_ms: Option<f64>,
     pub tt_snapshot_ms: Option<f64>,
-    pub fast_history_ordering: bool,
-    pub killer_hits: usize,
-    pub history_hits: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct GameParamsSnapshot {
     pub mode: &'static str,
-    pub profile: &'static str,
     pub difficulty: &'static str,
     pub depth: i32,
     pub width: usize,
@@ -235,7 +230,6 @@ pub struct GameParamsSnapshot {
     pub compute_vct: bool,
     pub root_vct_depth: i32,
     pub overlap_vct_alphabeta: bool,
-    pub fast_history_ordering: bool,
     pub static_board: bool,
     pub dynamic_board_margin: i32,
     pub rule: &'static str,
@@ -425,29 +419,6 @@ impl GameController {
         };
     }
 
-    pub fn set_profile(&mut self, profile: EngineProfile) {
-        if self.engine_thinking {
-            self.error = Some("引擎思考中，暂不能切换模式。".to_string());
-            return;
-        }
-        let prev_config = self.config.clone();
-        apply_engine_profile(&mut self.config, profile);
-        if prev_config != self.config {
-            self.search_tt = None;
-        }
-        self.error = None;
-        self.last_result = None;
-        self.last_trace = None;
-        self.last_search_ms = None;
-        self.status = format!(
-            "已切换到 {} 模式，当前棋局不变，下一次引擎思考生效。",
-            match profile {
-                EngineProfile::Base => "Base",
-                EngineProfile::Fast => "Fast",
-            }
-        );
-    }
-
     pub fn set_difficulty(&mut self, difficulty: SearchDifficulty) {
         if self.engine_thinking {
             self.error = Some("引擎思考中，暂不能切换难度。".to_string());
@@ -565,9 +536,6 @@ impl GameController {
             overlap_ab_cancelled: trace.overlap_ab_cancelled,
             overlap_wait_ms: trace.overlap_wait_ms,
             tt_snapshot_ms: trace.tt_snapshot_ms,
-            fast_history_ordering: trace.fast_history_ordering,
-            killer_hits: trace.killer_hits,
-            history_hits: trace.history_hits,
         });
         let limits = self.search_limits();
         GameStateSnapshot {
@@ -603,7 +571,6 @@ impl GameController {
             last_trace,
             params: GameParamsSnapshot {
                 mode: self.mode.as_str(),
-                profile: self.config.profile.as_str(),
                 difficulty: self
                     .difficulty
                     .map(SearchDifficulty::as_str)
@@ -616,7 +583,6 @@ impl GameController {
                 compute_vct: self.config.runtime.compute_vct,
                 root_vct_depth: self.config.runtime.root_vct_depth,
                 overlap_vct_alphabeta: self.config.runtime.overlap_vct_alphabeta,
-                fast_history_ordering: self.config.runtime.fast_history_ordering,
                 static_board: self.config.runtime.static_board,
                 dynamic_board_margin: self.config.runtime.dynamic_board_margin,
                 rule: self.config.rule_set.as_str(),
@@ -818,18 +784,16 @@ mod tests {
     }
 
     #[test]
-    fn undo_and_profile_switch_keep_controller_consistent() {
+    fn undo_keeps_controller_consistent() {
         let mut controller = shallow_controller();
         assert!(controller.new_game(BLACK, RuleSet::Freestyle, GameMode::VsEngine));
         assert!(controller.play_human(7, 7));
         let completion = controller.prepare_engine_search().unwrap().run();
         assert!(controller.commit_engine_search(completion));
         controller.undo_turn();
-        controller.set_profile(EngineProfile::Fast);
 
         let snapshot = controller.snapshot();
         assert_eq!(snapshot.move_count, 0);
-        assert_eq!(snapshot.params.profile, "fast");
         assert!(snapshot.can_play);
     }
 
@@ -999,14 +963,6 @@ mod tests {
             .as_ref()
             .is_some_and(|tt| tt.is_shared_with(&tt1)));
 
-        // Re-selecting the same profile or difficulty keeps the TT intact.
-        let current_profile = controller.config.profile;
-        controller.set_profile(current_profile);
-        assert!(controller
-            .search_tt
-            .as_ref()
-            .is_some_and(|tt| tt.is_shared_with(&tt1)));
-
         // Play another legal human move away from the engine's reply.
         let next_xy = (0..BOARD_SIZE)
             .flat_map(|y| (0..BOARD_SIZE).map(move |x| (x, y)))
@@ -1022,37 +978,19 @@ mod tests {
         let completion2 = task2.run();
         assert!(controller.commit_engine_search(completion2));
 
-        // Changing difficulty or profile clears the TT so lower/different settings do not reuse stale depth entries.
+        // Changing difficulty clears the TT so lower/different settings do not reuse stale depth entries.
         controller.set_difficulty(SearchDifficulty::Beginner);
         assert!(
             controller.search_tt.is_none(),
             "changing difficulty should clear cached TT"
         );
-        // Re-populating TT, then verifying same-difficulty no-op keeps it and profile change clears it.
+        // Re-populating TT, then verifying same-difficulty no-op keeps it intact.
         controller.search_tt = Some(tt1.clone());
         controller.set_difficulty(SearchDifficulty::Beginner);
         assert!(controller
             .search_tt
             .as_ref()
             .is_some_and(|tt| tt.is_shared_with(&tt1)));
-        let other_profile = match controller.config.profile {
-            EngineProfile::Base => EngineProfile::Fast,
-            EngineProfile::Fast => EngineProfile::Base,
-        };
-        controller.set_profile(other_profile);
-        assert!(
-            controller.search_tt.is_none(),
-            "changing profile should clear cached TT"
-        );
-        // Re-selecting Fast after mutating a runtime toggle must also clear TT.
-        controller.set_profile(EngineProfile::Fast);
-        controller.config.runtime.fast_history_ordering = false;
-        controller.search_tt = Some(tt1.clone());
-        controller.set_profile(EngineProfile::Fast);
-        assert!(
-            controller.search_tt.is_none(),
-            "re-applying Fast when runtime options changed should clear cached TT"
-        );
 
         controller.search_tt = Some(tt1.clone());
         controller.undo_turn();
