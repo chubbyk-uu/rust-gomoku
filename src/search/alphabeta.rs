@@ -113,6 +113,46 @@ pub fn terminal_score(board: &Board, side: Side, ply: i32) -> Option<i32> {
     Some(-INF + ply)
 }
 
+#[inline]
+fn score_to_tt(score: i32, ply: i32) -> i32 {
+    if score >= WIN {
+        score + ply
+    } else if score <= -WIN {
+        score - ply
+    } else {
+        score
+    }
+}
+
+#[inline]
+fn score_from_tt(score: i32, ply: i32) -> i32 {
+    if score >= WIN {
+        score - ply
+    } else if score <= -WIN {
+        score + ply
+    } else {
+        score
+    }
+}
+
+#[inline]
+fn shift_bound_with_atdown(bound: i32, atdown: i32) -> i32 {
+    if bound >= WIN || bound <= -WIN {
+        bound
+    } else {
+        (bound + atdown).clamp(-WIN + 1, WIN - 1)
+    }
+}
+
+#[inline]
+fn score_from_child(child_score: i32, atdown: i32) -> i32 {
+    if child_score >= WIN || child_score <= -WIN {
+        -child_score
+    } else {
+        (-atdown - child_score).clamp(-WIN + 1, WIN - 1)
+    }
+}
+
 pub fn compute_corner_state(board: &Board) -> (bool, i32) {
     let mut half = 0_i32;
     for played in board.move_history() {
@@ -353,9 +393,12 @@ impl AlphaBetaSearcher {
 
         // Stored depths round down. Round the requirement up so a leaf never
         // cuts off a positive-depth search, even after fractional reductions.
-        let probe = self
-            .tt
-            .probe(board.zobrist_key(), depth.ceil() as i32, alpha, beta);
+        let probe = self.tt.probe(
+            board.zobrist_key(),
+            depth.ceil() as i32,
+            score_to_tt(alpha, options.ply),
+            score_to_tt(beta, options.ply),
+        );
         if let Some(best_move_hint) = probe.best_move_hint {
             if best_move_hint.generation == self.tt_generation {
                 stats.tt_bestmove_current_generation += 1;
@@ -365,11 +408,14 @@ impl AlphaBetaSearcher {
         }
         if !root_restricted && probe.hit && probe.value.is_some() {
             stats.tt_hits += 1;
-            return (probe.value.expect("checked above"), probe.best_move);
+            return (
+                score_from_tt(probe.value.expect("checked above"), options.ply),
+                probe.best_move,
+            );
         }
         if probe.has_window && !options.root {
-            alpha = alpha.max(probe.window_alpha);
-            beta = beta.min(probe.window_beta);
+            alpha = alpha.max(score_from_tt(probe.window_alpha, options.ply));
+            beta = beta.min(score_from_tt(probe.window_beta, options.ply));
         }
 
         if depth <= 0.0 {
@@ -383,7 +429,7 @@ impl AlphaBetaSearcher {
             }
             self.tt.store(TTEntry {
                 key: board.zobrist_key(),
-                value: score,
+                value: score_to_tt(score, options.ply),
                 flag: HASHF_EXACT,
                 depth: 0,
                 priority: priority_base * 10,
@@ -440,7 +486,7 @@ impl AlphaBetaSearcher {
             order_candidates_owned(board, generated.candidates, side, tt_best_move)
         };
         if win_priority && !ordered.is_empty() {
-            return (INF, Some(ordered[0].move_));
+            return (INF - options.ply, Some(ordered[0].move_));
         }
 
         if self.config.runtime.compute_vcf && self.config.runtime.nonroot_vcf && !options.root {
@@ -575,13 +621,14 @@ impl AlphaBetaSearcher {
                 let score = if found_pv {
                     let narrow_start = profile_root_candidate.then(Instant::now);
                     let narrow_nodes_before = stats.nodes;
+                    let shifted_alpha = shift_bound_with_atdown(alpha, atdown);
                     let (narrow_score, _) = self.search_with_coverage(
                         board,
                         caches,
                         -side,
                         attempt_depth,
-                        -(alpha + atdown) - 1,
-                        -(alpha + atdown),
+                        -shifted_alpha - 1,
+                        -shifted_alpha,
                         child_wide,
                         stats,
                         child_options,
@@ -595,7 +642,7 @@ impl AlphaBetaSearcher {
                     if stats.stop {
                         break narrow_score;
                     }
-                    let narrowed = -atdown - narrow_score;
+                    let narrowed = score_from_child(narrow_score, atdown);
                     if alpha < narrowed && narrowed < beta {
                         profile_pvs_research = true;
                         let full_start = profile_root_candidate.then(Instant::now);
@@ -605,8 +652,8 @@ impl AlphaBetaSearcher {
                             caches,
                             -side,
                             attempt_depth,
-                            -(beta + atdown),
-                            -(alpha + atdown),
+                            -shift_bound_with_atdown(beta, atdown),
+                            -shift_bound_with_atdown(alpha, atdown),
                             child_wide,
                             stats,
                             child_options,
@@ -620,7 +667,7 @@ impl AlphaBetaSearcher {
                         if stats.stop {
                             break full_score;
                         }
-                        -atdown - full_score
+                        score_from_child(full_score, atdown)
                     } else {
                         narrowed
                     }
@@ -632,8 +679,8 @@ impl AlphaBetaSearcher {
                         caches,
                         -side,
                         attempt_depth,
-                        -(beta + atdown),
-                        -(alpha + atdown),
+                        -shift_bound_with_atdown(beta, atdown),
+                        -shift_bound_with_atdown(alpha, atdown),
                         child_wide,
                         stats,
                         child_options,
@@ -646,7 +693,7 @@ impl AlphaBetaSearcher {
                     if stats.stop {
                         break full_score;
                     }
-                    -atdown - full_score
+                    score_from_child(full_score, atdown)
                 };
                 if score >= WIN {
                     break score;
@@ -782,7 +829,7 @@ impl AlphaBetaSearcher {
             }
             self.tt.store(TTEntry {
                 key: board.zobrist_key(),
-                value: current,
+                value: score_to_tt(current, options.ply),
                 flag: hash_flag,
                 depth: store_depth,
                 priority: priority_base * 10 + hash_depth,

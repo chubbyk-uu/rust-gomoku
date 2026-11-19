@@ -28,6 +28,6 @@
   "expected_differences": {
     "root.move": {"rust": [9, 6], "reference": [5, 4]},
     "root.score": {"rust": -15, "reference": -7},
-    "root.nodes": {"rust": 2377, "reference": 1123}
+    "root.nodes": {"rust": 2373, "reference": 1123}
   }
 }

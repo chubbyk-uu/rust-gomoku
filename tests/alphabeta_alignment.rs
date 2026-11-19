@@ -239,7 +239,7 @@ fn alphabeta_matches_expected_mid_ladder_nonroot_score() {
         move_to_xy(move_.expect("move should exist")).unwrap(),
         (7, 6)
     );
-    assert_eq!(score, -19990);
+    assert_eq!(score, -19993);
 }
 
 #[test]
@@ -462,8 +462,129 @@ fn root_search_returns_best_candidate_even_when_atdown_scores_below_neg_inf() {
             ..SearchOptions::default()
         },
     );
-    assert_eq!(best, Some(inner_move));
-    assert!(score < -INF);
+    assert!(best.is_some_and(|m| allowed.contains(&m)));
+    assert_eq!(score, -INF + 1);
+}
+
+#[test]
+fn slower_loss_with_atdown_beats_faster_loss_without_atdown() {
+    // White has a single blocked four on row 1: B(2,1), W(3,1), W(4,1), W(5,1), W(6,1),
+    // threatening immediate five at (7,1) (height=1 => rootbonus=4).
+    // White also has a double-three threat at (6,10) (from W(4,10),W(5,10) and W(6,8),W(6,9)),
+    // which wins only at ply 3 (after Black blocks (7,1)), NOT at ply 1.
+    // - (10,10) (atdown=0) ignores the four and loses at ply 1 (-INF + 1 = -19999).
+    // - (7,1) (atdown>=4) blocks the four and survives until ply 3 (-INF + 3 = -19997).
+    // With atdown isolated from mate scores, the slower loss (-19997) must beat -19999.
+    let mut board = Board::new();
+    for (x, y) in [
+        (2, 1),
+        (3, 1),
+        (0, 14),
+        (4, 1),
+        (1, 14),
+        (5, 1),
+        (2, 14),
+        (6, 1),
+        (13, 14),
+        (4, 10),
+        (14, 14),
+        (5, 10),
+        (14, 13),
+        (6, 8),
+        (13, 13),
+        (6, 9),
+    ] {
+        board.play(xy_to_move(x, y).unwrap(), None).unwrap();
+    }
+    let mut caches = EvalCaches::new();
+    recompute_all(&mut board, &mut caches);
+
+    let fast_loss = xy_to_move(10, 10).unwrap();
+    let slow_loss_with_high_atdown = xy_to_move(7, 1).unwrap();
+    let allowed = HashSet::from([fast_loss, slow_loss_with_high_atdown]);
+
+    let mut searcher = AlphaBetaSearcher::new(load_default_config());
+    let mut stats = SearchStats::default();
+    let (score, best) = searcher.search(
+        &mut board,
+        &mut caches,
+        BLACK,
+        3.0,
+        -INF,
+        INF,
+        20,
+        &mut stats,
+        SearchOptions {
+            opo: 1,
+            root: true,
+            root_allowed_moves: Some(&allowed),
+            ..SearchOptions::default()
+        },
+    );
+    assert_eq!(best, Some(slow_loss_with_high_atdown));
+    assert!(
+        score > -INF + 1 && score <= -WIN,
+        "expected slower loss > -19999, got {score}"
+    );
+}
+
+#[test]
+fn cross_ply_tt_mate_score_normalizes_by_search_ply() {
+    // White has an open four (3,7)..(6,7); Black to move loses in 1 ply (no win_priority,
+    // so the losing mate score is stored into TT at ply = 4 and probed back at ply = 2).
+    let mut board = Board::new();
+    for (x, y) in [
+        (0, 0),
+        (3, 7),
+        (1, 0),
+        (4, 7),
+        (2, 0),
+        (5, 7),
+        (14, 14),
+        (6, 7),
+    ] {
+        board.play(xy_to_move(x, y).unwrap(), None).unwrap();
+    }
+    let mut caches = EvalCaches::new();
+    recompute_all(&mut board, &mut caches);
+
+    let mut searcher = AlphaBetaSearcher::new(load_default_config());
+    let (score_ply4, _) = searcher.search(
+        &mut board,
+        &mut caches,
+        BLACK,
+        1.0,
+        -INF,
+        INF,
+        8,
+        &mut SearchStats::default(),
+        SearchOptions {
+            ply: 4,
+            ..SearchOptions::default()
+        },
+    );
+    // Opponent wins immediately at ply = 5, so score at ply = 4 is -INF + 5.
+    assert_eq!(score_ply4, -INF + 5);
+
+    // Search the same position at ply = 2 on the same TT (simulating cross-move reuse):
+    // must hit TT and normalize the mate distance to -INF + 3 (still 1 ply from this node).
+    let mut stats_ply2 = SearchStats::default();
+    let (score_ply2, _) = searcher.search(
+        &mut board,
+        &mut caches,
+        BLACK,
+        1.0,
+        -INF,
+        INF,
+        8,
+        &mut stats_ply2,
+        SearchOptions {
+            ply: 2,
+            ..SearchOptions::default()
+        },
+    );
+    assert_eq!(stats_ply2.tt_hits, 1);
+    assert_eq!(score_ply2, -INF + 3);
 }
 
 #[test]

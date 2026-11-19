@@ -26,7 +26,7 @@
   },
   "checks": ["root"],
   "expected_differences": {
-    "root.score": {"rust": 19993, "reference": -3},
-    "root.nodes": {"rust": 15233, "reference": 9015}
+    "root.score": {"rust": 19990, "reference": -3},
+    "root.nodes": {"rust": 13594, "reference": 9015}
   }
 }

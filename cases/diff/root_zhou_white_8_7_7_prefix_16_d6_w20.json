@@ -32,6 +32,6 @@
   "checks": ["root"],
   "expected_differences": {
     "root.move": {"rust": [9, 9], "reference": [6, 3]},
-    "root.score": {"rust": -20003, "reference": -20001}
+    "root.score": {"rust": -19997, "reference": -20001}
   }
 }
