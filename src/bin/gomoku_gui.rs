@@ -781,6 +781,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
       margin-top: -4px;
     }
     .error-text { color: var(--danger); margin-top: 10px; font-weight: 800; font-size: 16px; }
+    .pending-notice {
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: #fff4df;
+      border: 1px solid #d9822b;
+      color: #8a4300;
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.45;
+    }
+    .pending-notice[hidden] { display: none; }
     .result-backdrop {
       position: fixed;
       inset: 0;
@@ -878,6 +889,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <button id="sound-toggle" class="secondary" onclick="toggleSound()">开</button>
           </div>
         </div>
+        <div id="pending-notice" class="pending-notice" hidden></div>
         <div class="new-game">
           <div id="start-vs-engine">
             <button class="primary" onclick="newGame('black')">执黑</button>
@@ -999,18 +1011,53 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function setDifficulty(difficulty) { api('/difficulty?value=' + difficulty).catch(showError); }
     function setTimeLimit(ms) { api('/time_limit?ms=' + ms).catch(showError); }
     function setMultithread(enabled) { api('/threads?enabled=' + (enabled ? '1' : '0')).catch(showError); }
+    function syncEmptyBoardSettings() {
+      if (state && state.move_count === 0 && !state.engine_thinking) {
+        api('/new?side=black&rule=' + selectedRule + '&mode=' + selectedMode + '&clock=' + selectedClock).catch(showError);
+      }
+    }
     function selectRule(rule) {
       selectedRule = rule;
       renderRuleButtons();
+      renderPendingNotice();
+      syncEmptyBoardSettings();
     }
     function selectClock(clock) {
       selectedClock = clock;
       renderClockButtons();
       renderModeButtons();
+      renderPendingNotice();
+      syncEmptyBoardSettings();
     }
     function selectMode(mode) {
       selectedMode = mode;
       renderModeButtons();
+      renderPendingNotice();
+      syncEmptyBoardSettings();
+    }
+    function renderPendingNotice() {
+      const notice = document.getElementById('pending-notice');
+      if (!notice || !state || !state.params || state.move_count === 0) {
+        if (notice) notice.hidden = true;
+        return;
+      }
+      const p = state.params;
+      const modeDiff = selectedMode !== p.mode;
+      const ruleDiff = selectedRule !== p.rule;
+      const clockDiff = selectedMode !== 'two_player' && p.mode !== 'two_player' && selectedClock !== p.clock_mode;
+      if (!modeDiff && !ruleDiff && !clockDiff) {
+        notice.hidden = true;
+        return;
+      }
+      const curParts = [
+        p.mode === 'two_player' ? '双人' : '人机',
+        p.rule === 'renju' ? '有禁手' : '无禁手',
+      ];
+      if (p.mode !== 'two_player') {
+        curParts.push(p.clock_mode === 'timed' ? '限时' : '不限时');
+      }
+      notice.textContent = `当前对局仍为「${curParts.join(' / ')}」，点击下方开局按钮后才会切换为新设置。`;
+      notice.hidden = false;
     }
     function renderModeButtons() {
       const twoPlayer = selectedMode === 'two_player';
@@ -1251,6 +1298,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       renderRuleButtons();
       renderClockButtons();
       renderModeButtons();
+      renderPendingNotice();
       if (p.mode === 'two_player') {
         const rows = [
           ['对战', '双人对弈'],

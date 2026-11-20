@@ -17,6 +17,12 @@ Do not repeat these directions unless new evidence invalidates the decision:
 Current active target:
 
 - Final-depth late root candidates. Future analysis should explain why they are expensive, not re-confirm that they are expensive.
+- **TODO (VCT speed-up in dense late-game positions, 70+ plies, untimed Master `d8/w40 + VCT6`)**:
+  - Serial root `VCT6` remains single-threaded and uncapped in untimed mode, dominating dense 70+-ply moves even with 4T ABDADA enabled (timed mode already caps root VCT to 30% of remaining move time).
+  - Candidate directions to evaluate later (check `AGENTS.md` rules before modifying base):
+    1. **Route A (low risk)**: evaluate an explicit node/time cap for untimed root VCT (or compare `root_vct_depth = 4` vs `6` strength/latency tradeoff).
+    2. **Route B (behavior-equivalent speedup)**: replace `ThreatBoardView` board scans/trial plays with a Rapfi-style incremental 4-direction `Pattern4` bitboard/LUT so `collect_attack_moves` / `first_counter_win` / `forcing_threat_moves` become O(1) lookups (avoiding the previously rejected `play()`-only `win_moves`/`line_counts` overhead).
+    3. **Route C (experimental branch)**: upgrade `VCTSearcher` from IDDFS to `df-pn` (proof-number search with TT), validated for zero Renju false positives.
 
 ## 2026-11-19 (3) — Incremental `dgn`, sparse `bucket_dot`, deferred rest-sort, and 4-line direct `value_wide_compute`
 
