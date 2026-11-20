@@ -186,13 +186,52 @@ pub struct EngineSearchTask {
     worker_pool: Arc<Mutex<Option<SearchWorkerPool>>>,
 }
 
+enum EngineSearchOutcome {
+    Completed {
+        result: SearchResult,
+        trace: Option<RootTrace>,
+        elapsed_ms: f64,
+        tt: TranspositionTable,
+        worker_pool: Option<SearchWorkerPool>,
+    },
+    Failed {
+        error: String,
+    },
+}
+
 pub struct EngineSearchCompletion {
-    result: SearchResult,
-    trace: Option<RootTrace>,
-    elapsed_ms: f64,
     generation: u64,
-    tt: TranspositionTable,
-    worker_pool: Option<SearchWorkerPool>,
+    outcome: EngineSearchOutcome,
+}
+
+impl EngineSearchCompletion {
+    pub fn failed(generation: u64, error: impl Into<String>) -> Self {
+        Self {
+            generation,
+            outcome: EngineSearchOutcome::Failed {
+                error: error.into(),
+            },
+        }
+    }
+
+    #[cfg(test)]
+    fn tt(&self) -> Option<&TranspositionTable> {
+        match &self.outcome {
+            EngineSearchOutcome::Completed { tt, .. } => Some(tt),
+            EngineSearchOutcome::Failed { .. } => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn has_worker_pool(&self) -> bool {
+        matches!(
+            &self.outcome,
+            EngineSearchOutcome::Completed {
+                worker_pool: Some(_),
+                ..
+            }
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -597,11 +636,26 @@ impl GameController {
         if self.generation != completion.generation {
             return false;
         }
-        self.search_tt = Some(completion.tt);
+        let (result, trace, elapsed_ms, tt, worker_pool) = match completion.outcome {
+            EngineSearchOutcome::Completed {
+                result,
+                trace,
+                elapsed_ms,
+                tt,
+                worker_pool,
+            } => (result, trace, elapsed_ms, tt, worker_pool),
+            EngineSearchOutcome::Failed { error } => {
+                self.error = Some(error);
+                self.status = "引擎搜索失败。".to_string();
+                self.engine_thinking = false;
+                return true;
+            }
+        };
+        self.search_tt = Some(tt);
         if self.config.runtime.threads > 1
             && self.search_limits().max_depth >= ABDADA_PARALLEL_START_DEPTH
         {
-            if let Some(pool) = completion.worker_pool {
+            if let Some(pool) = worker_pool {
                 let mut guard = self
                     .search_pool
                     .lock()
@@ -611,7 +665,7 @@ impl GameController {
         }
         if self.board.winner() == EMPTY && self.board.side_to_move() != self.human_side {
             if !self.board.is_legal_move_for_rule(
-                completion.result.move_,
+                result.move_,
                 self.board.side_to_move(),
                 self.config.rule_set,
             ) {
@@ -620,14 +674,13 @@ impl GameController {
             } else {
                 match self
                     .board
-                    .play_for_rule(completion.result.move_, None, self.config.rule_set)
+                    .play_for_rule(result.move_, None, self.config.rule_set)
                 {
                     Ok(_) => {
-                        self.last_mark = move_to_xy(completion.result.move_).ok();
-                        self.last_result = Some(completion.result);
-                        self.last_trace = completion.trace;
-                        self.last_search_ms =
-                            Some((completion.elapsed_ms * 1000.0).round() / 1000.0);
+                        self.last_mark = move_to_xy(result.move_).ok();
+                        self.last_result = Some(result);
+                        self.last_trace = trace;
+                        self.last_search_ms = Some((elapsed_ms * 1000.0).round() / 1000.0);
                         self.status = if self.board.winner() != EMPTY {
                             "引擎获胜。".to_string()
                         } else if self.board.is_draw() {
@@ -809,6 +862,10 @@ impl GameController {
 }
 
 impl EngineSearchTask {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub fn run(mut self) -> EngineSearchCompletion {
         let effective_threads = if self.limits.node_limit.is_some() {
             1
@@ -816,7 +873,18 @@ impl EngineSearchTask {
             self.config.runtime.threads
         };
         let tt_bits = default_tt_bits_for_search(effective_threads, self.limits.max_depth);
-        let tt = self.tt.unwrap_or_else(|| TranspositionTable::new(tt_bits));
+        let tt = match self.tt {
+            Some(tt) => tt,
+            None => match TranspositionTable::try_new_with_fallback(tt_bits, 16) {
+                Ok((tt, _)) => tt,
+                Err(_) => {
+                    return EngineSearchCompletion::failed(
+                        self.generation,
+                        "内存不足，无法分配置换表。",
+                    );
+                }
+            },
+        };
         let mut searcher = RootSearcher::with_tt(self.config, tt);
         let reused_pool = self
             .worker_pool
@@ -825,17 +893,25 @@ impl EngineSearchTask {
             .take();
         searcher.set_worker_pool(reused_pool);
         let start = Instant::now();
-        let result = searcher
-            .try_search(&mut self.board, Some(self.limits))
-            .expect("engine task is prepared only for non-terminal boards");
+        let result = match searcher.try_search(&mut self.board, Some(self.limits)) {
+            Ok(result) => result,
+            Err(err) => {
+                return EngineSearchCompletion::failed(
+                    self.generation,
+                    format!("引擎搜索失败：{err:?}"),
+                );
+            }
+        };
         let worker_pool = searcher.take_worker_pool();
         EngineSearchCompletion {
-            result,
-            trace: searcher.last_trace,
-            elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
             generation: self.generation,
-            tt: searcher.tt,
-            worker_pool,
+            outcome: EngineSearchOutcome::Completed {
+                result,
+                trace: searcher.last_trace,
+                elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+                tt: searcher.tt,
+                worker_pool,
+            },
         }
     }
 }
@@ -1130,7 +1206,7 @@ mod tests {
         );
         assert!(controller.search_tt.is_none());
         let completion1 = task1.run();
-        let tt1 = completion1.tt.clone();
+        let tt1 = completion1.tt().unwrap().clone();
         assert!(controller.commit_engine_search(completion1));
         assert!(controller
             .search_tt
@@ -1200,7 +1276,7 @@ mod tests {
         let task = controller.prepare_engine_search().unwrap();
         let completion = task.run();
         assert_eq!(
-            completion.tt.bucket_count(),
+            completion.tt().unwrap().bucket_count(),
             1 << 20,
             "Intermediate (d4) does not start ABDADA workers and should keep 32 MiB TT"
         );
@@ -1224,7 +1300,7 @@ mod tests {
         narrow_task.limits.max_depth = 5;
         narrow_task.limits.root_width = 8;
         let completion = narrow_task.run();
-        assert_eq!(completion.tt.bucket_count(), 1 << 21);
+        assert_eq!(completion.tt().unwrap().bucket_count(), 1 << 21);
         assert!(controller.commit_engine_search(completion));
         assert!(
             controller.search_pool.lock().unwrap().is_some(),
@@ -1259,7 +1335,7 @@ mod tests {
 
         let stale_completion = stale_task.run();
         assert!(
-            stale_completion.worker_pool.is_some(),
+            stale_completion.has_worker_pool(),
             "old 4T d5 task should have created a worker pool"
         );
         assert!(!controller.commit_engine_search(stale_completion));
@@ -1337,7 +1413,7 @@ mod tests {
         assert!(!controller.set_time_limit_ms(1000));
 
         let completion = task.run();
-        assert_eq!(completion.tt.bucket_count(), 1 << 21);
+        assert_eq!(completion.tt().unwrap().bucket_count(), 1 << 21);
         assert!(controller.commit_engine_search(completion));
         assert!(controller.search_pool.lock().unwrap().is_some());
 
@@ -1365,5 +1441,27 @@ mod tests {
             SearchClockMode::Timed,
         ));
         assert_eq!(custom_controller.snapshot().params.width, 8);
+    }
+
+    #[test]
+    fn failed_search_completion_clears_thinking_state_and_reports_error() {
+        let mut controller = shallow_controller();
+        assert!(controller.new_game(BLACK, RuleSet::Renju, GameMode::VsEngine));
+        assert!(controller.play_human(7, 7));
+
+        let task = controller.prepare_engine_search().unwrap();
+        assert!(controller.snapshot().engine_thinking);
+
+        let failed =
+            EngineSearchCompletion::failed(task.generation(), "内存不足，无法分配置换表。");
+        assert!(controller.commit_engine_search(failed));
+
+        let snapshot = controller.snapshot();
+        assert!(!snapshot.engine_thinking);
+        assert_eq!(snapshot.status, "引擎搜索失败。");
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("内存不足，无法分配置换表。")
+        );
     }
 }

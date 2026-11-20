@@ -2,6 +2,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 #[cfg(not(target_os = "windows"))]
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -11,8 +12,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use rust_gomoku::{
-    default_interactive_threads, load_default_config, GameController, GameMode, RuleSet,
-    SearchClockMode, SearchDifficulty, Side, BLACK, MAX_SEARCH_THREADS, WHITE,
+    default_interactive_threads, load_default_config, EngineSearchCompletion, GameController,
+    GameMode, RuleSet, SearchClockMode, SearchDifficulty, Side, BLACK, MAX_SEARCH_THREADS, WHITE,
 };
 
 const DEFAULT_ADDR: &str = "127.0.0.1:18080";
@@ -449,14 +450,28 @@ fn maybe_start_engine(state: Arc<Mutex<GameController>>) {
     let Some(task) = task else {
         return;
     };
-
-    thread::spawn(move || {
-        let completion = task.run();
+    let generation = task.generation();
+    let thread_state = Arc::clone(&state);
+    let spawn_result = thread::Builder::new()
+        .name("gomoku-gui-search".to_string())
+        .spawn(move || {
+            let completion = catch_unwind(AssertUnwindSafe(|| task.run())).unwrap_or_else(|_| {
+                EngineSearchCompletion::failed(generation, "引擎搜索线程异常退出。")
+            });
+            thread_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .commit_engine_search(completion);
+        });
+    if spawn_result.is_err() {
         state
             .lock()
-            .expect("state lock")
-            .commit_engine_search(completion);
-    });
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .commit_engine_search(EngineSearchCompletion::failed(
+                generation,
+                "系统资源不足，无法启动引擎搜索线程。",
+            ));
+    }
 }
 
 fn html_response(body: &str) -> String {

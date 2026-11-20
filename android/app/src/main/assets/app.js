@@ -416,6 +416,7 @@ async function applyAndContinue(response) {
     }
     state = moved.state;
     render(state);
+    if (state.error) break;
   }
 }
 
