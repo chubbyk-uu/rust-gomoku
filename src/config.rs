@@ -34,6 +34,17 @@ pub fn default_tt_bits_for_threads(threads: usize) -> u32 {
     }
 }
 
+/// Default TT bucket bits accounting for whether the search depth can actually
+/// wake ABDADA workers (`max_depth >= 5`). Shallow depths (`d1..=d4`) keep the
+/// compact 32 MiB TT even when `threads >= 4`.
+pub fn default_tt_bits_for_search(threads: usize, max_depth: i32) -> u32 {
+    if threads >= 4 && max_depth >= 5 {
+        21
+    } else {
+        20
+    }
+}
+
 /// Recommended interactive UI thread count (used by desktop GUI and Android):
 /// `min(4, cores)` on 4+ core devices, otherwise `min(2, cores)`.
 pub fn default_interactive_threads() -> usize {

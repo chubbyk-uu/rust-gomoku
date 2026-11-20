@@ -56,6 +56,7 @@ function fakeDocument() {
     "btn-start": element(),
     "sheet-newgame": element(),
     "opt-difficulty": element(),
+    "opt-multithread": element(),
   };
   const options = [element(), element(), element()];
   const backdrop = element();
@@ -109,6 +110,7 @@ test("busy and engine thinking disable every new-game control", () => {
   assert.equal(document_.elements["btn-newgame"].disabled, true);
   assert.equal(document_.elements["btn-start"].disabled, true);
   assert.equal(document_.elements["opt-difficulty"].disabled, true);
+  assert.equal(document_.elements["opt-multithread"].disabled, true);
   assert.ok(document_.options.every((button) => button.disabled));
 
   syncBusyControls(document_, false, {
@@ -119,6 +121,7 @@ test("busy and engine thinking disable every new-game control", () => {
   assert.equal(document_.elements["btn-newgame"].disabled, false);
   assert.equal(document_.elements["btn-start"].disabled, false);
   assert.equal(document_.elements["opt-difficulty"].disabled, false);
+  assert.equal(document_.elements["opt-multithread"].disabled, false);
   assert.ok(document_.options.every((button) => !button.disabled));
 });
 
@@ -209,8 +212,10 @@ test("the packaged page wires all tested UI helpers before app startup", () => {
   assert.match(appScript, /UiLogic\.setSheetOpen\(document, name, false\)/);
   assert.match(appScript, /UiLogic\.gameResult\(state\)/);
   assert.match(appScript, /op: "set_difficulty", difficulty/);
+  assert.match(appScript, /op: "set_multithread", enabled/);
   assert.match(appScript, /setDifficultyValue\(state\.params\.difficulty\)/);
   assert.match(page, /id="opt-difficulty"/);
+  assert.match(page, /id="opt-multithread"/);
   assert.match(page, /id="opt-gamemode"/);
   assert.match(page, /data-value="two_player"/);
   assert.match(page, /data-engine-only/);

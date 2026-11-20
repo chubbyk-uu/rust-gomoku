@@ -125,6 +125,10 @@
       <span>落子音效</span>
       <button id="opt-sound" aria-pressed="true">开</button>
     </div>
+    <label class="toggle-row" id="row-multithread" for="opt-multithread">
+      <span id="multithread-label">多线程搜索</span>
+      <input id="opt-multithread" type="checkbox" checked>
+    </label>
     <details class="advanced">
       <summary>高级 / 引擎信息</summary>
       <div class="kv" id="adv-kv">
@@ -133,6 +137,7 @@
         <span class="k">节点</span><span class="v" data-adv="nodes">—</span>
         <span class="k">思考耗时</span><span class="v" data-adv="ms">—</span>
         <span class="k">难度</span><span class="v" data-adv="difficulty">—</span>
+        <span class="k">线程</span><span class="v" data-adv="threads">—</span>
       </div>
     </details>
     <div class="sheet-actions">

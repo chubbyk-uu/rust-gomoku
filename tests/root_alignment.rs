@@ -919,8 +919,29 @@ fn abdada_multithread_search_preserves_legality_tt_tier_and_limits() {
     config.runtime.compute_vct = false;
     config.runtime.threads = 4;
 
-    let mut searcher = RootSearcher::new(config);
+    let mut searcher = RootSearcher::new(config.clone());
     assert_eq!(searcher.tt.bucket_count(), 1 << 21);
+
+    let shallow_searcher = RootSearcher::new_for_limits(
+        config.clone(),
+        SearchLimits {
+            max_depth: 4,
+            root_width: 20,
+            ..SearchLimits::default()
+        },
+    );
+    assert_eq!(shallow_searcher.tt.bucket_count(), 1 << 20);
+
+    let node_limited_searcher = RootSearcher::new_for_limits(
+        config,
+        SearchLimits {
+            max_depth: 5,
+            root_width: 20,
+            node_limit: Some(5000),
+            time_limit_ms: None,
+        },
+    );
+    assert_eq!(node_limited_searcher.tt.bucket_count(), 1 << 20);
 
     // Fixed depth >= 5 exercises the persistent ABDADA worker pool across consecutive moves.
     let limits = SearchLimits {
@@ -948,4 +969,43 @@ fn abdada_multithread_search_preserves_legality_tt_tier_and_limits() {
     );
     assert_eq!(board.zobrist_key(), after_key);
     assert!(board.is_legal_move_for_rule(r2.move_, board.side_to_move(), RuleSet::Renju));
+}
+
+#[test]
+fn abdada_timed_search_reports_helper_nodes_in_budget_total() {
+    let mut board = Board::new();
+    for (x, y) in [(7, 7), (8, 7), (7, 8), (8, 8), (6, 7), (9, 6)] {
+        board
+            .play_for_rule(xy_to_move(x, y).unwrap(), None, RuleSet::Renju)
+            .unwrap();
+    }
+    let mut config = load_default_config();
+    config.rule_set = RuleSet::Renju;
+    config.runtime.compute_vcf = false;
+    config.runtime.compute_vct = false;
+    config.runtime.threads = 4;
+    config.runtime.root_profile = true;
+
+    let mut searcher = RootSearcher::new(config);
+    let result = searcher.search(
+        &mut board,
+        Some(SearchLimits {
+            max_depth: 10,
+            root_width: 20,
+            time_limit_ms: Some(120.0),
+            node_limit: None,
+        }),
+    );
+    let trace = searcher.last_trace.as_ref().expect("trace recorded");
+    let profiled_total: usize = trace.root_profiles.iter().map(|p| p.nodes).sum();
+    assert!(
+        trace.root_profiles.iter().any(|p| p.depth >= 5),
+        "timed search should reach parallel depth >= 5"
+    );
+    assert!(
+        result.nodes >= profiled_total,
+        "timed search result.nodes ({}) must include helper nodes (profiled depth sum = {})",
+        result.nodes,
+        profiled_total
+    );
 }

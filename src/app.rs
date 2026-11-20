@@ -1,13 +1,15 @@
 //! Shared application controller for desktop and mobile frontends.
 
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::Serialize;
 
+use crate::search::abdada::{SearchWorkerPool, ABDADA_PARALLEL_START_DEPTH};
 use crate::{
-    default_tt_bits_for_threads, move_to_xy, xy_to_move, Board, EngineConfig, ForbiddenKind,
+    default_tt_bits_for_search, move_to_xy, xy_to_move, Board, EngineConfig, ForbiddenKind,
     RootSearcher, RootTrace, RuleSet, SearchLimits, SearchResult, Side, TranspositionTable, BLACK,
-    BOARD_SIZE, EMPTY, WHITE,
+    BOARD_SIZE, EMPTY, MAX_SEARCH_THREADS, WHITE,
 };
 
 /// Who controls the two sides of the board.
@@ -136,6 +138,7 @@ pub struct GameController {
     difficulty: Option<SearchDifficulty>,
     generation: u64,
     search_tt: Option<TranspositionTable>,
+    search_pool: Arc<Mutex<Option<SearchWorkerPool>>>,
 }
 
 #[derive(Clone)]
@@ -145,6 +148,7 @@ pub struct EngineSearchTask {
     limits: SearchLimits,
     generation: u64,
     tt: Option<TranspositionTable>,
+    worker_pool: Arc<Mutex<Option<SearchWorkerPool>>>,
 }
 
 pub struct EngineSearchCompletion {
@@ -153,6 +157,7 @@ pub struct EngineSearchCompletion {
     elapsed_ms: f64,
     generation: u64,
     tt: TranspositionTable,
+    worker_pool: Option<SearchWorkerPool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -225,6 +230,7 @@ pub struct GameParamsSnapshot {
     pub difficulty: &'static str,
     pub depth: i32,
     pub width: usize,
+    pub threads: usize,
     pub compute_vcf: bool,
     pub root_vcf_depth: i32,
     pub opponent_vcf_depth: i32,
@@ -254,6 +260,7 @@ impl GameController {
             difficulty,
             generation: 0,
             search_tt: None,
+            search_pool: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -432,6 +439,11 @@ impl GameController {
         self.difficulty = Some(difficulty);
         if prev_difficulty != self.difficulty || prev_config != self.config {
             self.search_tt = None;
+            if depth < ABDADA_PARALLEL_START_DEPTH {
+                if let Ok(mut guard) = self.search_pool.lock() {
+                    *guard = None;
+                }
+            }
         }
         self.error = None;
         self.last_result = None;
@@ -442,6 +454,38 @@ impl GameController {
             difficulty.label(),
             if tactical { "开启" } else { "关闭" }
         );
+    }
+
+    pub fn set_threads(&mut self, threads: usize) {
+        if self.engine_thinking {
+            self.error = Some("引擎思考中，暂不能切换线程数。".to_string());
+            return;
+        }
+        let threads = threads.clamp(1, MAX_SEARCH_THREADS);
+        let prev_threads = self.config.runtime.threads;
+        if prev_threads != threads {
+            let depth = self.config.root_search.depth;
+            if default_tt_bits_for_search(prev_threads, depth)
+                != default_tt_bits_for_search(threads, depth)
+            {
+                self.search_tt = None;
+            }
+            self.config.runtime.threads = threads;
+            if threads == 1 {
+                if let Ok(mut guard) = self.search_pool.lock() {
+                    *guard = None;
+                }
+            }
+        }
+        self.error = None;
+        self.status = format!("已切换为 {threads} 线程，下一次引擎思考生效。");
+    }
+
+    pub fn set_overlap_vct_alphabeta(&mut self, enabled: bool) {
+        if self.engine_thinking {
+            return;
+        }
+        self.config.runtime.overlap_vct_alphabeta = enabled;
     }
 
     pub fn set_error(&mut self, message: impl Into<String>) {
@@ -459,12 +503,18 @@ impl GameController {
         self.engine_thinking = true;
         self.error = None;
         self.status = "引擎思考中...".to_string();
+        let taken_pool = self
+            .search_pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
         Some(EngineSearchTask {
             board: self.board.clone(),
             config: self.config.clone(),
             limits: self.search_limits(),
             generation: self.generation,
             tt: self.search_tt.clone(),
+            worker_pool: Arc::new(Mutex::new(taken_pool)),
         })
     }
 
@@ -473,6 +523,17 @@ impl GameController {
             return false;
         }
         self.search_tt = Some(completion.tt);
+        if self.config.runtime.threads > 1
+            && self.config.root_search.depth >= ABDADA_PARALLEL_START_DEPTH
+        {
+            if let Some(pool) = completion.worker_pool {
+                let mut guard = self
+                    .search_pool
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *guard = Some(pool);
+            }
+        }
         if self.board.winner() == EMPTY && self.board.side_to_move() != self.human_side {
             if !self.board.is_legal_move_for_rule(
                 completion.result.move_,
@@ -578,6 +639,7 @@ impl GameController {
                     .unwrap_or("custom"),
                 depth: limits.max_depth,
                 width: limits.root_width,
+                threads: self.config.runtime.threads,
                 compute_vcf: self.config.runtime.compute_vcf,
                 root_vcf_depth: self.config.runtime.root_vcf_depth,
                 opponent_vcf_depth: self.config.runtime.opponent_vcf_depth,
@@ -651,19 +713,32 @@ impl GameController {
 
 impl EngineSearchTask {
     pub fn run(mut self) -> EngineSearchCompletion {
-        let tt_bits = default_tt_bits_for_threads(self.config.runtime.threads);
+        let effective_threads = if self.limits.node_limit.is_some() {
+            1
+        } else {
+            self.config.runtime.threads
+        };
+        let tt_bits = default_tt_bits_for_search(effective_threads, self.limits.max_depth);
         let tt = self.tt.unwrap_or_else(|| TranspositionTable::new(tt_bits));
         let mut searcher = RootSearcher::with_tt(self.config, tt);
+        let reused_pool = self
+            .worker_pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        searcher.set_worker_pool(reused_pool);
         let start = Instant::now();
         let result = searcher
             .try_search(&mut self.board, Some(self.limits))
             .expect("engine task is prepared only for non-terminal boards");
+        let worker_pool = searcher.take_worker_pool();
         EngineSearchCompletion {
             result,
             trace: searcher.last_trace,
             elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
             generation: self.generation,
             tt: searcher.tt,
+            worker_pool,
         }
     }
 }
@@ -1013,6 +1088,120 @@ mod tests {
         assert!(
             controller.search_tt.is_none(),
             "stale completion must not repopulate search_tt after new_game"
+        );
+    }
+
+    #[test]
+    fn interactive_tt_tier_stays_32mib_at_intermediate_d4_and_upgrades_at_senior_d6() {
+        let mut config = load_default_config();
+        SearchDifficulty::Intermediate.apply_to_config(&mut config);
+        config.runtime.threads = 4;
+        let mut controller = GameController::new(config);
+        assert!(controller.new_game(BLACK, RuleSet::Renju, GameMode::VsEngine));
+        assert!(controller.play_human(7, 7));
+
+        let task = controller.prepare_engine_search().unwrap();
+        let completion = task.run();
+        assert_eq!(
+            completion.tt.bucket_count(),
+            1 << 20,
+            "Intermediate (d4) does not start ABDADA workers and should keep 32 MiB TT"
+        );
+        assert!(controller.commit_engine_search(completion));
+        assert!(
+            controller.search_pool.lock().unwrap().is_none(),
+            "d4 search should not allocate a worker pool"
+        );
+
+        controller.set_difficulty(SearchDifficulty::Senior);
+        assert!(controller.search_tt.is_none());
+        let next_xy = (0..BOARD_SIZE)
+            .flat_map(|y| (0..BOARD_SIZE).map(move |x| (x, y)))
+            .find(|&(x, y)| controller.board.at(x, y) == Ok(EMPTY))
+            .unwrap();
+        assert!(controller.play_human(next_xy.0, next_xy.1));
+
+        let task = controller.prepare_engine_search().unwrap();
+        // Verify Senior (d6, 4T) allocates 64 MiB TT and creates a reusable pool.
+        let mut narrow_task = task;
+        narrow_task.limits.max_depth = 5;
+        narrow_task.limits.root_width = 8;
+        let completion = narrow_task.run();
+        assert_eq!(completion.tt.bucket_count(), 1 << 21);
+        assert!(controller.commit_engine_search(completion));
+        assert!(
+            controller.search_pool.lock().unwrap().is_some(),
+            "parallel depth >= 5 should retain worker pool across moves"
+        );
+
+        // Switching back to single-threaded drops the worker pool and resets TT tier.
+        controller.set_threads(1);
+        assert_eq!(controller.snapshot().params.threads, 1);
+        assert!(controller.search_tt.is_none());
+        assert!(controller.search_pool.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn stale_multithread_task_does_not_leak_worker_pool_into_single_thread_new_game() {
+        let mut config = load_default_config();
+        SearchDifficulty::Senior.apply_to_config(&mut config);
+        config.runtime.threads = 4;
+        let mut controller = GameController::new(config);
+        assert!(controller.new_game(BLACK, RuleSet::Renju, GameMode::VsEngine));
+        assert!(controller.play_human(7, 7));
+
+        let mut stale_task = controller.prepare_engine_search().unwrap();
+        stale_task.limits.max_depth = 5;
+        stale_task.limits.root_width = 8;
+
+        // Start a new game and switch to 1 thread while the old 4-thread task is in flight.
+        assert!(controller.new_game(BLACK, RuleSet::Renju, GameMode::VsEngine));
+        controller.set_threads(1);
+        assert_eq!(controller.snapshot().params.threads, 1);
+        assert!(controller.search_pool.lock().unwrap().is_none());
+
+        let stale_completion = stale_task.run();
+        assert!(
+            stale_completion.worker_pool.is_some(),
+            "old 4T d5 task should have created a worker pool"
+        );
+        assert!(!controller.commit_engine_search(stale_completion));
+        assert!(
+            controller.search_pool.lock().unwrap().is_none(),
+            "stale completion must not store its worker pool into the 1-thread new game"
+        );
+    }
+
+    #[test]
+    fn stale_task_started_late_does_not_steal_new_game_worker_pool() {
+        let mut config = load_default_config();
+        SearchDifficulty::Senior.apply_to_config(&mut config);
+        config.runtime.threads = 4;
+        let mut controller = GameController::new(config);
+        assert!(controller.new_game(BLACK, RuleSet::Renju, GameMode::VsEngine));
+        assert!(controller.play_human(7, 7));
+
+        // Prepare an old task but do not run it yet.
+        let mut stale_task = controller.prepare_engine_search().unwrap();
+        stale_task.limits.max_depth = 5;
+        stale_task.limits.root_width = 8;
+
+        // Start a new 4-thread game, complete one move, and cache its worker pool.
+        assert!(controller.new_game(BLACK, RuleSet::Renju, GameMode::VsEngine));
+        assert!(controller.play_human(7, 7));
+        let mut fresh_task = controller.prepare_engine_search().unwrap();
+        fresh_task.limits.max_depth = 5;
+        fresh_task.limits.root_width = 8;
+        let fresh_completion = fresh_task.run();
+        assert!(controller.commit_engine_search(fresh_completion));
+        assert!(controller.search_pool.lock().unwrap().is_some());
+
+        // Running and rejecting the old task later must leave the new game's pool intact.
+        let stale_completion = stale_task.run();
+        assert!(!controller.commit_engine_search(stale_completion));
+        assert!(
+            controller.search_pool.lock().unwrap().is_some(),
+            "stale task must not steal or drop the new game's cached worker pool"
         );
     }
 }

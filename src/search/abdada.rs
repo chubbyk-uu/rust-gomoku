@@ -1,6 +1,7 @@
 //! Lock-free ABDADA shared-TT coordination primitives for multi-threaded search.
 
 use std::collections::HashSet;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{
     atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering},
     Arc, Condvar, Mutex,
@@ -181,24 +182,61 @@ struct PoolShared {
 /// Persistent worker pool owned by `RootSearcher` when `threads > 1`.
 /// Eliminates per-move `thread::spawn` overhead while keeping single-threaded
 /// searches completely free of worker threads.
+///
+/// Worker spawning is best-effort: if the OS refuses to create some or all
+/// worker threads (e.g. under tight memory/ulimit constraints), the pool
+/// degrades gracefully to however many workers started (including 0, which
+/// falls back to single-threaded search) instead of panicking.
 pub(crate) struct SearchWorkerPool {
+    requested_workers: usize,
     num_workers: usize,
     shared: Arc<PoolShared>,
     handles: Vec<thread::JoinHandle<()>>,
-    abdada_table: Arc<AbdadaTable>,
+    abdada_table: Option<Arc<AbdadaTable>>,
     salt_counter: u64,
 }
 
 impl std::fmt::Debug for SearchWorkerPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SearchWorkerPool")
+            .field("requested_workers", &self.requested_workers)
             .field("num_workers", &self.num_workers)
             .finish()
     }
 }
 
+fn lock_pool_state(shared: &PoolShared) -> std::sync::MutexGuard<'_, PoolState> {
+    shared
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn wait_condvar<'a>(
+    condvar: &Condvar,
+    guard: std::sync::MutexGuard<'a, PoolState>,
+) -> std::sync::MutexGuard<'a, PoolState> {
+    condvar
+        .wait(guard)
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct ActiveWorkerGuard {
+    shared: Arc<PoolShared>,
+}
+
+impl Drop for ActiveWorkerGuard {
+    fn drop(&mut self) {
+        let mut state = lock_pool_state(&self.shared);
+        state.active_workers = state.active_workers.saturating_sub(1);
+        if state.active_workers == 0 {
+            self.shared.workers_done.notify_one();
+        }
+    }
+}
+
 impl SearchWorkerPool {
-    pub(crate) fn new(num_workers: usize) -> Self {
+    pub(crate) fn new(requested_workers: usize) -> Self {
         let shared = Arc::new(PoolShared {
             state: Mutex::new(PoolState {
                 generation: 0,
@@ -209,23 +247,52 @@ impl SearchWorkerPool {
             wake_workers: Condvar::new(),
             workers_done: Condvar::new(),
         });
-        let mut handles = Vec::with_capacity(num_workers);
-        for worker_idx in 0..num_workers {
+        const WORKER_STACK_BYTES: usize = 2 * 1024 * 1024;
+        let mut handles = Vec::with_capacity(requested_workers);
+        let mut spawn_failed = false;
+        for worker_idx in 0..requested_workers {
             let worker_id = worker_idx + 1;
             let shared_ref = Arc::clone(&shared);
-            let handle = thread::Builder::new()
+            match thread::Builder::new()
                 .name(format!("gomoku-abdada-{worker_id}"))
+                .stack_size(WORKER_STACK_BYTES)
                 .spawn(move || worker_loop(shared_ref))
-                .expect("spawn ABDADA worker thread");
-            handles.push(handle);
+            {
+                Ok(handle) => handles.push(handle),
+                Err(_) => {
+                    spawn_failed = true;
+                    break;
+                }
+            }
         }
+        if spawn_failed && !handles.is_empty() {
+            // Reclaim partially spawned worker stacks immediately so a tight
+            // virtual-memory limit (e.g. ulimit -v) still leaves headroom for
+            // single-threaded search.
+            {
+                let mut state = lock_pool_state(&shared);
+                state.shutdown = true;
+                shared.wake_workers.notify_all();
+            }
+            for handle in handles.drain(..) {
+                let _ = handle.join();
+            }
+            lock_pool_state(&shared).shutdown = false;
+        }
+        let num_workers = handles.len();
+        let abdada_table = (num_workers > 0).then(|| Arc::new(AbdadaTable::new()));
         Self {
+            requested_workers,
             num_workers,
             shared,
             handles,
-            abdada_table: Arc::new(AbdadaTable::new()),
+            abdada_table,
             salt_counter: 0x9E37_79B9_7F4A_7C15,
         }
+    }
+
+    pub(crate) fn requested_workers(&self) -> usize {
+        self.requested_workers
     }
 
     pub(crate) fn num_workers(&self) -> usize {
@@ -237,12 +304,15 @@ impl SearchWorkerPool {
         self.salt_counter
     }
 
-    pub(crate) fn table(&self) -> Arc<AbdadaTable> {
-        Arc::clone(&self.abdada_table)
+    pub(crate) fn table(&self) -> Option<Arc<AbdadaTable>> {
+        self.abdada_table.as_ref().map(Arc::clone)
     }
 
     pub(crate) fn start_depth(&self, job: Arc<DepthJob>) {
-        let mut state = self.shared.state.lock().expect("pool state lock");
+        if self.num_workers == 0 {
+            return;
+        }
+        let mut state = lock_pool_state(&self.shared);
         state.job = Some(job);
         state.active_workers = self.num_workers;
         state.generation = state.generation.wrapping_add(1);
@@ -250,13 +320,12 @@ impl SearchWorkerPool {
     }
 
     pub(crate) fn wait_depth_done(&self) {
-        let mut state = self.shared.state.lock().expect("pool state lock");
+        if self.num_workers == 0 {
+            return;
+        }
+        let mut state = lock_pool_state(&self.shared);
         while state.active_workers > 0 {
-            state = self
-                .shared
-                .workers_done
-                .wait(state)
-                .expect("pool wait lock");
+            state = wait_condvar(&self.shared.workers_done, state);
         }
         state.job = None;
     }
@@ -265,7 +334,7 @@ impl SearchWorkerPool {
 impl Drop for SearchWorkerPool {
     fn drop(&mut self) {
         {
-            let mut state = self.shared.state.lock().expect("pool drop lock");
+            let mut state = lock_pool_state(&self.shared);
             state.shutdown = true;
             state.job = None;
             self.shared.wake_workers.notify_all();
@@ -276,16 +345,64 @@ impl Drop for SearchWorkerPool {
     }
 }
 
+fn run_depth_job(job: &DepthJob) {
+    let mut board = job.board.clone();
+    let mut caches = job.caches.clone();
+    let mut searcher = AlphaBetaSearcher::with_tt(job.config.clone(), job.tt.clone());
+    searcher.set_tt_generation(job.tt_generation);
+    let mut stats = SearchStats {
+        deadline: job.deadline,
+        cancel: job.cancel.clone(),
+        ..SearchStats::default()
+    };
+    let abdada_ctx = AbdadaContext {
+        table: Arc::clone(&job.abdada_table),
+        salt: job.abdada_salt,
+        root_best: Arc::clone(&job.root_best),
+        depth_done: Arc::clone(&job.depth_done),
+    };
+    let (score, move_) = searcher.search_with_abdada(
+        &mut board,
+        &mut caches,
+        job.side,
+        f64::from(job.depth),
+        -INF,
+        INF,
+        job.wide,
+        &mut stats,
+        SearchOptions {
+            opo: 1,
+            root: true,
+            root_allowed_moves: job.root_allowed_moves.as_ref(),
+            root_preferred_move: job.root_preferred_move,
+            ..SearchOptions::default()
+        },
+        Some(&abdada_ctx),
+    );
+    job.helper_nodes.fetch_add(stats.nodes, Ordering::Relaxed);
+    job.helper_tt_curr
+        .fetch_add(stats.tt_bestmove_current_generation, Ordering::Relaxed);
+    job.helper_tt_old
+        .fetch_add(stats.tt_bestmove_old_generation, Ordering::Relaxed);
+    if !stats.stop {
+        let mut guard = job
+            .completed_result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard.is_none() {
+            *guard = Some((score, move_));
+        }
+        job.depth_done.store(true, Ordering::Relaxed);
+    }
+}
+
 fn worker_loop(shared: Arc<PoolShared>) {
     let mut seen_generation = 0_u64;
     loop {
         let job = {
-            let mut state = shared.state.lock().expect("worker state lock");
+            let mut state = lock_pool_state(&shared);
             while !state.shutdown && state.generation == seen_generation {
-                state = shared
-                    .wake_workers
-                    .wait(state)
-                    .expect("worker condvar wait");
+                state = wait_condvar(&shared.wake_workers, state);
             }
             if state.shutdown {
                 return;
@@ -294,58 +411,61 @@ fn worker_loop(shared: Arc<PoolShared>) {
             state.job.clone()
         };
 
+        // Guard guarantees `active_workers` is decremented and `workers_done` is
+        // notified even if a job unwinds, while `catch_unwind` keeps the worker
+        // alive for subsequent depths so `num_workers` stays accurate.
+        let _active_guard = ActiveWorkerGuard {
+            shared: Arc::clone(&shared),
+        };
         if let Some(job) = job {
-            let mut board = job.board.clone();
-            let mut caches = job.caches.clone();
-            let mut searcher = AlphaBetaSearcher::with_tt(job.config.clone(), job.tt.clone());
-            searcher.set_tt_generation(job.tt_generation);
-            let mut stats = SearchStats {
-                deadline: job.deadline,
-                cancel: job.cancel.clone(),
-                ..SearchStats::default()
-            };
-            let abdada_ctx = AbdadaContext {
-                table: Arc::clone(&job.abdada_table),
-                salt: job.abdada_salt,
-                root_best: Arc::clone(&job.root_best),
-                depth_done: Arc::clone(&job.depth_done),
-            };
-            let (score, move_) = searcher.search_with_abdada(
-                &mut board,
-                &mut caches,
-                job.side,
-                f64::from(job.depth),
-                -INF,
-                INF,
-                job.wide,
-                &mut stats,
-                SearchOptions {
-                    opo: 1,
-                    root: true,
-                    root_allowed_moves: job.root_allowed_moves.as_ref(),
-                    root_preferred_move: job.root_preferred_move,
-                    ..SearchOptions::default()
-                },
-                Some(&abdada_ctx),
-            );
-            job.helper_nodes.fetch_add(stats.nodes, Ordering::Relaxed);
-            job.helper_tt_curr
-                .fetch_add(stats.tt_bestmove_current_generation, Ordering::Relaxed);
-            job.helper_tt_old
-                .fetch_add(stats.tt_bestmove_old_generation, Ordering::Relaxed);
-            if !stats.stop {
-                let mut guard = job.completed_result.lock().expect("completed result lock");
-                if guard.is_none() {
-                    *guard = Some((score, move_));
-                }
-                job.depth_done.store(true, Ordering::Relaxed);
-            }
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                run_depth_job(&job);
+            }));
         }
+    }
+}
 
-        let mut state = shared.state.lock().expect("worker done lock");
-        state.active_workers = state.active_workers.saturating_sub(1);
-        if state.active_workers == 0 {
-            shared.workers_done.notify_one();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_worker_pool_degrades_without_allocating_table_or_hanging() {
+        let pool = SearchWorkerPool::new(0);
+        assert_eq!(pool.requested_workers(), 0);
+        assert_eq!(pool.num_workers(), 0);
+        assert!(pool.table().is_none());
+        pool.wait_depth_done();
+    }
+
+    #[test]
+    fn active_worker_guard_releases_waiter_even_on_panic() {
+        let shared = Arc::new(PoolShared {
+            state: Mutex::new(PoolState {
+                generation: 1,
+                shutdown: false,
+                active_workers: 1,
+                job: None,
+            }),
+            wake_workers: Condvar::new(),
+            workers_done: Condvar::new(),
+        });
+        let worker_shared = Arc::clone(&shared);
+        let worker = thread::spawn(move || {
+            let _guard = ActiveWorkerGuard {
+                shared: worker_shared,
+            };
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                panic!("simulated helper search panic");
+            }));
+        });
+
+        let mut state = lock_pool_state(&shared);
+        while state.active_workers > 0 {
+            state = wait_condvar(&shared.workers_done, state);
         }
+        assert_eq!(state.active_workers, 0);
+        drop(state);
+        worker.join().unwrap();
     }
 }

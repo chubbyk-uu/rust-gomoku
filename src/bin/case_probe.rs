@@ -470,7 +470,7 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
             TranspositionTable::try_new(bits).map_err(|err| format!("invalid TT: {err:?}"))?,
         )
     } else {
-        RootSearcher::new(config)
+        RootSearcher::new_for_limits(config, limits)
     };
     let start = Instant::now();
     let result = searcher

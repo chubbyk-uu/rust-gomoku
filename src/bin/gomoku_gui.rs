@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use rust_gomoku::{
     default_interactive_threads, load_default_config, GameController, GameMode, RuleSet,
-    SearchDifficulty, Side, BLACK, WHITE,
+    SearchDifficulty, Side, BLACK, MAX_SEARCH_THREADS, WHITE,
 };
 
 const DEFAULT_ADDR: &str = "127.0.0.1:18080";
@@ -26,8 +26,18 @@ fn main() {
     let args = parse_args();
     let mut config = load_default_config();
     SearchDifficulty::default().apply_to_config(&mut config);
-    config.runtime.overlap_vct_alphabeta = true;
-    config.runtime.threads = default_interactive_threads();
+    let default_multi_threads = args
+        .threads
+        .filter(|&threads| threads > 1)
+        .map(|threads| threads.clamp(1, MAX_SEARCH_THREADS))
+        .unwrap_or_else(default_interactive_threads);
+    config.runtime.threads = args
+        .threads
+        .map(|threads| threads.clamp(1, MAX_SEARCH_THREADS))
+        .unwrap_or(default_multi_threads);
+    // VCT/AB overlap forks a full TT snapshot and competes with ABDADA workers;
+    // keep it enabled only for single-threaded desktop play.
+    config.runtime.overlap_vct_alphabeta = config.runtime.threads == 1;
     if let Some(depth) = args.depth {
         config.root_search.depth = depth;
     }
@@ -54,7 +64,9 @@ fn main() {
         };
         let state = Arc::clone(&state);
         let browser_activity = Arc::clone(&browser_activity);
-        thread::spawn(move || handle_client(stream, state, browser_activity));
+        thread::spawn(move || {
+            handle_client(stream, state, browser_activity, default_multi_threads)
+        });
     }
 }
 
@@ -112,6 +124,7 @@ struct GuiArgs {
     addr: String,
     depth: Option<i32>,
     width: Option<i32>,
+    threads: Option<usize>,
     open_browser: bool,
 }
 
@@ -120,6 +133,7 @@ fn parse_args() -> GuiArgs {
         addr: DEFAULT_ADDR.to_string(),
         depth: None,
         width: None,
+        threads: None,
         open_browser: true,
     };
     let mut args = std::env::args().skip(1);
@@ -138,6 +152,11 @@ fn parse_args() -> GuiArgs {
             "--width" => {
                 if let Some(value) = args.next().and_then(|value| value.parse::<i32>().ok()) {
                     result.width = Some(value.max(1));
+                }
+            }
+            "--threads" => {
+                if let Some(value) = args.next().and_then(|value| value.parse::<usize>().ok()) {
+                    result.threads = Some(value.clamp(1, MAX_SEARCH_THREADS));
                 }
             }
             "--no-open-browser" => {
@@ -280,6 +299,7 @@ fn handle_client(
     mut stream: TcpStream,
     state: Arc<Mutex<GameController>>,
     browser_activity: Arc<Mutex<BrowserActivity>>,
+    default_multi_threads: usize,
 ) {
     let mut buffer = [0_u8; 8192];
     let Ok(read) = stream.read(&mut buffer) else {
@@ -359,6 +379,26 @@ fn handle_client(
                     game.set_error(
                         "未知难度，请选择 beginner、junior、intermediate、senior 或 master。",
                     );
+                }
+            }
+            json_response(&state.lock().expect("state lock").snapshot())
+        }
+        ("POST", "/threads") => {
+            let enabled = match query_param(query, "enabled") {
+                Some("1" | "true") => Some(true),
+                Some("0" | "false") => Some(false),
+                _ => None,
+            };
+            {
+                let mut game = state.lock().expect("state lock");
+                if let Some(enabled) = enabled {
+                    let target_threads = if enabled { default_multi_threads } else { 1 };
+                    game.set_threads(target_threads);
+                    if !game.snapshot().engine_thinking {
+                        game.set_overlap_vct_alphabeta(target_threads == 1);
+                    }
+                } else {
+                    game.set_error("无效的线程开关参数。");
                 }
             }
             json_response(&state.lock().expect("state lock").snapshot())
@@ -684,6 +724,26 @@ const INDEX_HTML: &str = r#"<!doctype html>
       color: #1f1a14;
       word-break: break-word;
     }
+    .check-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 16px;
+      font-weight: 700;
+      color: #2b2114;
+      cursor: pointer;
+      user-select: none;
+    }
+    .check-toggle input[type="checkbox"] {
+      width: 20px;
+      height: 20px;
+      accent-color: #22543d;
+      cursor: pointer;
+    }
+    .check-toggle input[type="checkbox"]:disabled {
+      cursor: not-allowed;
+      opacity: .55;
+    }
     .hint {
       color: #6b5235;
       font-size: 14px;
@@ -758,6 +818,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <option value="senior">高级 · d6 / w30 · VCF/VCT</option>
               <option value="master">大师 · d8 / w40 · VCF/VCT</option>
             </select>
+          </label>
+          <label class="setting-row" id="row-multithread" for="multithread-toggle">
+            <span class="setting-label">多线程</span>
+            <span class="check-toggle">
+              <input id="multithread-toggle" type="checkbox" checked onchange="setMultithread(this.checked)">
+              <span id="multithread-label">开启</span>
+            </span>
           </label>
           <div class="setting-row">
             <span class="setting-label">落子音效</span>
@@ -881,6 +948,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function newGame(side) { api('/new?side=' + side + '&rule=' + selectedRule + '&mode=' + selectedMode).catch(showError); }
     function startTwoPlayer() { newGame('black'); }
     function setDifficulty(difficulty) { api('/difficulty?value=' + difficulty).catch(showError); }
+    function setMultithread(enabled) { api('/threads?enabled=' + (enabled ? '1' : '0')).catch(showError); }
     function selectRule(rule) {
       selectedRule = rule;
       renderRuleButtons();
@@ -901,6 +969,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       document.getElementById('start-two-player').hidden = !twoPlayer;
       // Engine-only settings are meaningless in two-player mode.
       document.getElementById('row-difficulty').hidden = twoPlayer;
+      document.getElementById('row-multithread').hidden = twoPlayer;
     }
     function restartSameSide() {
       if (state && state.params && state.params.mode === 'two_player') {
@@ -1088,6 +1157,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const difficultySelect = document.getElementById('difficulty-select');
       if (p.difficulty !== 'custom') difficultySelect.value = p.difficulty;
       difficultySelect.disabled = !!state.engine_thinking;
+      const mtToggle = document.getElementById('multithread-toggle');
+      const mtLabel = document.getElementById('multithread-label');
+      mtToggle.checked = p.threads > 1;
+      mtToggle.disabled = !!state.engine_thinking;
+      mtLabel.textContent = p.threads > 1 ? `开启（${p.threads} 线程）` : '关闭（单线程）';
       // Undo is rejected server-side while the engine thinks; disable it to match.
       document.getElementById('undo-btn').disabled = !!state.engine_thinking;
       renderRuleButtons();
@@ -1117,7 +1191,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           master: '大师',
           custom: '自定义',
         }[p.difficulty] || p.difficulty],
-        ['搜索参数', `d${p.depth} / w${p.width}`],
+        ['搜索参数', `d${p.depth} / w${p.width} / ${p.threads}T`],
         ['VCF/VCT', `${p.compute_vcf ? 'VCF' + p.root_vcf_depth : 'VCF off'} / ${p.compute_vct ? 'VCT' + p.root_vct_depth : 'VCT off'}`],
         ['Overlap VCT/AB', yesNo(p.overlap_vct_alphabeta)],
         ['窗口', p.static_board ? 'static board' : `dynamic margin ${p.dynamic_board_margin}`],

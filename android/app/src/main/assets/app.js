@@ -318,6 +318,15 @@ function render(state) {
   if (state.params.difficulty !== "custom") {
     setDifficultyValue(state.params.difficulty);
   }
+  const mtRow = document.getElementById("row-multithread");
+  const mtInput = document.getElementById("opt-multithread");
+  const mtLabel = document.getElementById("multithread-label");
+  if (mtRow && mtInput && mtLabel) {
+    mtRow.hidden = twoPlayer;
+    const threads = state.params.threads || 1;
+    mtInput.checked = threads > 1;
+    mtLabel.textContent = threads > 1 ? `多线程搜索（${threads} 线程）` : "多线程搜索（单线程）";
+  }
   // controls
   UiLogic.syncBusyControls(document, busy, state);
   // advanced panel
@@ -332,6 +341,7 @@ function fillAdvanced(res, params) {
     if (el) el.textContent = val;
   };
   set("difficulty", difficultyNames[params.difficulty] || params.difficulty || "—");
+  set("threads", params.threads != null ? params.threads + " 线程" : "—");
   if (!res) { set("score", "—"); set("depth", "—"); set("nodes", "—"); set("ms", "—"); return; }
   set("score", res.score);
   set("depth", res.depth);
@@ -585,6 +595,22 @@ function bindEvents() {
     soundBtn.textContent = soundOn ? "开" : "关";
     if (soundOn) unlockAudio();
   });
+
+  const mtInput = document.getElementById("opt-multithread");
+  if (mtInput) {
+    mtInput.addEventListener("change", () => {
+      const enabled = mtInput.checked;
+      guarded(async () => {
+        const res = await nativeRequest({ op: "set_multithread", enabled });
+        if (!res.ok) {
+          toast((res.error && res.error.message) || "切换线程失败");
+          if (lastState) render(lastState);
+          return;
+        }
+        render(res.state);
+      });
+    });
+  }
 
   // Resume the AudioContext on the first user gesture so engine-first moves can
   // also play (Web Audio starts suspended until a gesture).

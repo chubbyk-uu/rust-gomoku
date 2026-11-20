@@ -49,7 +49,7 @@ Optional diagnostics / experiments:
 - `root_profile`: per-root-candidate timing diagnostics.
 - TT generation observation: Gomocup trace can report the new/old ratio of cross-move TT best-move hints. It does not affect TT cutoff, replacement, or ordering policy.
 
-To shorten the perceived wait during manual GUI play, the GUI entry enables `overlap_vct_alphabeta` by default; Gomocup, diff, case probe, and the library still keep it off.
+To shorten the perceived wait during single-threaded manual GUI play, the GUI entry enables `overlap_vct_alphabeta` when `threads == 1` (off when multi-threaded to avoid a second 64 MiB TT snapshot and core contention); Gomocup, diff, case probe, and the library keep it off by default.
 Historical performance experiments and stop-loss conclusions are recorded in `docs/perf-log.md`; the README does not maintain a list of failed approaches.
 The Android architecture, mobile interface, JNI boundary, phased validation
 gates, and current implementation status are documented in
@@ -73,10 +73,10 @@ The main defaults live in `src/config.rs`.
 | `vcf_multi_reply` | `true` |
 | `root_vct_depth` | `6` |
 | `vct_strict_and_memo_key` | `true` |
-| TT bucket bits | `20` (32 MiB) for 1–3 threads; `21` (64 MiB) for 4+ threads |
-| `threads` | `1` (lib/Gomocup); `4` on 4+ cores or `min(2, cores)` on `< 4` cores (GUI & Android) |
+| TT bucket bits | `20` (32 MiB) for 1–3 threads or depth `< 5`; `21` (64 MiB) for 4+ threads at depth `>= 5` |
+| `threads` | `1` (lib/Gomocup); `4` on 4+ cores or `min(2, cores)` on `< 4` cores (GUI & Android; override with `--threads N` / `set_threads`) |
 | `compute_vcf` / `compute_vct` | enabled |
-| `overlap_vct_alphabeta` | off; GUI entry turns it on |
+| `overlap_vct_alphabeta` | off; GUI enables it only when `threads == 1` |
 | `nonroot_vcf` | off |
 | `static_board` | on |
 | `dynamic_board_margin` | `4` |

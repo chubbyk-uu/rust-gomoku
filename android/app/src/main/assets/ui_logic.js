@@ -50,6 +50,10 @@
     }
     document_.getElementById("opt-difficulty").disabled =
       busy || engineThinking;
+    const multithread = document_.getElementById("opt-multithread");
+    if (multithread) {
+      multithread.disabled = busy || engineThinking;
+    }
   }
 
   function setSheetOpen(document_, name, open) {

@@ -341,7 +341,14 @@ details.advanced > summary {
   justify-content: space-between;
   min-height: 48px;
 }
+.toggle-row[hidden] { display: none; }
 .toggle-row span { font-size: 15px; }
+.toggle-row input[type="checkbox"] {
+  width: 22px;
+  height: 22px;
+  accent-color: var(--accent);
+}
+.toggle-row input[type="checkbox"]:disabled { opacity: 0.45; }
 
 /* ---- Toast ------------------------------------------------------------- */
 #toast {

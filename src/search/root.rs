@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Instant;
 
 use crate::board::{move_to_xy, xy_to_move, Board};
-use crate::config::{default_tt_bits_for_threads, EngineConfig};
+use crate::config::{default_tt_bits_for_search, EngineConfig};
 use crate::constants::{INF, WIN};
 use crate::eval::{recompute_all_for_rule, EvalCaches};
 use crate::rules::RuleSet;
@@ -393,18 +393,22 @@ impl RootSearcher {
     }
 
     pub fn new(config: EngineConfig) -> Self {
-        let tt = TranspositionTable::new(default_tt_bits_for_threads(config.runtime.threads));
-        let alphabeta = AlphaBetaSearcher::with_tt(config.clone(), tt.clone());
-        Self {
-            config,
-            tt,
-            alphabeta,
-            vcf: VCFSearcher::default(),
-            vct: VCTSearcher::default(),
-            fallback_rng: new_classic_fallback_rng(),
-            last_trace: None,
-            worker_pool: None,
-        }
+        let depth = config.root_search.depth;
+        let tt = TranspositionTable::new(default_tt_bits_for_search(config.runtime.threads, depth));
+        Self::with_tt(config, tt)
+    }
+
+    pub fn new_for_limits(config: EngineConfig, limits: SearchLimits) -> Self {
+        let effective_threads = if limits.node_limit.is_some() {
+            1
+        } else {
+            config.runtime.threads
+        };
+        let tt = TranspositionTable::new(default_tt_bits_for_search(
+            effective_threads,
+            limits.max_depth,
+        ));
+        Self::with_tt(config, tt)
     }
 
     pub fn with_tt(config: EngineConfig, tt: TranspositionTable) -> Self {
@@ -421,12 +425,20 @@ impl RootSearcher {
         }
     }
 
+    pub(crate) fn take_worker_pool(&mut self) -> Option<SearchWorkerPool> {
+        self.worker_pool.take()
+    }
+
+    pub(crate) fn set_worker_pool(&mut self, pool: Option<SearchWorkerPool>) {
+        self.worker_pool = pool;
+    }
+
     fn ensure_worker_pool(&mut self, threads: usize) -> &mut SearchWorkerPool {
-        let desired_workers = threads.saturating_sub(1).max(1);
+        let desired_workers = threads.saturating_sub(1);
         let needs_rebuild = self
             .worker_pool
             .as_ref()
-            .is_none_or(|pool| pool.num_workers() != desired_workers);
+            .is_none_or(|pool| pool.requested_workers() != desired_workers);
         if needs_rebuild {
             self.worker_pool = Some(SearchWorkerPool::new(desired_workers));
         }
@@ -684,16 +696,24 @@ impl RootSearcher {
             } else {
                 None
             };
-            let (mut score, mut move_, mut stats) = if use_parallel_depth {
+            let parallel_setup = if use_parallel_depth {
                 let threads = self.config.runtime.threads;
+                let pool = self.ensure_worker_pool(threads);
+                if pool.num_workers() > 0 {
+                    pool.table().map(|table| (table, pool.next_salt()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let (mut score, mut move_, mut stats) = if let Some((abdada_table, abdada_salt)) =
+                parallel_setup
+            {
                 let config_clone = self.config.clone();
                 let tt_clone = self.tt.clone();
                 let tt_gen = self.alphabeta.tt_generation();
                 let deadline = self.vcf.budget.deadline();
-                let (abdada_table, abdada_salt) = {
-                    let pool = self.ensure_worker_pool(threads);
-                    (pool.table(), pool.next_salt())
-                };
                 let depth_done = Arc::new(AtomicBool::new(false));
                 let root_best = Arc::new(SharedRootBest::new());
                 let job = Arc::new(DepthJob {
@@ -756,7 +776,9 @@ impl RootSearcher {
                     .as_ref()
                     .expect("worker pool initialized")
                     .wait_depth_done();
-                stats.nodes += job.helper_nodes.load(Ordering::Relaxed);
+                let helper_nodes = job.helper_nodes.load(Ordering::Relaxed);
+                self.vcf.budget.add_nodes(helper_nodes);
+                stats.nodes += helper_nodes;
                 stats.tt_bestmove_current_generation += job.helper_tt_curr.load(Ordering::Relaxed);
                 stats.tt_bestmove_old_generation += job.helper_tt_old.load(Ordering::Relaxed);
                 if stats.stop {
@@ -765,8 +787,10 @@ impl RootSearcher {
                             .as_ref()
                             .is_some_and(|cancel| cancel.load(Ordering::Relaxed));
                     if !externally_stopped {
-                        if let Some((w_score, w_move)) =
-                            *job.completed_result.lock().expect("completed result lock")
+                        if let Some((w_score, w_move)) = *job
+                            .completed_result
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
                         {
                             main_score = w_score;
                             main_move = w_move;

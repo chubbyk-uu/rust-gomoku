@@ -10,7 +10,7 @@ use jni::sys::{jlong, jstring};
 use jni::JNIEnv;
 use rust_gomoku::{
     default_interactive_threads, load_default_config, GameController, GameMode, RuleSet,
-    SearchDifficulty, BLACK, BOARD_SIZE, WHITE,
+    SearchDifficulty, BLACK, BOARD_SIZE, MAX_SEARCH_THREADS, WHITE,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -43,6 +43,12 @@ enum BridgeRequest {
     Undo,
     SetDifficulty {
         difficulty: String,
+    },
+    SetThreads {
+        threads: usize,
+    },
+    SetMultithread {
+        enabled: bool,
     },
     EngineMove,
 }
@@ -143,6 +149,8 @@ fn parse_request(request_json: &str) -> Result<BridgeRequest, BridgeError> {
         "new_game" => &["op", "human_side", "rule", "mode"],
         "play" => &["op", "x", "y"],
         "set_difficulty" => &["op", "difficulty"],
+        "set_threads" => &["op", "threads"],
+        "set_multithread" => &["op", "enabled"],
         _ => {
             return Err(BridgeError::invalid_request(format!(
                 "Unknown operation \"{operation}\"."
@@ -206,6 +214,30 @@ fn dispatch_request(
                 .lock()
                 .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
                 .set_difficulty(difficulty);
+            snapshot_response(&controller)
+        }
+        BridgeRequest::SetThreads { threads } => {
+            if threads == 0 || threads > MAX_SEARCH_THREADS {
+                return Err(BridgeError::invalid_request(format!(
+                    "threads must be between 1 and {MAX_SEARCH_THREADS}."
+                )));
+            }
+            controller
+                .lock()
+                .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
+                .set_threads(threads);
+            snapshot_response(&controller)
+        }
+        BridgeRequest::SetMultithread { enabled } => {
+            let threads = if enabled {
+                default_interactive_threads()
+            } else {
+                1
+            };
+            controller
+                .lock()
+                .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
+                .set_threads(threads);
             snapshot_response(&controller)
         }
         BridgeRequest::EngineMove => {
@@ -390,6 +422,29 @@ mod tests {
         assert_eq!(difficulty["state"]["params"]["compute_vcf"], true);
         assert_eq!(difficulty["state"]["params"]["compute_vct"], true);
         assert_eq!(difficulty["state"]["params"]["root_vct_depth"], 6);
+
+        let threads = response(&registry, handle, r#"{"op":"set_threads","threads":1}"#);
+        assert_eq!(threads["ok"], true);
+        assert_eq!(threads["state"]["params"]["threads"], 1);
+
+        let mt_on = response(
+            &registry,
+            handle,
+            r#"{"op":"set_multithread","enabled":true}"#,
+        );
+        assert_eq!(mt_on["ok"], true);
+        assert_eq!(
+            mt_on["state"]["params"]["threads"],
+            default_interactive_threads()
+        );
+
+        let mt_off = response(
+            &registry,
+            handle,
+            r#"{"op":"set_multithread","enabled":false}"#,
+        );
+        assert_eq!(mt_off["ok"], true);
+        assert_eq!(mt_off["state"]["params"]["threads"], 1);
     }
 
     #[test]
@@ -448,6 +503,8 @@ mod tests {
                 r#"{"op":"set_difficulty","difficulty":"impossible"}"#,
                 "invalid_request",
             ),
+            (r#"{"op":"set_threads","threads":0}"#, "invalid_request"),
+            (r#"{"op":"set_threads","threads":999}"#, "invalid_request"),
         ] {
             let value = response(&registry, handle, request);
             assert_eq!(value["ok"], false, "{request}");

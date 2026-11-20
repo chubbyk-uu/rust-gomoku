@@ -1,7 +1,9 @@
 //! Gomocup protocol adapter aligned with the reference implementation.
 
 use crate::board::{move_to_xy, xy_to_move, Board};
-use crate::config::{load_default_config, EngineConfig, MAX_SEARCH_THREADS};
+use crate::config::{
+    default_tt_bits_for_search, load_default_config, EngineConfig, MAX_SEARCH_THREADS,
+};
 use crate::constants::{BOARD_AREA, BOARD_SIZE};
 use crate::rules::RuleSet;
 use crate::search::{RootSearcher, SearchLimits, TranspositionTable, MAX_TT_BUCKET_BITS};
@@ -463,7 +465,18 @@ impl GomocupProtocol {
             return vec!["ERROR Board is terminal.".to_string()];
         }
         let limits = self.current_search_limits();
-        let mut searcher = match self.searcher.take() {
+        let expected_auto_buckets = self.tt_bits.is_none().then(|| {
+            let effective_threads = if limits.node_limit.is_some() {
+                1
+            } else {
+                self.config.runtime.threads
+            };
+            1_usize << default_tt_bits_for_search(effective_threads, limits.max_depth)
+        });
+        let cached_searcher = self.searcher.take().filter(|searcher| {
+            expected_auto_buckets.is_none_or(|buckets| searcher.tt.bucket_count() == buckets)
+        });
+        let mut searcher = match cached_searcher {
             Some(searcher) => searcher,
             None => match self.tt_bits {
                 Some(bits) => match TranspositionTable::try_new(bits) {
@@ -472,7 +485,7 @@ impl GomocupProtocol {
                         return vec!["ERROR Unable to allocate transposition table.".to_string()]
                     }
                 },
-                None => RootSearcher::new(self.config.clone()),
+                None => RootSearcher::new_for_limits(self.config.clone(), limits),
             },
         };
         searcher.config = self.config.clone();
@@ -580,4 +593,115 @@ fn is_oversized_time(raw: &str) -> bool {
 
 fn in_bounds_i32(x: i32, y: i32) -> bool {
     x >= 0 && y >= 0 && (x as usize) < BOARD_SIZE && (y as usize) < BOARD_SIZE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gomocup_auto_tt_tier_uses_effective_search_depth() {
+        let mut config = load_default_config();
+        config.runtime.threads = 4;
+
+        let mut shallow = GomocupProtocol::new(
+            Some(config.clone()),
+            Some(SearchLimits {
+                max_depth: 4,
+                root_width: 15,
+                ..SearchLimits::default()
+            }),
+        );
+        assert_eq!(shallow.handle_line("START 15"), vec!["OK"]);
+        let _ = shallow.handle_line("TURN 7,7");
+        assert_eq!(
+            shallow.searcher.as_ref().unwrap().tt.bucket_count(),
+            1 << 20,
+            "4T --depth 4 should auto-select 32 MiB TT (tt_bits = 20)"
+        );
+
+        let mut deep = GomocupProtocol::new(
+            Some(config),
+            Some(SearchLimits {
+                max_depth: 5,
+                root_width: 10,
+                ..SearchLimits::default()
+            }),
+        );
+        assert_eq!(deep.handle_line("START 15"), vec!["OK"]);
+        let _ = deep.handle_line("TURN 7,7");
+        assert_eq!(
+            deep.searcher.as_ref().unwrap().tt.bucket_count(),
+            1 << 21,
+            "4T --depth 5 should auto-select 64 MiB TT (tt_bits = 21)"
+        );
+    }
+
+    #[test]
+    fn gomocup_rebuilds_auto_tt_only_when_max_node_changes_tier() {
+        let mut config = load_default_config();
+        config.runtime.threads = 4;
+
+        let mut protocol = GomocupProtocol::new(
+            Some(config.clone()),
+            Some(SearchLimits {
+                max_depth: 5,
+                root_width: 8,
+                ..SearchLimits::default()
+            }),
+        );
+        assert_eq!(protocol.handle_line("START 15"), vec!["OK"]);
+        let _ = protocol.handle_line("TURN 7,7");
+        let tt_initial = protocol.searcher.as_ref().unwrap().tt.clone();
+        assert_eq!(tt_initial.bucket_count(), 1 << 21);
+
+        // Enabling max_node switches effective search to single-threaded -> rebuilds to 32 MiB TT.
+        protocol.handle_line("INFO max_node 200");
+        let _ = protocol.handle_line("TURN 0,0");
+        let tt_limited = protocol.searcher.as_ref().unwrap().tt.clone();
+        assert_eq!(tt_limited.bucket_count(), 1 << 20);
+        assert!(!tt_limited.is_shared_with(&tt_initial));
+
+        // Keeping max_node enabled reuses the 32 MiB searcher without rebuilding.
+        protocol.handle_line("INFO max_node 300");
+        let _ = protocol.handle_line("TURN 0,1");
+        assert!(protocol
+            .searcher
+            .as_ref()
+            .unwrap()
+            .tt
+            .is_shared_with(&tt_limited));
+
+        // Clearing max_node restores 4T -> rebuilds back to 64 MiB TT.
+        protocol.handle_line("INFO max_node 0");
+        let _ = protocol.handle_line("TURN 0,2");
+        assert_eq!(
+            protocol.searcher.as_ref().unwrap().tt.bucket_count(),
+            1 << 21
+        );
+
+        // Explicit tt_bits stays under user control and is never rebuilt by max_node changes.
+        let mut explicit = GomocupProtocol::new(
+            Some(config),
+            Some(SearchLimits {
+                max_depth: 5,
+                root_width: 8,
+                ..SearchLimits::default()
+            }),
+        );
+        explicit.tt_bits = Some(19);
+        assert_eq!(explicit.handle_line("START 15"), vec!["OK"]);
+        let _ = explicit.handle_line("TURN 7,7");
+        let tt_explicit = explicit.searcher.as_ref().unwrap().tt.clone();
+        assert_eq!(tt_explicit.bucket_count(), 1 << 19);
+
+        explicit.handle_line("INFO max_node 200");
+        let _ = explicit.handle_line("TURN 0,0");
+        assert!(explicit
+            .searcher
+            .as_ref()
+            .unwrap()
+            .tt
+            .is_shared_with(&tt_explicit));
+    }
 }

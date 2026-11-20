@@ -46,7 +46,7 @@ Windows 程序启动后打开本地网页界面。可与引擎对弈或进行双
 - `root_profile`：root candidate 计时诊断。
 - TT generation 观测：Gomocup trace 可输出跨手 TT best-move hint 新旧比例，不影响 TT cutoff、replacement 或排序策略。
 
-GUI 入口为了降低手动对局体感等待，默认单独开启 `overlap_vct_alphabeta`；Gomocup、diff、case probe 和库默认仍保持关闭。
+GUI 入口仅在单线程（`--threads 1`）手动对局时默认开启 `overlap_vct_alphabeta`；多线程模式下保持关闭以避免额外 64 MiB TT 快照与核心争抢。Gomocup、diff、case probe 和库默认均保持关闭。
 历史性能实验和止损结论记录在 `docs/perf-log.md`，README 不重复维护失败方案清单。
 Android 架构、手机界面、JNI 边界和分阶段验证门槛记录在
 `docs/android-app-design.md`。Android 应用已可构建 ARM64 APK，并通过
@@ -68,10 +68,10 @@ JNI 使用共享 Rust 控制器。
 | `vcf_multi_reply` | `true` |
 | `root_vct_depth` | `6` |
 | `vct_strict_and_memo_key` | `true` |
-| TT bucket bits | 1–3 线程为 `20`（32 MiB）；4+ 线程自动为 `21`（64 MiB） |
-| `threads` | 库/Gomocup 默认 `1`；桌面 GUI 与 Android 在 `>= 4` 核默认 `4`，`< 4` 核默认 `min(2, cores)` |
+| TT bucket bits | 1–3 线程或深度 `< 5` 为 `20`（32 MiB）；4+ 线程且深度 `>= 5` 自动为 `21`（64 MiB） |
+| `threads` | 库/Gomocup 默认 `1`；桌面 GUI 与 Android 在 `>= 4` 核默认 `4`，`< 4` 核默认 `min(2, cores)`（支持 `--threads N` / `set_threads` 回退单线程） |
 | `compute_vcf` / `compute_vct` | 开启 |
-| `overlap_vct_alphabeta` | 关闭，GUI 入口单独开启 |
+| `overlap_vct_alphabeta` | 关闭；GUI 仅在 `threads == 1` 时开启 |
 | `nonroot_vcf` | 关闭 |
 | `static_board` | 开启 |
 | `dynamic_board_margin` | `4` |

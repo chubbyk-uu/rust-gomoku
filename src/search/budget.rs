@@ -80,6 +80,12 @@ impl MoveBudget {
         self.0.as_ref().map(|b| b.nodes.load(Ordering::Relaxed))
     }
 
+    pub fn add_nodes(&self, extra: usize) {
+        if let Some(b) = &self.0 {
+            b.nodes.fetch_add(extra, Ordering::Relaxed);
+        }
+    }
+
     pub fn deadline(&self) -> Option<Instant> {
         self.0.as_ref().and_then(|b| b.deadline)
     }
