@@ -5,8 +5,9 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::{
-    move_to_xy, xy_to_move, Board, EngineConfig, ForbiddenKind, RootSearcher, RootTrace, RuleSet,
-    SearchLimits, SearchResult, Side, TranspositionTable, BLACK, BOARD_SIZE, EMPTY, WHITE,
+    default_tt_bits_for_threads, move_to_xy, xy_to_move, Board, EngineConfig, ForbiddenKind,
+    RootSearcher, RootTrace, RuleSet, SearchLimits, SearchResult, Side, TranspositionTable, BLACK,
+    BOARD_SIZE, EMPTY, WHITE,
 };
 
 /// Who controls the two sides of the board.
@@ -650,7 +651,8 @@ impl GameController {
 
 impl EngineSearchTask {
     pub fn run(mut self) -> EngineSearchCompletion {
-        let tt = self.tt.unwrap_or_else(TranspositionTable::default);
+        let tt_bits = default_tt_bits_for_threads(self.config.runtime.threads);
+        let tt = self.tt.unwrap_or_else(|| TranspositionTable::new(tt_bits));
         let mut searcher = RootSearcher::with_tt(self.config, tt);
         let start = Instant::now();
         let result = searcher

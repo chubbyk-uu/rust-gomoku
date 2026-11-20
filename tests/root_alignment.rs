@@ -903,3 +903,49 @@ fn interrupted_root_vct_cannot_claim_a_win() {
     searcher.search(&mut board, Some(limits));
     assert!(searcher.last_trace.as_ref().unwrap().vct_accepted);
 }
+
+#[test]
+fn abdada_multithread_search_preserves_legality_tt_tier_and_limits() {
+    let mut board = Board::new();
+    for (x, y) in [(7, 7), (8, 7), (7, 8), (8, 8), (6, 7), (9, 6)] {
+        board
+            .play_for_rule(xy_to_move(x, y).unwrap(), None, RuleSet::Renju)
+            .unwrap();
+    }
+    let initial_key = board.zobrist_key();
+    let mut config = load_default_config();
+    config.rule_set = RuleSet::Renju;
+    config.runtime.compute_vcf = false;
+    config.runtime.compute_vct = false;
+    config.runtime.threads = 4;
+
+    let mut searcher = RootSearcher::new(config);
+    assert_eq!(searcher.tt.bucket_count(), 1 << 21);
+
+    // Fixed depth >= 5 exercises the persistent ABDADA worker pool across consecutive moves.
+    let limits = SearchLimits {
+        max_depth: 5,
+        root_width: 15,
+        ..SearchLimits::default()
+    };
+    let r1 = searcher.search(&mut board, Some(limits));
+    assert_eq!(board.zobrist_key(), initial_key);
+    assert!(board.is_legal_move_for_rule(r1.move_, board.side_to_move(), RuleSet::Renju));
+    assert_eq!(r1.depth, 5);
+
+    board
+        .play_for_rule(r1.move_, None, RuleSet::Renju)
+        .expect("returned move stays rule-legal");
+    let after_key = board.zobrist_key();
+    let r2 = searcher.search(
+        &mut board,
+        Some(SearchLimits {
+            max_depth: 10,
+            root_width: 20,
+            time_limit_ms: Some(40.0),
+            node_limit: None,
+        }),
+    );
+    assert_eq!(board.zobrist_key(), after_key);
+    assert!(board.is_legal_move_for_rule(r2.move_, board.side_to_move(), RuleSet::Renju));
+}

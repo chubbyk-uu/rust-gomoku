@@ -9,8 +9,8 @@ use jni::objects::{JClass, JString};
 use jni::sys::{jlong, jstring};
 use jni::JNIEnv;
 use rust_gomoku::{
-    load_default_config, GameController, GameMode, RuleSet, SearchDifficulty, BLACK, BOARD_SIZE,
-    WHITE,
+    default_interactive_threads, load_default_config, GameController, GameMode, RuleSet,
+    SearchDifficulty, BLACK, BOARD_SIZE, WHITE,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -82,6 +82,7 @@ impl BridgeRegistry {
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed) + 1;
         let mut config = load_default_config();
         SearchDifficulty::default().apply_to_config(&mut config);
+        config.runtime.threads = default_interactive_threads();
         let controller = Arc::new(Mutex::new(GameController::new(config)));
         self.controllers
             .lock()

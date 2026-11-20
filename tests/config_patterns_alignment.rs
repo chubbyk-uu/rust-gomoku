@@ -1,12 +1,13 @@
 use rust_gomoku::{
-    adjust_loaded_parameters, bucket_for_lines, default_eval_para, line_backend_name,
-    load_default_config, xy_to_move, Board, Line, PackedShape, SearchLimits, ShapeLabel, BLACK,
-    BOARD_SIZE, DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_OPPONENT_VCF_DEPTH,
-    DEFAULT_OVERLAP_VCT_ALPHABETA, DEFAULT_ROOT_PROFILE, DEFAULT_ROOT_VCF_DEPTH,
-    DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_WIDTH,
-    DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH, DEFAULT_VCF_MULTI_REPLY,
-    DEFAULT_VCT_STRICT_AND_MEMO_KEY, DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH, DIAGONAL_DOWN,
-    DIAGONAL_UP, DIRECTION_IDS, DOUBLE_SHAPE, HORIZONTAL, VERTICAL,
+    adjust_loaded_parameters, bucket_for_lines, default_eval_para, default_interactive_threads,
+    default_tt_bits_for_threads, line_backend_name, load_default_config, xy_to_move, Board, Line,
+    PackedShape, SearchLimits, ShapeLabel, BLACK, BOARD_SIZE, DEFAULT_DYNAMIC_BOARD_MARGIN,
+    DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_OVERLAP_VCT_ALPHABETA, DEFAULT_ROOT_PROFILE,
+    DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_THREADS,
+    DEFAULT_SEARCH_WIDTH, DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
+    DEFAULT_VCF_MULTI_REPLY, DEFAULT_VCT_STRICT_AND_MEMO_KEY,
+    DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH, DIAGONAL_DOWN, DIAGONAL_UP, DIRECTION_IDS, DOUBLE_SHAPE,
+    HORIZONTAL, VERTICAL,
 };
 
 #[test]
@@ -80,7 +81,13 @@ fn runtime_defaults_match_rust_policy() {
         config.runtime.overlap_vct_alphabeta,
         DEFAULT_OVERLAP_VCT_ALPHABETA
     );
+    assert_eq!(config.runtime.threads, DEFAULT_SEARCH_THREADS);
     assert_eq!(config.runtime.root_profile, DEFAULT_ROOT_PROFILE);
+    assert_eq!(default_tt_bits_for_threads(1), 20);
+    assert_eq!(default_tt_bits_for_threads(3), 20);
+    assert_eq!(default_tt_bits_for_threads(4), 21);
+    assert_eq!(default_tt_bits_for_threads(8), 21);
+    assert!((1..=4).contains(&default_interactive_threads()));
 }
 
 #[test]

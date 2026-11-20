@@ -68,7 +68,8 @@ JNI 使用共享 Rust 控制器。
 | `vcf_multi_reply` | `true` |
 | `root_vct_depth` | `6` |
 | `vct_strict_and_memo_key` | `true` |
-| TT bucket bits | `20` |
+| TT bucket bits | 1–3 线程为 `20`（32 MiB）；4+ 线程自动为 `21`（64 MiB） |
+| `threads` | 库/Gomocup 默认 `1`；桌面 GUI 与 Android 在 `>= 4` 核默认 `4`，`< 4` 核默认 `min(2, cores)` |
 | `compute_vcf` / `compute_vct` | 开启 |
 | `overlap_vct_alphabeta` | 关闭，GUI 入口单独开启 |
 | `nonroot_vcf` | 关闭 |
@@ -141,6 +142,7 @@ Gomocup engine：
 ```bash
 cargo run --release --bin gomocup_engine
 target/release/gomocup_engine --depth 8 --width 40
+target/release/gomocup_engine --threads 4 --depth 8 --width 40
 target/release/gomocup_engine --depth 6 --width 20 --root-profile
 target/release/gomocup_engine --tt-bits 22
 ```
@@ -151,6 +153,7 @@ target/release/gomocup_engine --tt-bits 22
 - `INFO timeout_turn N`
 - `INFO time_left N`
 - `INFO max_node N`
+- `INFO thread_num N`（ABDADA 多线程搜索；`1` 保持单线程确定性）
 - `INFO compute_vcf 0|1`
 - `INFO root_vcf_depth N`
 - `INFO opponent_vcf_depth N`

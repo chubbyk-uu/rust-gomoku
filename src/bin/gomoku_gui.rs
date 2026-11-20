@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use rust_gomoku::{
-    load_default_config, GameController, GameMode, RuleSet, SearchDifficulty, Side, BLACK, WHITE,
+    default_interactive_threads, load_default_config, GameController, GameMode, RuleSet,
+    SearchDifficulty, Side, BLACK, WHITE,
 };
 
 const DEFAULT_ADDR: &str = "127.0.0.1:18080";
@@ -26,6 +27,7 @@ fn main() {
     let mut config = load_default_config();
     SearchDifficulty::default().apply_to_config(&mut config);
     config.runtime.overlap_vct_alphabeta = true;
+    config.runtime.threads = default_interactive_threads();
     if let Some(depth) = args.depth {
         config.root_search.depth = depth;
     }

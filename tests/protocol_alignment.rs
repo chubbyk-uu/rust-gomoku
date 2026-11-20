@@ -586,3 +586,15 @@ fn remaining_match_time_caps_the_turn() {
     protocol.handle_line("INFO time_left 30");
     assert_eq!(protocol.current_search_limits().time_limit_ms, Some(30.0));
 }
+
+#[test]
+fn protocol_info_thread_num_updates_runtime() {
+    let mut proto = proto();
+    assert_eq!(proto.config.runtime.threads, 1);
+    proto.handle_line("INFO thread_num 4");
+    assert_eq!(proto.config.runtime.threads, 4);
+    proto.handle_line("INFO threads 0");
+    assert_eq!(proto.config.runtime.threads, 1);
+    proto.handle_line("INFO thread_num nope");
+    assert_eq!(proto.config.runtime.threads, 1);
+}

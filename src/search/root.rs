@@ -1,16 +1,19 @@
 //! Root iterative-deepening search for the classic mainline.
 
+use super::abdada::{
+    AbdadaContext, DepthJob, SearchWorkerPool, SharedRootBest, ABDADA_PARALLEL_START_DEPTH,
+};
 use super::budget::MoveBudget;
 use std::collections::HashSet;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::Instant;
 
 use crate::board::{move_to_xy, xy_to_move, Board};
-use crate::config::EngineConfig;
+use crate::config::{default_tt_bits_for_threads, EngineConfig};
 use crate::constants::{INF, WIN};
 use crate::eval::{recompute_all_for_rule, EvalCaches};
 use crate::rules::RuleSet;
@@ -323,7 +326,7 @@ pub fn fallback_ai_move(
     Ok(best_moves[rng.randrange(best_moves.len())?])
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct RootSearcher {
     pub config: EngineConfig,
     pub tt: TranspositionTable,
@@ -332,6 +335,22 @@ pub struct RootSearcher {
     pub vct: VCTSearcher,
     pub fallback_rng: ClassicFallbackRng,
     pub last_trace: Option<RootTrace>,
+    worker_pool: Option<SearchWorkerPool>,
+}
+
+impl Clone for RootSearcher {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            tt: self.tt.clone(),
+            alphabeta: self.alphabeta.clone(),
+            vcf: self.vcf.clone(),
+            vct: self.vct.clone(),
+            fallback_rng: self.fallback_rng.clone(),
+            last_trace: self.last_trace.clone(),
+            worker_pool: None,
+        }
+    }
 }
 
 struct AlphaBetaThreadResult {
@@ -374,7 +393,7 @@ impl RootSearcher {
     }
 
     pub fn new(config: EngineConfig) -> Self {
-        let tt = TranspositionTable::default();
+        let tt = TranspositionTable::new(default_tt_bits_for_threads(config.runtime.threads));
         let alphabeta = AlphaBetaSearcher::with_tt(config.clone(), tt.clone());
         Self {
             config,
@@ -384,6 +403,7 @@ impl RootSearcher {
             vct: VCTSearcher::default(),
             fallback_rng: new_classic_fallback_rng(),
             last_trace: None,
+            worker_pool: None,
         }
     }
 
@@ -397,7 +417,20 @@ impl RootSearcher {
             vct: VCTSearcher::default(),
             fallback_rng: new_classic_fallback_rng(),
             last_trace: None,
+            worker_pool: None,
         }
+    }
+
+    fn ensure_worker_pool(&mut self, threads: usize) -> &mut SearchWorkerPool {
+        let desired_workers = threads.saturating_sub(1).max(1);
+        let needs_rebuild = self
+            .worker_pool
+            .as_ref()
+            .is_none_or(|pool| pool.num_workers() != desired_workers);
+        if needs_rebuild {
+            self.worker_pool = Some(SearchWorkerPool::new(desired_workers));
+        }
+        self.worker_pool.as_mut().expect("worker pool initialized")
     }
 
     pub fn verify_root_vct_move(
@@ -643,32 +676,139 @@ impl RootSearcher {
                 break;
             }
             let depth_start = Instant::now();
-            let mut stats = SearchStats {
-                root_profile: self.config.runtime.root_profile,
-                cancel: cancel.clone(),
-                ..SearchStats::default()
+            let use_parallel_depth = self.config.runtime.threads > 1
+                && limits.node_limit.is_none()
+                && depth >= ABDADA_PARALLEL_START_DEPTH;
+            let root_preferred_move = if root_allowed_moves.is_some() {
+                best_move
+            } else {
+                None
             };
-            let (score, move_) = self.alphabeta.search(
-                board,
-                &mut caches,
-                side,
-                f64::from(depth),
-                -INF,
-                INF,
-                limits.root_width,
-                &mut stats,
-                SearchOptions {
-                    opo: 1,
-                    root: true,
-                    root_allowed_moves: root_allowed_moves.as_ref(),
-                    root_preferred_move: if root_allowed_moves.is_some() {
-                        best_move
-                    } else {
-                        None
+            let (mut score, mut move_, mut stats) = if use_parallel_depth {
+                let threads = self.config.runtime.threads;
+                let config_clone = self.config.clone();
+                let tt_clone = self.tt.clone();
+                let tt_gen = self.alphabeta.tt_generation();
+                let deadline = self.vcf.budget.deadline();
+                let (abdada_table, abdada_salt) = {
+                    let pool = self.ensure_worker_pool(threads);
+                    (pool.table(), pool.next_salt())
+                };
+                let depth_done = Arc::new(AtomicBool::new(false));
+                let root_best = Arc::new(SharedRootBest::new());
+                let job = Arc::new(DepthJob {
+                    config: config_clone,
+                    tt: tt_clone,
+                    tt_generation: tt_gen,
+                    board: board.clone(),
+                    caches: caches.clone(),
+                    side,
+                    depth,
+                    wide: limits.root_width,
+                    root_allowed_moves: root_allowed_moves.clone(),
+                    root_preferred_move,
+                    deadline,
+                    cancel: cancel.clone(),
+                    depth_done: Arc::clone(&depth_done),
+                    abdada_table: Arc::clone(&abdada_table),
+                    abdada_salt,
+                    root_best: Arc::clone(&root_best),
+                    completed_result: Mutex::new(None),
+                    helper_nodes: AtomicUsize::new(0),
+                    helper_tt_curr: AtomicUsize::new(0),
+                    helper_tt_old: AtomicUsize::new(0),
+                });
+                self.worker_pool
+                    .as_ref()
+                    .expect("worker pool initialized")
+                    .start_depth(Arc::clone(&job));
+                let mut stats = SearchStats {
+                    root_profile: self.config.runtime.root_profile,
+                    cancel: cancel.clone(),
+                    ..SearchStats::default()
+                };
+                let main_abdada = AbdadaContext {
+                    table: abdada_table,
+                    salt: abdada_salt,
+                    root_best,
+                    depth_done: Arc::clone(&depth_done),
+                };
+                let (mut main_score, mut main_move) = self.alphabeta.search_with_abdada(
+                    board,
+                    &mut caches,
+                    side,
+                    f64::from(depth),
+                    -INF,
+                    INF,
+                    limits.root_width,
+                    &mut stats,
+                    SearchOptions {
+                        opo: 1,
+                        root: true,
+                        root_allowed_moves: root_allowed_moves.as_ref(),
+                        root_preferred_move,
+                        ..SearchOptions::default()
                     },
-                    ..SearchOptions::default()
-                },
-            );
+                    Some(&main_abdada),
+                );
+                depth_done.store(true, Ordering::Relaxed);
+                self.worker_pool
+                    .as_ref()
+                    .expect("worker pool initialized")
+                    .wait_depth_done();
+                stats.nodes += job.helper_nodes.load(Ordering::Relaxed);
+                stats.tt_bestmove_current_generation += job.helper_tt_curr.load(Ordering::Relaxed);
+                stats.tt_bestmove_old_generation += job.helper_tt_old.load(Ordering::Relaxed);
+                if stats.stop {
+                    let externally_stopped = self.vcf.budget.stopped()
+                        || cancel
+                            .as_ref()
+                            .is_some_and(|cancel| cancel.load(Ordering::Relaxed));
+                    if !externally_stopped {
+                        if let Some((w_score, w_move)) =
+                            *job.completed_result.lock().expect("completed result lock")
+                        {
+                            main_score = w_score;
+                            main_move = w_move;
+                            stats.stop = false;
+                        }
+                    }
+                }
+                if !stats.stop {
+                    if let Some((shared_score, shared_move)) =
+                        job.root_best.load_if_better(main_score)
+                    {
+                        main_score = shared_score;
+                        main_move = Some(shared_move);
+                    }
+                }
+                (main_score, main_move, stats)
+            } else {
+                let mut stats = SearchStats {
+                    root_profile: self.config.runtime.root_profile,
+                    cancel: cancel.clone(),
+                    ..SearchStats::default()
+                };
+                let (score, move_) = self.alphabeta.search(
+                    board,
+                    &mut caches,
+                    side,
+                    f64::from(depth),
+                    -INF,
+                    INF,
+                    limits.root_width,
+                    &mut stats,
+                    SearchOptions {
+                        opo: 1,
+                        root: true,
+                        root_allowed_moves: root_allowed_moves.as_ref(),
+                        root_preferred_move,
+                        ..SearchOptions::default()
+                    },
+                );
+                (score, move_, stats)
+            };
+            let _ = (&mut score, &mut move_);
             let depth_elapsed_us = depth_start.elapsed().as_micros();
             total_nodes += stats.nodes;
             trace.tt_bestmove_current_generation += stats.tt_bestmove_current_generation;

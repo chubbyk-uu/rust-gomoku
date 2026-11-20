@@ -79,6 +79,10 @@ impl MoveBudget {
     pub fn nodes(&self) -> Option<usize> {
         self.0.as_ref().map(|b| b.nodes.load(Ordering::Relaxed))
     }
+
+    pub fn deadline(&self) -> Option<Instant> {
+        self.0.as_ref().and_then(|b| b.deadline)
+    }
 }
 
 #[cfg(test)]

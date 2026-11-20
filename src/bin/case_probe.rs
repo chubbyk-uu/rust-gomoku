@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use rust_gomoku::{
     load_default_config, move_to_xy, xy_to_move, Board, RootSearcher, SearchLimits,
     TranspositionTable, VCTAndMemoCollisionSample, VCTDepthStats, VCTStats, BLACK,
-    MAX_TT_BUCKET_BITS, WHITE,
+    MAX_SEARCH_THREADS, MAX_TT_BUCKET_BITS, WHITE,
 };
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +66,7 @@ struct ProbeArgs {
     depth: Option<i32>,
     width: Option<usize>,
     tt_bits: Option<u32>,
+    threads: Option<usize>,
     root_profile: bool,
     vct_strict_and_memo_key: Option<bool>,
 }
@@ -270,6 +271,7 @@ fn parse_args() -> Result<ProbeArgs, String> {
     let mut depth = None;
     let mut width = None;
     let mut tt_bits = None;
+    let mut threads = None;
     let mut root_profile = false;
     let mut vct_strict_and_memo_key = None;
     while let Some(arg) = args.next() {
@@ -327,6 +329,20 @@ fn parse_args() -> Result<ProbeArgs, String> {
                 }
                 tt_bits = Some(bits);
             }
+            "--threads" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--threads requires an integer".to_string())?;
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid --threads: {value}"))?;
+                if parsed == 0 || parsed > MAX_SEARCH_THREADS {
+                    return Err(format!(
+                        "--threads must be between 1 and {MAX_SEARCH_THREADS}"
+                    ));
+                }
+                threads = Some(parsed);
+            }
             "--root-profile" => {
                 root_profile = true;
             }
@@ -355,6 +371,7 @@ fn parse_args() -> Result<ProbeArgs, String> {
         depth,
         width,
         tt_bits,
+        threads,
         root_profile,
         vct_strict_and_memo_key,
     })
@@ -435,6 +452,9 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
     let mut config = load_default_config();
     config.rule_set = rule;
     config.runtime.root_profile = args.root_profile;
+    if let Some(threads) = args.threads {
+        config.runtime.threads = threads;
+    }
     if let Some(vct_strict_and_memo_key) = args.vct_strict_and_memo_key {
         config.runtime.vct_strict_and_memo_key = vct_strict_and_memo_key;
     }

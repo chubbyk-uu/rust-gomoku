@@ -11,8 +11,9 @@ use crate::board::{move_to_xy, Board};
 use crate::config::EngineConfig;
 use crate::constants::{BOARD_AREA, HASHF_ALPHA, HASHF_BETA, HASHF_EXACT, INF, WIN};
 use crate::eval::{evaluate_board, value_wide_compute_for_rule, EvalCaches, EvalSnapshot};
+use crate::search::abdada::{AbdadaContext, ABDADA_MIN_DEPTH};
 use crate::search::movegen::{
-    generate_candidates_with_coverage_scratch, CoverageTracker, MoveAnalysis,
+    generate_candidates_with_coverage_scratch, Candidate, CoverageTracker, MoveAnalysis,
 };
 use crate::search::ordering::{
     order_candidates_owned, order_candidates_primary_owned, order_candidates_primary_slice,
@@ -233,10 +234,19 @@ impl AlphaBetaSearcher {
         }
     }
 
+    pub(crate) fn tt_generation(&self) -> u16 {
+        self.tt_generation
+    }
+
+    pub(crate) fn set_tt_generation(&mut self, generation: u16) {
+        self.tt_generation = generation;
+    }
+
     pub fn nonroot_vcf_depth(depth: f64, root_depth: f64) -> i32 {
         (depth + 6.0 - 2.0 * root_depth) as i32
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn search(
         &mut self,
         board: &mut Board,
@@ -248,6 +258,25 @@ impl AlphaBetaSearcher {
         wide: usize,
         stats: &mut SearchStats,
         options: SearchOptions<'_>,
+    ) -> (i32, Option<Move>) {
+        self.search_with_abdada(
+            board, caches, side, depth, alpha, beta, wide, stats, options, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn search_with_abdada(
+        &mut self,
+        board: &mut Board,
+        caches: &mut EvalCaches,
+        side: Side,
+        depth: f64,
+        alpha: i32,
+        beta: i32,
+        wide: usize,
+        stats: &mut SearchStats,
+        options: SearchOptions<'_>,
+        abdada: Option<&AbdadaContext>,
     ) -> (i32, Option<Move>) {
         let mut coverage = CoverageTracker::from_board(board);
         self.search_with_coverage(
@@ -262,6 +291,7 @@ impl AlphaBetaSearcher {
             options,
             &mut coverage,
             None,
+            abdada,
         )
     }
 
@@ -279,6 +309,7 @@ impl AlphaBetaSearcher {
         options: SearchOptions<'_>,
         coverage: &mut CoverageTracker,
         pending_cache: Option<((usize, usize), &mut Option<EvalSnapshot>)>,
+        abdada: Option<&AbdadaContext>,
     ) -> (i32, Option<Move>) {
         let root_depth = options.root_depth.unwrap_or(depth);
         let priority_base = options.priority_base.unwrap_or(board.move_count() as i32);
@@ -291,6 +322,10 @@ impl AlphaBetaSearcher {
             .as_ref()
             .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
         {
+            stats.stop = true;
+            return (0, None);
+        }
+        if (next_node & 0x3F) == 0 && abdada.is_some_and(AbdadaContext::is_stopped) {
             stats.stop = true;
             return (0, None);
         }
@@ -530,101 +565,220 @@ impl AlphaBetaSearcher {
             (false, 0)
         };
         let mut running_downf = options.downf;
+        let base_depthdown = 0.0_f64.max(
+            1.0 - self.config.search.extend_ratio
+                + self.config.search.extend_ratio * (case_count.max(1) as f64).ln()
+                    / (wide.max(2) as f64).ln(),
+        );
+        let use_abdada = abdada.is_some() && depth >= ABDADA_MIN_DEPTH && search_limit > 1;
 
-        for index in 0..search_limit {
-            if !rest_primary_sorted && index == 1 {
-                order_candidates_primary_slice(&mut ordered[1..]);
-                rest_primary_sorted = true;
-            }
-            if lazy_tie_ordering && index >= tie_sorted_until {
-                tie_sorted_until =
-                    resolve_candidate_tie_group(board, &mut ordered, index, side, tt_best_move);
-            }
-            let candidate = ordered[index];
-            let mut candidate_snapshot: Option<EvalSnapshot> = None;
-            let (mx, my) = move_to_xy(candidate.move_).expect("candidate move is valid");
-            let profile_root_candidate = options.root && stats.root_profile;
-            let profile_start = profile_root_candidate.then(Instant::now);
-            let profile_nodes_before = stats.nodes;
-            let profile_alpha_before = alpha;
-            let mut profile_zero_window_nodes = 0_usize;
-            let mut profile_zero_window_elapsed_us = 0_u128;
-            let mut profile_full_window_nodes = 0_usize;
-            let mut profile_full_window_elapsed_us = 0_u128;
-            let mut profile_pvs_research = false;
-            board
-                .play_assuming_rule_legal(candidate.move_, Some(side), self.config.rule_set)
-                .expect("ordered candidate stays legal");
-            coverage.add_move(candidate.move_);
+        #[derive(Clone, Copy)]
+        struct DeferredCandidate {
+            index: usize,
+            candidate: Candidate,
+            local_downf: i32,
+            depthdown: f64,
+            net: i32,
+        }
+        let mut deferred = [DeferredCandidate {
+            index: 0,
+            candidate: ordered[0],
+            local_downf: 0,
+            depthdown: 0.0,
+            net: 0,
+        }; 64];
+        let mut deferred_len = 0_usize;
+        let mut early_exit = false;
 
-            running_downf += index as i32;
-            let mut local_downf = running_downf;
-            let mut depthdown = 0.0_f64.max(
-                1.0 - self.config.search.extend_ratio
-                    + self.config.search.extend_ratio * (case_count.max(1) as f64).ln()
-                        / (wide.max(2) as f64).ln(),
-            );
-            let mut net = 0_i32;
-            if local_downf >= 15 {
-                net = local_downf / 15;
-                depthdown += f64::from(net);
-                local_downf %= 15;
-            }
-            running_downf = local_downf;
+        for pass in 0..2 {
+            let pass_len = if pass == 0 {
+                search_limit
+            } else {
+                if early_exit || deferred_len == 0 {
+                    break;
+                }
+                deferred_len
+            };
 
-            let mut atdown = 0_i32;
-            if candidate.self_attack == 4 {
-                atdown = self.config.search.atdown4 as i32;
-            } else if candidate.self_attack == 3 {
-                atdown = self.config.search.atdown3 as i32;
-            }
-            if options.root {
-                let (x, y) = move_to_xy(candidate.move_).expect("ordered candidate stays in range");
-                let h = x.min(y).min(board.size() - 1 - x).min(board.size() - 1 - y);
-                let is_corner = pre_corner || h <= 1 || (h == 2 && pre_half >= 1);
-                atdown += rootbonus(board, x, y, is_corner);
-            }
-
-            let mut attempt_depth = depth - depthdown;
-            let score = loop {
-                let child_options = SearchOptions {
-                    opo: 1 - options.opo,
-                    ply: options.ply + 1,
-                    root: false,
-                    root_allowed_moves: None,
-                    root_preferred_move: None,
-                    downf: local_downf,
-                    root_depth: Some(root_depth),
-                    priority_base: Some(priority_base),
+            for step in 0..pass_len {
+                let (index, candidate, local_downf, depthdown, mut net) = if pass == 0 {
+                    let index = step;
+                    if !rest_primary_sorted && index == 1 {
+                        order_candidates_primary_slice(&mut ordered[1..]);
+                        rest_primary_sorted = true;
+                    }
+                    if lazy_tie_ordering && index >= tie_sorted_until {
+                        tie_sorted_until = resolve_candidate_tie_group(
+                            board,
+                            &mut ordered,
+                            index,
+                            side,
+                            tt_best_move,
+                        );
+                    }
+                    let candidate = ordered[index];
+                    running_downf += index as i32;
+                    let mut local_downf = running_downf;
+                    let mut depthdown = base_depthdown;
+                    let mut net = 0_i32;
+                    if local_downf >= 15 {
+                        net = local_downf / 15;
+                        depthdown += f64::from(net);
+                        local_downf %= 15;
+                    }
+                    running_downf = local_downf;
+                    (index, candidate, local_downf, depthdown, net)
+                } else {
+                    let item = deferred[step];
+                    (
+                        item.index,
+                        item.candidate,
+                        item.local_downf,
+                        item.depthdown,
+                        item.net,
+                    )
                 };
-                let score = if found_pv {
-                    let narrow_start = profile_root_candidate.then(Instant::now);
-                    let narrow_nodes_before = stats.nodes;
-                    let shifted_alpha = shift_bound_with_atdown(alpha, atdown);
-                    let (narrow_score, _) = self.search_with_coverage(
-                        board,
-                        caches,
-                        -side,
-                        attempt_depth,
-                        -shifted_alpha - 1,
-                        -shifted_alpha,
-                        child_wide,
-                        stats,
-                        child_options,
-                        coverage,
-                        Some(((mx, my), &mut candidate_snapshot)),
-                    );
-                    if let Some(start) = narrow_start {
-                        profile_zero_window_nodes +=
-                            stats.nodes.saturating_sub(narrow_nodes_before);
-                        profile_zero_window_elapsed_us += start.elapsed().as_micros();
+
+                if options.root {
+                    if let Some(ctx) = abdada {
+                        if let Some((shared_alpha, shared_move)) =
+                            ctx.root_best.load_if_better(alpha)
+                        {
+                            alpha = shared_alpha;
+                            if shared_alpha > current {
+                                current = shared_alpha;
+                                has_score = true;
+                            }
+                            best_move = Some(shared_move);
+                            hash_flag = HASHF_EXACT;
+                            found_pv = true;
+                        }
                     }
-                    if stats.stop {
-                        break narrow_score;
+                }
+
+                let mut marked_busy_key: Option<u64> = None;
+                if use_abdada && pass == 0 && index > 0 {
+                    if let Some(ctx) = abdada {
+                        let child_key = board.zobrist_key_after(candidate.move_, side);
+                        if found_pv
+                            && deferred_len < deferred.len()
+                            && ctx.table.is_busy(child_key, ctx.salt)
+                        {
+                            deferred[deferred_len] = DeferredCandidate {
+                                index,
+                                candidate,
+                                local_downf,
+                                depthdown,
+                                net,
+                            };
+                            deferred_len += 1;
+                            continue;
+                        }
+                        ctx.table.mark_busy(child_key, ctx.salt);
+                        marked_busy_key = Some(child_key);
                     }
-                    let narrowed = score_from_child(narrow_score, atdown);
-                    if alpha < narrowed && narrowed < beta {
-                        profile_pvs_research = true;
+                }
+
+                let mut candidate_snapshot: Option<EvalSnapshot> = None;
+                let (mx, my) = move_to_xy(candidate.move_).expect("candidate move is valid");
+                let profile_root_candidate = options.root && stats.root_profile;
+                let profile_start = profile_root_candidate.then(Instant::now);
+                let profile_nodes_before = stats.nodes;
+                let profile_alpha_before = alpha;
+                let mut profile_zero_window_nodes = 0_usize;
+                let mut profile_zero_window_elapsed_us = 0_u128;
+                let mut profile_full_window_nodes = 0_usize;
+                let mut profile_full_window_elapsed_us = 0_u128;
+                let mut profile_pvs_research = false;
+                board
+                    .play_assuming_rule_legal(candidate.move_, Some(side), self.config.rule_set)
+                    .expect("ordered candidate stays legal");
+                coverage.add_move(candidate.move_);
+
+                let mut atdown = 0_i32;
+                if candidate.self_attack == 4 {
+                    atdown = self.config.search.atdown4 as i32;
+                } else if candidate.self_attack == 3 {
+                    atdown = self.config.search.atdown3 as i32;
+                }
+                if options.root {
+                    let (x, y) =
+                        move_to_xy(candidate.move_).expect("ordered candidate stays in range");
+                    let h = x.min(y).min(board.size() - 1 - x).min(board.size() - 1 - y);
+                    let is_corner = pre_corner || h <= 1 || (h == 2 && pre_half >= 1);
+                    atdown += rootbonus(board, x, y, is_corner);
+                }
+
+                let mut attempt_depth = depth - depthdown;
+                let score = loop {
+                    let child_options = SearchOptions {
+                        opo: 1 - options.opo,
+                        ply: options.ply + 1,
+                        root: false,
+                        root_allowed_moves: None,
+                        root_preferred_move: None,
+                        downf: local_downf,
+                        root_depth: Some(root_depth),
+                        priority_base: Some(priority_base),
+                    };
+                    let score = if found_pv {
+                        let narrow_start = profile_root_candidate.then(Instant::now);
+                        let narrow_nodes_before = stats.nodes;
+                        let shifted_alpha = shift_bound_with_atdown(alpha, atdown);
+                        let (narrow_score, _) = self.search_with_coverage(
+                            board,
+                            caches,
+                            -side,
+                            attempt_depth,
+                            -shifted_alpha - 1,
+                            -shifted_alpha,
+                            child_wide,
+                            stats,
+                            child_options,
+                            coverage,
+                            Some(((mx, my), &mut candidate_snapshot)),
+                            abdada,
+                        );
+                        if let Some(start) = narrow_start {
+                            profile_zero_window_nodes +=
+                                stats.nodes.saturating_sub(narrow_nodes_before);
+                            profile_zero_window_elapsed_us += start.elapsed().as_micros();
+                        }
+                        if stats.stop {
+                            break narrow_score;
+                        }
+                        let narrowed = score_from_child(narrow_score, atdown);
+                        if alpha < narrowed && narrowed < beta {
+                            profile_pvs_research = true;
+                            let full_start = profile_root_candidate.then(Instant::now);
+                            let full_nodes_before = stats.nodes;
+                            let (full_score, _) = self.search_with_coverage(
+                                board,
+                                caches,
+                                -side,
+                                attempt_depth,
+                                -shift_bound_with_atdown(beta, atdown),
+                                -shift_bound_with_atdown(alpha, atdown),
+                                child_wide,
+                                stats,
+                                child_options,
+                                coverage,
+                                Some(((mx, my), &mut candidate_snapshot)),
+                                abdada,
+                            );
+                            if let Some(start) = full_start {
+                                profile_full_window_nodes +=
+                                    stats.nodes.saturating_sub(full_nodes_before);
+                                profile_full_window_elapsed_us += start.elapsed().as_micros();
+                            }
+                            if stats.stop {
+                                break full_score;
+                            }
+                            score_from_child(full_score, atdown)
+                        } else {
+                            narrowed
+                        }
+                    } else {
                         let full_start = profile_root_candidate.then(Instant::now);
                         let full_nodes_before = stats.nodes;
                         let (full_score, _) = self.search_with_coverage(
@@ -639,6 +793,7 @@ impl AlphaBetaSearcher {
                             child_options,
                             coverage,
                             Some(((mx, my), &mut candidate_snapshot)),
+                            abdada,
                         );
                         if let Some(start) = full_start {
                             profile_full_window_nodes +=
@@ -649,52 +804,92 @@ impl AlphaBetaSearcher {
                             break full_score;
                         }
                         score_from_child(full_score, atdown)
-                    } else {
-                        narrowed
+                    };
+                    if score >= WIN {
+                        break score;
                     }
-                } else {
-                    let full_start = profile_root_candidate.then(Instant::now);
-                    let full_nodes_before = stats.nodes;
-                    let (full_score, _) = self.search_with_coverage(
-                        board,
-                        caches,
-                        -side,
-                        attempt_depth,
-                        -shift_bound_with_atdown(beta, atdown),
-                        -shift_bound_with_atdown(alpha, atdown),
-                        child_wide,
-                        stats,
-                        child_options,
-                        coverage,
-                        Some(((mx, my), &mut candidate_snapshot)),
-                    );
-                    if let Some(start) = full_start {
-                        profile_full_window_nodes += stats.nodes.saturating_sub(full_nodes_before);
-                        profile_full_window_elapsed_us += start.elapsed().as_micros();
+                    if score > alpha && score > current && net > 0 {
+                        attempt_depth += f64::from(net);
+                        net = 0;
+                        continue;
                     }
-                    if stats.stop {
-                        break full_score;
-                    }
-                    score_from_child(full_score, atdown)
-                };
-                if score >= WIN {
                     break score;
-                }
-                if score > alpha && score > current && net > 0 {
-                    attempt_depth += f64::from(net);
-                    net = 0;
-                    continue;
-                }
-                break score;
-            };
+                };
 
-            board.undo().expect("ordered candidate was just played");
-            coverage.remove_move(candidate.move_);
-            if let Some(snapshot) = candidate_snapshot {
-                caches.restore_snapshot(&snapshot);
-            }
-            if stats.stop {
+                if let (Some(child_key), Some(ctx)) = (marked_busy_key, abdada) {
+                    ctx.table.clear_busy(child_key, ctx.salt);
+                }
+
+                board.undo().expect("ordered candidate was just played");
+                coverage.remove_move(candidate.move_);
+                if let Some(snapshot) = candidate_snapshot {
+                    caches.restore_snapshot(&snapshot);
+                }
+                if stats.stop {
+                    if profile_root_candidate {
+                        stats.root_candidates.push(RootCandidateProfile {
+                            index,
+                            move_: candidate.move_,
+                            order_score: candidate.order_score as i32,
+                            self_attack: candidate.self_attack,
+                            opp_attack: candidate.opp_attack,
+                            depthdown_milli: (depthdown * 1000.0).round() as i32,
+                            atdown,
+                            attempt_depth_milli: (attempt_depth * 1000.0).round() as i32,
+                            score,
+                            nodes: stats.nodes.saturating_sub(profile_nodes_before),
+                            elapsed_us: profile_start
+                                .map(|start| start.elapsed().as_micros())
+                                .unwrap_or_default(),
+                            alpha_before: profile_alpha_before,
+                            alpha_after: alpha,
+                            beta,
+                            reason: "stop",
+                            zero_window_nodes: profile_zero_window_nodes,
+                            zero_window_elapsed_us: profile_zero_window_elapsed_us,
+                            full_window_nodes: profile_full_window_nodes,
+                            full_window_elapsed_us: profile_full_window_elapsed_us,
+                            pvs_research: profile_pvs_research,
+                        });
+                    }
+                    early_exit = true;
+                    break;
+                }
+
+                if score > current {
+                    current = score;
+                    has_score = true;
+                    if options.root && !found_pv {
+                        best_move = Some(candidate.move_);
+                    }
+                }
+                let improved = score > alpha;
+                if score > alpha {
+                    alpha = score;
+                    best_move = Some(candidate.move_);
+                    hash_flag = HASHF_EXACT;
+                    found_pv = true;
+                    if options.root {
+                        if let Some(ctx) = abdada {
+                            ctx.root_best.publish(score, candidate.move_);
+                        }
+                    }
+                }
+                let root_win = options.root && score >= WIN;
+                let beta_cutoff = alpha >= beta;
+                let profile_elapsed_us = profile_start
+                    .map(|start| start.elapsed().as_micros())
+                    .unwrap_or_default();
                 if profile_root_candidate {
+                    let reason = if root_win {
+                        "root_win"
+                    } else if beta_cutoff {
+                        "beta_cutoff"
+                    } else if improved {
+                        "improved"
+                    } else {
+                        "fail_low"
+                    };
                     stats.root_candidates.push(RootCandidateProfile {
                         index,
                         move_: candidate.move_,
@@ -706,13 +901,11 @@ impl AlphaBetaSearcher {
                         attempt_depth_milli: (attempt_depth * 1000.0).round() as i32,
                         score,
                         nodes: stats.nodes.saturating_sub(profile_nodes_before),
-                        elapsed_us: profile_start
-                            .map(|start| start.elapsed().as_micros())
-                            .unwrap_or_default(),
+                        elapsed_us: profile_elapsed_us,
                         alpha_before: profile_alpha_before,
                         alpha_after: alpha,
                         beta,
-                        reason: "stop",
+                        reason,
                         zero_window_nodes: profile_zero_window_nodes,
                         zero_window_elapsed_us: profile_zero_window_elapsed_us,
                         full_window_nodes: profile_full_window_nodes,
@@ -720,68 +913,16 @@ impl AlphaBetaSearcher {
                         pvs_research: profile_pvs_research,
                     });
                 }
-                break;
-            }
-
-            if score > current {
-                current = score;
-                has_score = true;
-                if options.root && !found_pv {
-                    best_move = Some(candidate.move_);
+                if root_win {
+                    early_exit = true;
+                    break;
                 }
-            }
-            let improved = score > alpha;
-            if score > alpha {
-                alpha = score;
-                best_move = Some(candidate.move_);
-                hash_flag = HASHF_EXACT;
-                found_pv = true;
-            }
-            let root_win = options.root && score >= WIN;
-            let beta_cutoff = alpha >= beta;
-            let profile_elapsed_us = profile_start
-                .map(|start| start.elapsed().as_micros())
-                .unwrap_or_default();
-            if profile_root_candidate {
-                let reason = if root_win {
-                    "root_win"
-                } else if beta_cutoff {
-                    "beta_cutoff"
-                } else if improved {
-                    "improved"
-                } else {
-                    "fail_low"
-                };
-                stats.root_candidates.push(RootCandidateProfile {
-                    index,
-                    move_: candidate.move_,
-                    order_score: candidate.order_score as i32,
-                    self_attack: candidate.self_attack,
-                    opp_attack: candidate.opp_attack,
-                    depthdown_milli: (depthdown * 1000.0).round() as i32,
-                    atdown,
-                    attempt_depth_milli: (attempt_depth * 1000.0).round() as i32,
-                    score,
-                    nodes: stats.nodes.saturating_sub(profile_nodes_before),
-                    elapsed_us: profile_elapsed_us,
-                    alpha_before: profile_alpha_before,
-                    alpha_after: alpha,
-                    beta,
-                    reason,
-                    zero_window_nodes: profile_zero_window_nodes,
-                    zero_window_elapsed_us: profile_zero_window_elapsed_us,
-                    full_window_nodes: profile_full_window_nodes,
-                    full_window_elapsed_us: profile_full_window_elapsed_us,
-                    pvs_research: profile_pvs_research,
-                });
-            }
-            if root_win {
-                break;
-            }
-            if beta_cutoff {
-                hash_flag = HASHF_BETA;
-                stats.cutoffs += 1;
-                break;
+                if beta_cutoff {
+                    hash_flag = HASHF_BETA;
+                    stats.cutoffs += 1;
+                    early_exit = true;
+                    break;
+                }
             }
         }
 

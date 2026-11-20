@@ -73,7 +73,8 @@ The main defaults live in `src/config.rs`.
 | `vcf_multi_reply` | `true` |
 | `root_vct_depth` | `6` |
 | `vct_strict_and_memo_key` | `true` |
-| TT bucket bits | `20` |
+| TT bucket bits | `20` (32 MiB) for 1–3 threads; `21` (64 MiB) for 4+ threads |
+| `threads` | `1` (lib/Gomocup); `4` on 4+ cores or `min(2, cores)` on `< 4` cores (GUI & Android) |
 | `compute_vcf` / `compute_vct` | enabled |
 | `overlap_vct_alphabeta` | off; GUI entry turns it on |
 | `nonroot_vcf` | off |
@@ -158,6 +159,7 @@ Gomocup engine:
 ```bash
 cargo run --release --bin gomocup_engine
 target/release/gomocup_engine --depth 8 --width 40
+target/release/gomocup_engine --threads 4 --depth 8 --width 40
 target/release/gomocup_engine --depth 6 --width 20 --root-profile
 target/release/gomocup_engine --tt-bits 22
 ```
@@ -168,6 +170,7 @@ Common `INFO` commands:
 - `INFO timeout_turn N`
 - `INFO time_left N`
 - `INFO max_node N`
+- `INFO thread_num N` (ABDADA multi-threaded search; `1` stays deterministic)
 - `INFO compute_vcf 0|1`
 - `INFO root_vcf_depth N`
 - `INFO opponent_vcf_depth N`

@@ -21,6 +21,31 @@ pub const DEFAULT_ROOT_VCT_DEPTH: i32 = 6;
 pub const DEFAULT_VCT_STRICT_AND_MEMO_KEY: bool = true;
 pub const DEFAULT_ROOT_PROFILE: bool = false;
 pub const DEFAULT_OVERLAP_VCT_ALPHABETA: bool = false;
+pub const DEFAULT_SEARCH_THREADS: usize = 1;
+pub const MAX_SEARCH_THREADS: usize = 64;
+
+/// Default TT bucket bits for a given thread count when no explicit `tt_bits`
+/// override is provided: 32 MiB (`20`) for 1-3 threads, 64 MiB (`21`) for 4+ threads.
+pub fn default_tt_bits_for_threads(threads: usize) -> u32 {
+    if threads >= 4 {
+        21
+    } else {
+        20
+    }
+}
+
+/// Recommended interactive UI thread count (used by desktop GUI and Android):
+/// `min(4, cores)` on 4+ core devices, otherwise `min(2, cores)`.
+pub fn default_interactive_threads() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    if cores >= 4 {
+        4
+    } else {
+        cores.clamp(1, 2)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EvalBucketTables {
@@ -55,6 +80,7 @@ pub struct RuntimeOptions {
     pub root_vct_depth: i32,
     pub vct_strict_and_memo_key: bool,
     pub overlap_vct_alphabeta: bool,
+    pub threads: usize,
     /// Optional root candidate timing probe. Defaults to off and must not
     /// affect search decisions.
     pub root_profile: bool,
@@ -143,6 +169,7 @@ fn default_runtime_options(para: &[f64]) -> RuntimeOptions {
         root_vct_depth: DEFAULT_ROOT_VCT_DEPTH,
         vct_strict_and_memo_key: DEFAULT_VCT_STRICT_AND_MEMO_KEY,
         overlap_vct_alphabeta: DEFAULT_OVERLAP_VCT_ALPHABETA,
+        threads: DEFAULT_SEARCH_THREADS,
         root_profile: DEFAULT_ROOT_PROFILE,
     }
 }

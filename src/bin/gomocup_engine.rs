@@ -2,7 +2,9 @@
 
 use std::io::{self, BufRead, Write};
 
-use rust_gomoku::{load_default_config, GomocupProtocol, SearchLimits, MAX_TT_BUCKET_BITS};
+use rust_gomoku::{
+    load_default_config, GomocupProtocol, SearchLimits, MAX_SEARCH_THREADS, MAX_TT_BUCKET_BITS,
+};
 
 fn main() {
     let args = parse_args().unwrap_or_else(|message| {
@@ -12,6 +14,9 @@ fn main() {
     let mut config = load_default_config();
     if let Some(root_profile) = args.root_profile {
         config.runtime.root_profile = root_profile;
+    }
+    if let Some(threads) = args.threads {
+        config.runtime.threads = threads;
     }
     let search_limits = if args.depth.is_some() || args.width.is_some() {
         let fixed = SearchLimits::fixed_from_config(&config);
@@ -48,6 +53,7 @@ struct CliArgs {
     width: Option<usize>,
     root_profile: Option<bool>,
     tt_bits: Option<u32>,
+    threads: Option<usize>,
 }
 
 fn parse_args() -> Result<CliArgs, String> {
@@ -55,6 +61,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut width = None;
     let mut root_profile = None;
     let mut tt_bits = None;
+    let mut threads = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -88,6 +95,20 @@ fn parse_args() -> Result<CliArgs, String> {
                 }
                 tt_bits = Some(bits);
             }
+            "--threads" => {
+                let Some(value) = args.next() else {
+                    return Err("--threads requires an integer".to_string());
+                };
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid --threads: {value}"))?;
+                if parsed == 0 || parsed > MAX_SEARCH_THREADS {
+                    return Err(format!(
+                        "--threads must be between 1 and {MAX_SEARCH_THREADS}"
+                    ));
+                }
+                threads = Some(parsed);
+            }
             "--profile" | "--fast-history-ordering" | "--no-fast-history-ordering" => {
                 return Err(format!("{arg} was removed with the Fast profile"));
             }
@@ -102,5 +123,6 @@ fn parse_args() -> Result<CliArgs, String> {
         width,
         root_profile,
         tt_bits,
+        threads,
     })
 }

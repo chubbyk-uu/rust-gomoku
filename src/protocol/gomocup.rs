@@ -1,7 +1,7 @@
 //! Gomocup protocol adapter aligned with the reference implementation.
 
 use crate::board::{move_to_xy, xy_to_move, Board};
-use crate::config::{load_default_config, EngineConfig};
+use crate::config::{load_default_config, EngineConfig, MAX_SEARCH_THREADS};
 use crate::constants::{BOARD_AREA, BOARD_SIZE};
 use crate::rules::RuleSet;
 use crate::search::{RootSearcher, SearchLimits, TranspositionTable, MAX_TT_BUCKET_BITS};
@@ -373,6 +373,12 @@ impl GomocupProtocol {
             "overlap_vct_alphabeta" => {
                 if let Some(parsed) = parse_one::<i32>(value) {
                     self.config.runtime.overlap_vct_alphabeta = parsed != 0;
+                    self.searcher = None;
+                }
+            }
+            "thread_num" | "threads" => {
+                if let Some(parsed) = parse_one::<usize>(value) {
+                    self.config.runtime.threads = parsed.clamp(1, MAX_SEARCH_THREADS);
                     self.searcher = None;
                 }
             }

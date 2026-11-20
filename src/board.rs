@@ -121,6 +121,13 @@ impl Board {
         self.zobrist_key
     }
 
+    #[inline(always)]
+    pub fn zobrist_key_after(&self, move_: Move, side: Side) -> u64 {
+        self.zobrist_key
+            ^ self.zobrist_table.key_for_turn()
+            ^ self.zobrist_table.key_for(move_, side).unwrap_or(0)
+    }
+
     pub fn move_history(&self) -> &[PlayedMove] {
         &self.move_history
     }

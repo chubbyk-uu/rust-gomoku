@@ -729,3 +729,53 @@ Decision: removed `EngineProfile` (`fast` profile) and `fast_history_ordering`
 (killer/history tables, CLI flags, Gomocup `INFO` toggles, and desktop and
 Android selectors). The former Fast profile took 29.5% longer per move in
 this match without demonstrating a strength gain.
+
+### 2026-11-20: Multi-threaded ABDADA shared-TT Alpha-Beta (`threads > 1`)
+
+Motivation & design:
+
+- Existing `TranspositionTable` (`src/search/tt.rs`) already uses lock-free
+  `AtomicU64` XOR-hashed buckets behind `Arc<TTStorage>`.
+- Implemented ABDADA (`src/search/abdada.rs`, `src/search/alphabeta.rs`,
+  `src/search/root.rs`):
+  - Lock-free 512 KiB `AbdadaTable` (65,536 `AtomicU64` slots with per-depth
+    generation salt, zero clearing cost), touched only when `depth >= 3.0`
+    (`ABDADA_MIN_DEPTH = 3.0`; `2.0` was tested and slightly slower at `4T`:
+    `1.71x` vs `1.82x` due to shallow atomic traffic).
+  - Persistent `SearchWorkerPool` on `RootSearcher`, woken only at `depth >= 5`
+    and disabled when `node_limit.is_some()` or `threads == 1` (`threads == 1`
+    takes the exact original single-threaded path with zero overhead).
+  - Shared root best `(alpha, move)` (`SharedRootBest`) publishing only strict
+    exact improvements (`score > alpha`); zero-window fail-lows (`score == alpha`)
+    never overwrite `best_move` (an intermediate prototype that broke ties on
+    `score == alpha` lost `42-56-2` / `-49.0 Elo` and was immediately fixed).
+
+Fixed-position d8/w40 (`compute_vct=0`, 5 slow tails sum = `73.35s` at `1T`):
+
+- `2T`: `49.24s` (`1.49x`)
+- `4T`: `38.68s–40.40s` (`1.82x–1.90x`)
+- `8T`: `33.12s–34.55s` (`2.12x–2.21x`, up to `3.13x` on `c24_p155` and `2.97x` on `c43_p32`)
+- Normal midgame `c10_p15` (`640.5ms`): `4T 347.9ms` (`1.84x`), `8T 303.4ms` (`2.11x`).
+
+100-game Renju `center_50_prefixes.jsonl` matches (`--reuse-engine-state`, 0 errors / 0 timeouts / 0 capped pairs across all 600 games):
+
+| Matchup | Mode | W-L-D | Paired Score | Speedup vs `1T` (`avg / med / p95 / max`) |
+| --- | --- | --- | --- | --- |
+| `4T + 32 MiB` vs `1T + 32 MiB` (v1) | d8/w40 | `48-50-2` | `49.0%` | `1.99x / 2.21x / 1.94x / 1.38x` |
+| `4T + 32 MiB` vs `1T + 32 MiB` (v3) | d8/w40 | `47-52-1` | `47.5%` | `1.93x / 1.93x / 2.02x / 1.33x` |
+| `4T + 64 MiB` vs `1T + 32 MiB` | d8/w40 | `49-48-3` | `50.5%` (`+3.5 Elo`) | `1.97x / 2.07x / 2.06x / 2.16x` |
+| `8T + 64 MiB` vs `1T + 32 MiB` | d8/w40 | `55-41-4` | `57.0%` (`+49.0 Elo`) | `2.37x / 2.39x / 2.30x / 2.61x` |
+| `8T + 128 MiB` vs `1T + 32 MiB` | d8/w40 | `47-53-0` | `47.0%` | `2.16x / 2.00x / 2.16x / 1.53x` |
+| **Combined 500 fixed-d8 games** | d8/w40 | **`246-244-10`** | **`50.20%`** | **`~2.0x–2.4x`** |
+| `8T + 64 MiB` vs `4T + 64 MiB` | d8/w40 | `47-49-4` | `49.0%` | `8T` faster by `7%` avg, `12%` p95, `36%` max |
+| `4T + 32 MiB` vs `1T + 32 MiB` | **1s/move timed** | **`58-41-1`** | **`58.5%` (`+59.6 Elo`, `WW=12, LL=4`)** | median `230ms vs 687ms` (`3.0x` faster) |
+
+Decision:
+
+- Keep library and Gomocup default at `threads = 1` + `32 MiB TT` (`tt_bits = 20`)
+  so `base` remains 100% deterministic and passes all 13/13 reference diffs.
+- Auto-tier default TT to `64 MiB` (`tt_bits = 21`) when `threads >= 4` and no
+  explicit `tt_bits` is set (`128 MiB` slowed `8T` slightly due to L3/TLB pressure).
+- Enable interactive default `default_interactive_threads()` (`4` on `>= 4` cores
+  with `64 MiB TT`, `min(2, cores)` on `< 4` cores with `32 MiB TT`) in desktop
+  GUI (`gomoku_gui`) and Android JNI bridge.

@@ -23,14 +23,15 @@ pub use app::{
 };
 pub use board::{move_to_rc, move_to_xy, rc_to_move, xy_to_move, Board, BoardError};
 pub use config::{
-    adjust_loaded_parameters, default_eval_para, load_default_config, EngineConfig,
-    EvalBucketTables, RootSearchDefaults, RuntimeOptions, SearchParameters,
-    DEFAULT_CHILD_WIDTH_RATIO_DEN, DEFAULT_CHILD_WIDTH_RATIO_NUM, DEFAULT_DYNAMIC_BOARD_MARGIN,
-    DEFAULT_EVAL_PARA, DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_OVERLAP_VCT_ALPHABETA,
-    DEFAULT_ROOT_PROFILE, DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH,
+    adjust_loaded_parameters, default_eval_para, default_interactive_threads,
+    default_tt_bits_for_threads, load_default_config, EngineConfig, EvalBucketTables,
+    RootSearchDefaults, RuntimeOptions, SearchParameters, DEFAULT_CHILD_WIDTH_RATIO_DEN,
+    DEFAULT_CHILD_WIDTH_RATIO_NUM, DEFAULT_DYNAMIC_BOARD_MARGIN, DEFAULT_EVAL_PARA,
+    DEFAULT_OPPONENT_VCF_DEPTH, DEFAULT_OVERLAP_VCT_ALPHABETA, DEFAULT_ROOT_PROFILE,
+    DEFAULT_ROOT_VCF_DEPTH, DEFAULT_ROOT_VCT_DEPTH, DEFAULT_SEARCH_DEPTH, DEFAULT_SEARCH_THREADS,
     DEFAULT_SEARCH_WIDTH, DEFAULT_TIMED_SEARCH_MAX_DEPTH, DEFAULT_TIMED_SEARCH_MAX_WIDTH,
     DEFAULT_VCF_MULTI_REPLY, DEFAULT_VCT_STRICT_AND_MEMO_KEY,
-    DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
+    DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH, MAX_SEARCH_THREADS,
 };
 pub use constants::{BLACK, BOARD_AREA, BOARD_SIZE, EMPTY, WHITE};
 pub use eval::{
