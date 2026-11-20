@@ -1009,3 +1009,51 @@ fn abdada_timed_search_reports_helper_nodes_in_budget_total() {
         profiled_total
     );
 }
+
+#[test]
+fn timed_search_caps_vct_budget_so_alphabeta_still_completes_base_depth() {
+    // Mid-game position with active VCT trigger: under a tight 150 ms budget,
+    // root VCT must yield early enough for alpha-beta to complete at least depth 1
+    // instead of falling back to depth 0 / -INF.
+    let mut board = Board::new();
+    for (x, y) in [
+        (7, 7),
+        (8, 7),
+        (7, 8),
+        (8, 8),
+        (6, 7),
+        (9, 7),
+        (6, 8),
+        (9, 6),
+        (5, 7),
+        (4, 7),
+        (7, 6),
+        (7, 9),
+    ] {
+        board
+            .play_for_rule(xy_to_move(x, y).unwrap(), None, RuleSet::Renju)
+            .unwrap();
+    }
+    let mut config = load_default_config();
+    config.rule_set = RuleSet::Renju;
+    config.runtime.compute_vcf = true;
+    config.runtime.compute_vct = true;
+    config.runtime.root_vct_depth = 6;
+    let mut searcher = RootSearcher::new(config);
+    let result = searcher.search(
+        &mut board,
+        Some(SearchLimits {
+            max_depth: 25,
+            root_width: 40,
+            time_limit_ms: Some(150.0),
+            node_limit: None,
+        }),
+    );
+    let trace = searcher.last_trace.as_ref().expect("trace recorded");
+    if trace.tactical_path == "alphabeta" {
+        assert!(
+            result.depth >= 1,
+            "timed search should complete at least depth 1 instead of depth-0 fallback (trace={trace:?})"
+        );
+    }
+}

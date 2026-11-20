@@ -89,6 +89,29 @@ impl MoveBudget {
     pub fn deadline(&self) -> Option<Instant> {
         self.0.as_ref().and_then(|b| b.deadline)
     }
+
+    /// Creates a child budget for a tactical subsearch (such as root VCT) under
+    /// a time-only move limit, capping it to `fraction` of the remaining time so
+    /// alpha-beta always keeps headroom to complete a base search.
+    pub fn timed_sub_budget(&self, fraction: f64) -> Option<Self> {
+        let parent = self.0.as_ref()?;
+        if parent.max_nodes.is_some() {
+            return None;
+        }
+        let parent_deadline = parent.deadline?;
+        let now = Instant::now();
+        let remaining = parent_deadline.checked_duration_since(now)?;
+        let capped = remaining.mul_f64(fraction.clamp(0.0, 1.0));
+        let sub_deadline = now
+            .checked_add(capped)
+            .map_or(parent_deadline, |deadline| deadline.min(parent_deadline));
+        Some(Self(Some(Arc::new(Limits {
+            deadline: Some(sub_deadline),
+            max_nodes: None,
+            nodes: AtomicUsize::new(0),
+            interrupted: AtomicBool::new(false),
+        }))))
+    }
 }
 
 #[cfg(test)]

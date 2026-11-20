@@ -9,8 +9,42 @@ use crate::search::abdada::{SearchWorkerPool, ABDADA_PARALLEL_START_DEPTH};
 use crate::{
     default_tt_bits_for_search, move_to_xy, xy_to_move, Board, EngineConfig, ForbiddenKind,
     RootSearcher, RootTrace, RuleSet, SearchLimits, SearchResult, Side, TranspositionTable, BLACK,
-    BOARD_SIZE, EMPTY, MAX_SEARCH_THREADS, WHITE,
+    BOARD_SIZE, DEFAULT_ROOT_VCT_DEPTH, EMPTY, MAX_SEARCH_THREADS, WHITE,
 };
+
+pub const DEFAULT_TIME_LIMIT_MS: u32 = 500;
+pub const SUPPORTED_TIME_LIMITS_MS: &[u32] = &[200, 500, 1000, 2000, 5000];
+
+/// Whether the AI searches to a fixed depth preset or under a per-move time cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SearchClockMode {
+    /// Fixed-depth difficulty presets (Beginner..Master).
+    #[default]
+    Untimed,
+    /// Per-move time cap for the AI only (unbounded up to `timed_max_depth`).
+    Timed,
+}
+
+impl SearchClockMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Untimed => "untimed",
+            Self::Timed => "timed",
+        }
+    }
+}
+
+impl std::str::FromStr for SearchClockMode {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.to_ascii_lowercase().as_str() {
+            "untimed" | "fixed" => Ok(Self::Untimed),
+            "timed" => Ok(Self::Timed),
+            _ => Err(format!("unknown clock mode: {raw}")),
+        }
+    }
+}
 
 /// Who controls the two sides of the board.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -75,7 +109,6 @@ impl SearchDifficulty {
         let (depth, width, tactical, root_vct_depth) = self.settings();
         config.root_search.depth = depth;
         config.root_search.wide = width;
-        config.root_search.timed_max_wide = width;
         config.runtime.compute_vcf = tactical;
         config.runtime.compute_vct = tactical;
         config.runtime.root_vct_depth = root_vct_depth;
@@ -136,6 +169,8 @@ pub struct GameController {
     last_trace: Option<RootTrace>,
     last_search_ms: Option<f64>,
     difficulty: Option<SearchDifficulty>,
+    clock_mode: SearchClockMode,
+    time_limit_ms: u32,
     generation: u64,
     search_tt: Option<TranspositionTable>,
     search_pool: Arc<Mutex<Option<SearchWorkerPool>>>,
@@ -227,6 +262,8 @@ pub struct SearchTraceSnapshot {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct GameParamsSnapshot {
     pub mode: &'static str,
+    pub clock_mode: &'static str,
+    pub time_limit_ms: u32,
     pub difficulty: &'static str,
     pub depth: i32,
     pub width: usize,
@@ -258,6 +295,8 @@ impl GameController {
             last_trace: None,
             last_search_ms: None,
             difficulty,
+            clock_mode: SearchClockMode::Untimed,
+            time_limit_ms: DEFAULT_TIME_LIMIT_MS,
             generation: 0,
             search_tt: None,
             search_pool: Arc::new(Mutex::new(None)),
@@ -273,6 +312,16 @@ impl GameController {
     }
 
     pub fn new_game(&mut self, human_side: Side, rule: RuleSet, mode: GameMode) -> bool {
+        self.new_game_with_clock(human_side, rule, mode, self.clock_mode)
+    }
+
+    pub fn new_game_with_clock(
+        &mut self,
+        human_side: Side,
+        rule: RuleSet,
+        mode: GameMode,
+        clock_mode: SearchClockMode,
+    ) -> bool {
         if human_side != BLACK && human_side != WHITE {
             self.error = Some("执棋方必须是黑方或白方。".to_string());
             return false;
@@ -282,18 +331,23 @@ impl GameController {
         self.config.rule_set = rule;
         self.human_side = human_side;
         self.mode = mode;
+        self.clock_mode = clock_mode;
         self.engine_thinking = false;
         let rule_name = match rule {
             RuleSet::Freestyle => "无禁手",
             RuleSet::Renju => "有禁手",
         };
+        let clock_label = match clock_mode {
+            SearchClockMode::Untimed => String::new(),
+            SearchClockMode::Timed => format!(" / 限时 {}ms", self.time_limit_ms),
+        };
         self.status = match mode {
             GameMode::TwoPlayer => format!("新局开始（双人 / {rule_name}）：黑方先行。"),
             GameMode::VsEngine if human_side == BLACK => {
-                format!("新局开始（{rule_name}）：你执黑，请落子。")
+                format!("新局开始（{rule_name}{clock_label}）：你执黑，请落子。")
             }
             GameMode::VsEngine => {
-                format!("新局开始（{rule_name}）：你执白，引擎执黑思考中。")
+                format!("新局开始（{rule_name}{clock_label}）：你执白，引擎执黑思考中。")
             }
         };
         self.error = None;
@@ -302,6 +356,11 @@ impl GameController {
         self.last_trace = None;
         self.last_search_ms = None;
         self.search_tt = None;
+        if self.search_limits().max_depth < ABDADA_PARALLEL_START_DEPTH {
+            if let Ok(mut guard) = self.search_pool.lock() {
+                *guard = None;
+            }
+        }
         true
     }
 
@@ -439,7 +498,7 @@ impl GameController {
         self.difficulty = Some(difficulty);
         if prev_difficulty != self.difficulty || prev_config != self.config {
             self.search_tt = None;
-            if depth < ABDADA_PARALLEL_START_DEPTH {
+            if self.clock_mode == SearchClockMode::Untimed && depth < ABDADA_PARALLEL_START_DEPTH {
                 if let Ok(mut guard) = self.search_pool.lock() {
                     *guard = None;
                 }
@@ -456,6 +515,22 @@ impl GameController {
         );
     }
 
+    pub fn set_time_limit_ms(&mut self, ms: u32) -> bool {
+        if self.engine_thinking {
+            self.error = Some("引擎思考中，暂不能切换每步限时。".to_string());
+            return false;
+        }
+        if !SUPPORTED_TIME_LIMITS_MS.contains(&ms) {
+            self.error =
+                Some("不支持的限时档位，请选择 200、500、1000、2000 或 5000 ms。".to_string());
+            return false;
+        }
+        self.time_limit_ms = ms;
+        self.error = None;
+        self.status = format!("已切换每步限时为 {ms} ms，下一次引擎思考生效。");
+        true
+    }
+
     pub fn set_threads(&mut self, threads: usize) {
         if self.engine_thinking {
             self.error = Some("引擎思考中，暂不能切换线程数。".to_string());
@@ -464,7 +539,7 @@ impl GameController {
         let threads = threads.clamp(1, MAX_SEARCH_THREADS);
         let prev_threads = self.config.runtime.threads;
         if prev_threads != threads {
-            let depth = self.config.root_search.depth;
+            let depth = self.search_limits().max_depth;
             if default_tt_bits_for_search(prev_threads, depth)
                 != default_tt_bits_for_search(threads, depth)
             {
@@ -510,7 +585,7 @@ impl GameController {
             .take();
         Some(EngineSearchTask {
             board: self.board.clone(),
-            config: self.config.clone(),
+            config: self.effective_config(),
             limits: self.search_limits(),
             generation: self.generation,
             tt: self.search_tt.clone(),
@@ -524,7 +599,7 @@ impl GameController {
         }
         self.search_tt = Some(completion.tt);
         if self.config.runtime.threads > 1
-            && self.config.root_search.depth >= ABDADA_PARALLEL_START_DEPTH
+            && self.search_limits().max_depth >= ABDADA_PARALLEL_START_DEPTH
         {
             if let Some(pool) = completion.worker_pool {
                 let mut guard = self
@@ -599,6 +674,7 @@ impl GameController {
             overlap_wait_ms: trace.overlap_wait_ms,
             tt_snapshot_ms: trace.tt_snapshot_ms,
         });
+        let effective = self.effective_config();
         let limits = self.search_limits();
         GameStateSnapshot {
             board_size: BOARD_SIZE,
@@ -633,24 +709,36 @@ impl GameController {
             last_trace,
             params: GameParamsSnapshot {
                 mode: self.mode.as_str(),
+                clock_mode: self.clock_mode.as_str(),
+                time_limit_ms: self.time_limit_ms,
                 difficulty: self
                     .difficulty
                     .map(SearchDifficulty::as_str)
                     .unwrap_or("custom"),
                 depth: limits.max_depth,
                 width: limits.root_width,
-                threads: self.config.runtime.threads,
-                compute_vcf: self.config.runtime.compute_vcf,
-                root_vcf_depth: self.config.runtime.root_vcf_depth,
-                opponent_vcf_depth: self.config.runtime.opponent_vcf_depth,
-                compute_vct: self.config.runtime.compute_vct,
-                root_vct_depth: self.config.runtime.root_vct_depth,
-                overlap_vct_alphabeta: self.config.runtime.overlap_vct_alphabeta,
-                static_board: self.config.runtime.static_board,
-                dynamic_board_margin: self.config.runtime.dynamic_board_margin,
-                rule: self.config.rule_set.as_str(),
+                threads: effective.runtime.threads,
+                compute_vcf: effective.runtime.compute_vcf,
+                root_vcf_depth: effective.runtime.root_vcf_depth,
+                opponent_vcf_depth: effective.runtime.opponent_vcf_depth,
+                compute_vct: effective.runtime.compute_vct,
+                root_vct_depth: effective.runtime.root_vct_depth,
+                overlap_vct_alphabeta: effective.runtime.overlap_vct_alphabeta,
+                static_board: effective.runtime.static_board,
+                dynamic_board_margin: effective.runtime.dynamic_board_margin,
+                rule: effective.rule_set.as_str(),
             },
         }
+    }
+
+    fn effective_config(&self) -> EngineConfig {
+        let mut config = self.config.clone();
+        if self.clock_mode == SearchClockMode::Timed {
+            config.runtime.compute_vcf = true;
+            config.runtime.compute_vct = true;
+            config.runtime.root_vct_depth = DEFAULT_ROOT_VCT_DEPTH;
+        }
+        config
     }
 
     fn board_cells(&self) -> Vec<i8> {
@@ -675,7 +763,16 @@ impl GameController {
     }
 
     fn search_limits(&self) -> SearchLimits {
-        SearchLimits::fixed_from_config(&self.config)
+        match self.clock_mode {
+            SearchClockMode::Untimed => SearchLimits::fixed_from_config(&self.config),
+            SearchClockMode::Timed => {
+                let effective = self.effective_config();
+                SearchLimits {
+                    time_limit_ms: Some(f64::from(self.time_limit_ms)),
+                    ..SearchLimits::timed_from_config(&effective)
+                }
+            }
+        }
     }
 
     fn visible_forbidden_points(&self) -> Vec<ForbiddenPointSnapshot> {
@@ -1203,5 +1300,70 @@ mod tests {
             controller.search_pool.lock().unwrap().is_some(),
             "stale task must not steal or drop the new game's cached worker pool"
         );
+    }
+
+    #[test]
+    fn timed_mode_defaults_to_500ms_supports_midgame_time_changes_and_uses_timed_limits() {
+        let mut config = load_default_config();
+        SearchDifficulty::Intermediate.apply_to_config(&mut config);
+        config.runtime.threads = 4;
+        let mut controller = GameController::new(config);
+        assert_eq!(controller.snapshot().params.clock_mode, "untimed");
+        assert_eq!(controller.snapshot().params.time_limit_ms, 500);
+
+        assert!(controller.new_game_with_clock(
+            BLACK,
+            RuleSet::Renju,
+            GameMode::VsEngine,
+            SearchClockMode::Timed,
+        ));
+        let params = controller.snapshot().params;
+        assert_eq!(params.clock_mode, "timed");
+        assert_eq!(params.time_limit_ms, 500);
+        assert_eq!(params.depth, crate::DEFAULT_TIMED_SEARCH_MAX_DEPTH);
+        assert!(params.compute_vcf);
+        assert!(params.compute_vct);
+
+        assert!(controller.set_time_limit_ms(200));
+        assert_eq!(controller.snapshot().params.time_limit_ms, 200);
+        assert!(!controller.set_time_limit_ms(333));
+        assert_eq!(controller.snapshot().params.time_limit_ms, 200);
+
+        assert!(controller.play_human(7, 7));
+        let task = controller.prepare_engine_search().unwrap();
+        assert_eq!(task.limits.time_limit_ms, Some(200.0));
+        assert_eq!(task.limits.max_depth, crate::DEFAULT_TIMED_SEARCH_MAX_DEPTH);
+        // Reject time limit changes while the engine is thinking.
+        assert!(!controller.set_time_limit_ms(1000));
+
+        let completion = task.run();
+        assert_eq!(completion.tt.bucket_count(), 1 << 21);
+        assert!(controller.commit_engine_search(completion));
+        assert!(controller.search_pool.lock().unwrap().is_some());
+
+        // Switching back to untimed Intermediate on a new game restores d4 and drops the pool.
+        assert!(controller.new_game_with_clock(
+            BLACK,
+            RuleSet::Renju,
+            GameMode::VsEngine,
+            SearchClockMode::Untimed,
+        ));
+        assert_eq!(controller.snapshot().params.clock_mode, "untimed");
+        assert_eq!(controller.snapshot().params.depth, 4);
+        assert!(controller.search_pool.lock().unwrap().is_none());
+
+        // Explicit custom timed_max_wide (e.g. GUI --width 8) is preserved in timed mode.
+        let mut custom_width_cfg = load_default_config();
+        SearchDifficulty::Intermediate.apply_to_config(&mut custom_width_cfg);
+        custom_width_cfg.root_search.wide = 8;
+        custom_width_cfg.root_search.timed_max_wide = 8;
+        let mut custom_controller = GameController::new(custom_width_cfg);
+        assert!(custom_controller.new_game_with_clock(
+            BLACK,
+            RuleSet::Renju,
+            GameMode::VsEngine,
+            SearchClockMode::Timed,
+        ));
+        assert_eq!(custom_controller.snapshot().params.width, 8);
     }
 }

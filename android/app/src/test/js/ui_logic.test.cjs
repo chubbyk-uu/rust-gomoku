@@ -56,6 +56,9 @@ function fakeDocument() {
     "btn-start": element(),
     "sheet-newgame": element(),
     "opt-difficulty": element(),
+    "opt-timelimit": element(),
+    "more-difficulty": element(),
+    "more-timelimit": element(),
     "opt-multithread": element(),
   };
   const options = [element(), element(), element()];
@@ -72,7 +75,7 @@ function fakeDocument() {
     querySelectorAll: (selector) => {
       assert.equal(
         selector,
-        "#opt-gamemode button, #opt-side button, #opt-rule button",
+        "#opt-gamemode button, #opt-side button, #opt-rule button, #opt-clockmode button",
       );
       return options;
     },
@@ -110,6 +113,9 @@ test("busy and engine thinking disable every new-game control", () => {
   assert.equal(document_.elements["btn-newgame"].disabled, true);
   assert.equal(document_.elements["btn-start"].disabled, true);
   assert.equal(document_.elements["opt-difficulty"].disabled, true);
+  assert.equal(document_.elements["opt-timelimit"].disabled, true);
+  assert.equal(document_.elements["more-difficulty"].disabled, true);
+  assert.equal(document_.elements["more-timelimit"].disabled, true);
   assert.equal(document_.elements["opt-multithread"].disabled, true);
   assert.ok(document_.options.every((button) => button.disabled));
 
@@ -121,6 +127,9 @@ test("busy and engine thinking disable every new-game control", () => {
   assert.equal(document_.elements["btn-newgame"].disabled, false);
   assert.equal(document_.elements["btn-start"].disabled, false);
   assert.equal(document_.elements["opt-difficulty"].disabled, false);
+  assert.equal(document_.elements["opt-timelimit"].disabled, false);
+  assert.equal(document_.elements["more-difficulty"].disabled, false);
+  assert.equal(document_.elements["more-timelimit"].disabled, false);
   assert.equal(document_.elements["opt-multithread"].disabled, false);
   assert.ok(document_.options.every((button) => !button.disabled));
 });
@@ -212,14 +221,19 @@ test("the packaged page wires all tested UI helpers before app startup", () => {
   assert.match(appScript, /UiLogic\.setSheetOpen\(document, name, false\)/);
   assert.match(appScript, /UiLogic\.gameResult\(state\)/);
   assert.match(appScript, /op: "set_difficulty", difficulty/);
+  assert.match(appScript, /op: "set_time_limit", time_limit_ms/);
   assert.match(appScript, /op: "set_multithread", enabled/);
   assert.match(appScript, /setDifficultyValue\(state\.params\.difficulty\)/);
   assert.match(page, /id="opt-difficulty"/);
+  assert.match(page, /id="opt-clockmode"/);
+  assert.match(page, /id="opt-timelimit"/);
+  assert.match(page, /id="more-difficulty"/);
+  assert.match(page, /id="more-timelimit"/);
   assert.match(page, /id="opt-multithread"/);
   assert.match(page, /id="opt-gamemode"/);
   assert.match(page, /data-value="two_player"/);
   assert.match(page, /data-engine-only/);
-  assert.match(appScript, /op: "new_game", human_side, rule, mode/);
+  assert.match(appScript, /op: "new_game", human_side, rule, mode, clock_mode/);
   assert.match(page, /id="difficulty-dialog"/);
   assert.match(page, /class="strength-icon level-5"/);
   assert.match(page, /id="meta-difficulty"/);

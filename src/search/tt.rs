@@ -238,6 +238,25 @@ impl TranspositionTable {
         Self::try_new(bucket_bits).expect("trusted TT bucket bits stay within supported bounds")
     }
 
+    /// Allocates a TT at `preferred_bits`, stepping down toward `min_bits` if
+    /// memory allocation fails under tight process limits.
+    pub fn try_new_with_fallback(
+        preferred_bits: u32,
+        min_bits: u32,
+    ) -> Result<(Self, u32), TTError> {
+        let floor = min_bits.min(preferred_bits);
+        let mut bits = preferred_bits;
+        loop {
+            match Self::try_new(bits) {
+                Ok(tt) => return Ok((tt, bits)),
+                Err(TTError::AllocationFailed) if bits > floor => {
+                    bits -= 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     pub fn bucket(&self, key: u64) -> [TTEntry; 2] {
         self.storage.buckets[self.bucket_index(key)]
             .each_ref()

@@ -43,6 +43,7 @@ pub struct GomocupProtocol {
     pub ended: bool,
     pending_error: Option<PendingProtocolError>,
     searcher: Option<RootSearcher>,
+    auto_tt_max_bits: u32,
 }
 
 impl Default for GomocupProtocol {
@@ -66,6 +67,7 @@ impl GomocupProtocol {
             ended: false,
             pending_error: None,
             searcher: None,
+            auto_tt_max_bits: MAX_TT_BUCKET_BITS,
         }
     }
 
@@ -465,16 +467,17 @@ impl GomocupProtocol {
             return vec!["ERROR Board is terminal.".to_string()];
         }
         let limits = self.current_search_limits();
-        let expected_auto_buckets = self.tt_bits.is_none().then(|| {
+        let expected_auto_bits = self.tt_bits.is_none().then(|| {
             let effective_threads = if limits.node_limit.is_some() {
                 1
             } else {
                 self.config.runtime.threads
             };
-            1_usize << default_tt_bits_for_search(effective_threads, limits.max_depth)
+            default_tt_bits_for_search(effective_threads, limits.max_depth)
+                .min(self.auto_tt_max_bits)
         });
         let cached_searcher = self.searcher.take().filter(|searcher| {
-            expected_auto_buckets.is_none_or(|buckets| searcher.tt.bucket_count() == buckets)
+            expected_auto_bits.is_none_or(|bits| searcher.tt.bucket_count() == (1_usize << bits))
         });
         let mut searcher = match cached_searcher {
             Some(searcher) => searcher,
@@ -485,7 +488,20 @@ impl GomocupProtocol {
                         return vec!["ERROR Unable to allocate transposition table.".to_string()]
                     }
                 },
-                None => RootSearcher::new_for_limits(self.config.clone(), limits),
+                None => {
+                    let preferred_bits = expected_auto_bits.expect("auto bits computed");
+                    match TranspositionTable::try_new_with_fallback(preferred_bits, 16) {
+                        Ok((tt, actual_bits)) => {
+                            if actual_bits < preferred_bits {
+                                self.auto_tt_max_bits = actual_bits;
+                            }
+                            RootSearcher::with_tt(self.config.clone(), tt)
+                        }
+                        Err(_) => {
+                            return vec!["ERROR Unable to allocate transposition table.".to_string()]
+                        }
+                    }
+                }
             },
         };
         searcher.config = self.config.clone();

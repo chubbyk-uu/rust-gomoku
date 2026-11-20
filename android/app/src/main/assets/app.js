@@ -306,17 +306,35 @@ function render(state) {
   const twoPlayer = state.params.mode === "two_player";
   const sideChip = document.getElementById("meta-side");
   sideChip.textContent = twoPlayer ? "双人对弈" : (state.human_side === WHITE ? "你执白" : "你执黑");
+  const isTimed = state.params.clock_mode === "timed";
+  const timeLimitMs = state.params.time_limit_ms || 500;
   const difficultyChip = document.getElementById("meta-difficulty");
   difficultyChip.hidden = twoPlayer;
-  difficultyChip.textContent =
-    difficultyNames[state.params.difficulty] || state.params.difficulty;
+  difficultyChip.textContent = isTimed
+    ? (timeLimitMs >= 1000 ? `${timeLimitMs / 1000}s` : `${timeLimitMs}ms`)
+    : (difficultyNames[state.params.difficulty] || state.params.difficulty);
   document.getElementById("meta-moves").textContent = "第 " + state.move_count + " 手";
   setSegmentValue("opt-gamemode", state.params.mode);
+  setSegmentValue("opt-clockmode", isTimed ? "timed" : "untimed");
   syncNewGameMode();
   setSegmentValue("opt-side", state.human_side === WHITE ? "white" : "black");
   setSegmentValue("opt-rule", state.params.rule);
   if (state.params.difficulty !== "custom") {
     setDifficultyValue(state.params.difficulty);
+  }
+  const optTimeLimit = document.getElementById("opt-timelimit");
+  if (optTimeLimit) optTimeLimit.value = String(timeLimitMs);
+  const moreDiffRow = document.getElementById("more-difficulty-row");
+  const moreDiff = document.getElementById("more-difficulty");
+  if (moreDiffRow && moreDiff) {
+    moreDiffRow.hidden = twoPlayer || isTimed;
+    if (state.params.difficulty !== "custom") moreDiff.value = state.params.difficulty;
+  }
+  const moreTimeRow = document.getElementById("more-timelimit-row");
+  const moreTime = document.getElementById("more-timelimit");
+  if (moreTimeRow && moreTime) {
+    moreTimeRow.hidden = twoPlayer || !isTimed;
+    moreTime.value = String(timeLimitMs);
   }
   const mtRow = document.getElementById("row-multithread");
   const mtInput = document.getElementById("opt-multithread");
@@ -340,7 +358,9 @@ function fillAdvanced(res, params) {
     const el = document.querySelector(`[data-adv="${key}"]`);
     if (el) el.textContent = val;
   };
-  set("difficulty", difficultyNames[params.difficulty] || params.difficulty || "—");
+  const isTimed = params.clock_mode === "timed";
+  set("clock", isTimed ? `限时（上限 ${params.time_limit_ms || 500} ms）` : "不限时");
+  set("difficulty", isTimed ? "不限深度" : (difficultyNames[params.difficulty] || params.difficulty || "—"));
   set("threads", params.threads != null ? params.threads + " 线程" : "—");
   if (!res) { set("score", "—"); set("depth", "—"); set("nodes", "—"); set("ms", "—"); return; }
   set("score", res.score);
@@ -475,12 +495,17 @@ function bindSegmented(groupId) {
   });
 }
 
-// Engine-only new-game rows (执棋 / 模式 / 难度) are irrelevant in two-player mode.
+// Engine-only new-game rows (执棋 / 模式 / 难度 / 限时) are irrelevant in two-player mode.
 function syncNewGameMode() {
   const twoPlayer = segValue("opt-gamemode") === "two_player";
+  const timed = segValue("opt-clockmode") === "timed";
   for (const row of document.querySelectorAll("[data-engine-only]")) {
     row.hidden = twoPlayer;
   }
+  const diffRow = document.getElementById("newgame-difficulty-row");
+  const timeRow = document.getElementById("newgame-timelimit-row");
+  if (diffRow) diffRow.hidden = twoPlayer || timed;
+  if (timeRow) timeRow.hidden = twoPlayer || !timed;
 }
 
 function setDifficultyOpen(open) {
@@ -542,6 +567,10 @@ function bindEvents() {
   });
   bindSegmented("opt-side");
   bindSegmented("opt-rule");
+  bindSegmented("opt-clockmode");
+  document.getElementById("opt-clockmode").addEventListener("click", (e) => {
+    if (e.target.closest("button")) syncNewGameMode();
+  });
   document.getElementById("opt-difficulty").addEventListener("click", () => {
     if (!busy && !(lastState && lastState.engine_thinking)) {
       setDifficultyOpen(true);
@@ -568,17 +597,55 @@ function bindEvents() {
     const mode = segValue("opt-gamemode");
     const human_side = segValue("opt-side");
     const rule = segValue("opt-rule");
+    const clock_mode = segValue("opt-clockmode");
     const difficulty = document.getElementById("opt-difficulty").dataset.value;
+    const time_limit_ms = Number(document.getElementById("opt-timelimit").value) || 500;
     closeSheet("newgame");
     guarded(async () => {
       ghost = null;
       // Engine settings only matter when the engine plays.
       if (mode !== "two_player") {
-        await nativeRequest({ op: "set_difficulty", difficulty });
+        if (clock_mode === "timed") {
+          await nativeRequest({ op: "set_time_limit", time_limit_ms });
+        } else {
+          await nativeRequest({ op: "set_difficulty", difficulty });
+        }
       }
-      await applyAndContinue(await nativeRequest({ op: "new_game", human_side, rule, mode }));
+      await applyAndContinue(await nativeRequest({ op: "new_game", human_side, rule, mode, clock_mode }));
     });
   });
+
+  const moreDiff = document.getElementById("more-difficulty");
+  if (moreDiff) {
+    moreDiff.addEventListener("change", () => {
+      const difficulty = moreDiff.value;
+      guarded(async () => {
+        const res = await nativeRequest({ op: "set_difficulty", difficulty });
+        if (!res.ok) {
+          toast((res.error && res.error.message) || "切换难度失败");
+          if (lastState) render(lastState);
+          return;
+        }
+        render(res.state);
+      });
+    });
+  }
+
+  const moreTime = document.getElementById("more-timelimit");
+  if (moreTime) {
+    moreTime.addEventListener("change", () => {
+      const time_limit_ms = Number(moreTime.value);
+      guarded(async () => {
+        const res = await nativeRequest({ op: "set_time_limit", time_limit_ms });
+        if (!res.ok) {
+          toast((res.error && res.error.message) || "切换限时失败");
+          if (lastState) render(lastState);
+          return;
+        }
+        render(res.state);
+      });
+    });
+  }
 
   const numBtn = document.getElementById("opt-numbers");
   numBtn.addEventListener("click", () => {

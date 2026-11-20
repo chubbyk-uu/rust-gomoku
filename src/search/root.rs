@@ -394,7 +394,9 @@ impl RootSearcher {
 
     pub fn new(config: EngineConfig) -> Self {
         let depth = config.root_search.depth;
-        let tt = TranspositionTable::new(default_tt_bits_for_search(config.runtime.threads, depth));
+        let bits = default_tt_bits_for_search(config.runtime.threads, depth);
+        let (tt, _) = TranspositionTable::try_new_with_fallback(bits, 16)
+            .expect("transposition table allocation succeeds");
         Self::with_tt(config, tt)
     }
 
@@ -404,10 +406,9 @@ impl RootSearcher {
         } else {
             config.runtime.threads
         };
-        let tt = TranspositionTable::new(default_tt_bits_for_search(
-            effective_threads,
-            limits.max_depth,
-        ));
+        let bits = default_tt_bits_for_search(effective_threads, limits.max_depth);
+        let (tt, _) = TranspositionTable::try_new_with_fallback(bits, 16)
+            .expect("transposition table allocation succeeds");
         Self::with_tt(config, tt)
     }
 
@@ -1072,12 +1073,24 @@ impl RootSearcher {
                 let vct_start = Instant::now();
                 self.vct.memo_diagnostics_enabled = self.config.runtime.root_profile;
                 self.vct.strict_and_memo_key = self.config.runtime.vct_strict_and_memo_key;
+                // Under a timed move limit, cap root VCT to 30% of the remaining
+                // move time so a slow tactical tree cannot starve alpha-beta into
+                // a depth-0 static fallback.
+                const TIMED_VCT_BUDGET_FRACTION: f64 = 0.30;
+                let vct_sub_budget = self.vcf.budget.timed_sub_budget(TIMED_VCT_BUDGET_FRACTION);
+                let parent_vct_budget = vct_sub_budget
+                    .as_ref()
+                    .map(|sub| std::mem::replace(&mut self.vct.budget, sub.clone()));
                 let vct_result = self.vct.search_for_rule(
                     board,
                     side,
                     self.config.runtime.root_vct_depth,
                     self.config.rule_set,
                 );
+                if let (Some(sub), Some(parent)) = (vct_sub_budget, parent_vct_budget) {
+                    self.vct.budget = parent;
+                    self.vcf.budget.add_nodes(sub.nodes().unwrap_or(0));
+                }
                 trace.vct_ms = Some(elapsed_ms(vct_start));
                 trace.vct_stats = Some(self.vct.stats.clone());
                 trace.vct_found = vct_result.found;

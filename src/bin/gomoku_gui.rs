@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use rust_gomoku::{
     default_interactive_threads, load_default_config, GameController, GameMode, RuleSet,
-    SearchDifficulty, Side, BLACK, MAX_SEARCH_THREADS, WHITE,
+    SearchClockMode, SearchDifficulty, Side, BLACK, MAX_SEARCH_THREADS, WHITE,
 };
 
 const DEFAULT_ADDR: &str = "127.0.0.1:18080";
@@ -338,9 +338,12 @@ fn handle_client(
                 Some("two_player") => GameMode::TwoPlayer,
                 _ => GameMode::VsEngine,
             };
+            let clock_mode = query_param(query, "clock")
+                .and_then(|value| value.parse::<SearchClockMode>().ok())
+                .unwrap_or(SearchClockMode::Untimed);
             {
                 let mut game = state.lock().expect("state lock");
-                game.new_game(side, rule, mode);
+                game.new_game_with_clock(side, rule, mode, clock_mode);
             }
             if mode == GameMode::VsEngine && side == WHITE {
                 maybe_start_engine(Arc::clone(&state));
@@ -379,6 +382,18 @@ fn handle_client(
                     game.set_error(
                         "未知难度，请选择 beginner、junior、intermediate、senior 或 master。",
                     );
+                }
+            }
+            json_response(&state.lock().expect("state lock").snapshot())
+        }
+        ("POST", "/time_limit") => {
+            let ms = query_param(query, "ms").and_then(|value| value.parse::<u32>().ok());
+            {
+                let mut game = state.lock().expect("state lock");
+                if let Some(ms) = ms {
+                    game.set_time_limit_ms(ms);
+                } else {
+                    game.set_error("缺少或无效的限时参数。");
                 }
             }
             json_response(&state.lock().expect("state lock").snapshot())
@@ -809,6 +824,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <button id="rule-renju" class="secondary" onclick="selectRule('renju')">有禁手</button>
             </div>
           </div>
+          <div class="setting-row" id="row-clock-mode">
+            <span class="setting-label">思考模式</span>
+            <div class="rule-switch">
+              <button id="clock-untimed" class="secondary" onclick="selectClock('untimed')">不限时</button>
+              <button id="clock-timed" class="secondary" onclick="selectClock('timed')">限时</button>
+            </div>
+          </div>
           <label class="setting-row" id="row-difficulty" for="difficulty-select">
             <span class="setting-label">难度</span>
             <select id="difficulty-select" onchange="setDifficulty(this.value)">
@@ -817,6 +839,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <option value="intermediate" selected>中级 · d4 / w20 · 无战术搜索</option>
               <option value="senior">高级 · d6 / w30 · VCF/VCT</option>
               <option value="master">大师 · d8 / w40 · VCF/VCT</option>
+            </select>
+          </label>
+          <label class="setting-row" id="row-time-limit" for="time-limit-select" hidden>
+            <span class="setting-label">每步限时</span>
+            <select id="time-limit-select" onchange="setTimeLimit(this.value)">
+              <option value="200">200 ms</option>
+              <option value="500" selected>500 ms</option>
+              <option value="1000">1000 ms (1s)</option>
+              <option value="2000">2000 ms (2s)</option>
+              <option value="5000">5000 ms (5s)</option>
             </select>
           </label>
           <label class="setting-row" id="row-multithread" for="multithread-toggle">
@@ -841,7 +873,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="actions">
           <button id="undo-btn" class="warn" onclick="undo()">悔棋</button>
         </div>
-        <div class="hint">棋盘会自动刷新；规则只在新局生效。难度控制深度、宽度和 VCF/VCT，在下一次引擎思考生效。关闭网页后一段时间，后台服务会自动退出。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
+        <div class="hint">棋盘会自动刷新；规则与「不限时/限时」仅在新局生效。对局中途可在引擎空闲时调整当前模式的难度或每步限时（下一次引擎思考生效，限时仅限 AI）。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
       </div>
       <div class="kv" id="info"></div>
     </aside>
@@ -862,6 +894,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let state = null;
     let selectedRule = 'freestyle';
     let selectedMode = 'vs_engine';
+    let selectedClock = 'untimed';
+    let syncedInitialSelection = false;
     let announcedResult = null;
     let soundOn = true;
     let prevMoveCount = null;
@@ -945,13 +979,19 @@ const INDEX_HTML: &str = r#"<!doctype html>
       fetch('/heartbeat', { method: 'POST', keepalive: true }).catch(() => {});
     }
     function refresh() { api('/state').catch(showError); }
-    function newGame(side) { api('/new?side=' + side + '&rule=' + selectedRule + '&mode=' + selectedMode).catch(showError); }
+    function newGame(side) { api('/new?side=' + side + '&rule=' + selectedRule + '&mode=' + selectedMode + '&clock=' + selectedClock).catch(showError); }
     function startTwoPlayer() { newGame('black'); }
     function setDifficulty(difficulty) { api('/difficulty?value=' + difficulty).catch(showError); }
+    function setTimeLimit(ms) { api('/time_limit?ms=' + ms).catch(showError); }
     function setMultithread(enabled) { api('/threads?enabled=' + (enabled ? '1' : '0')).catch(showError); }
     function selectRule(rule) {
       selectedRule = rule;
       renderRuleButtons();
+    }
+    function selectClock(clock) {
+      selectedClock = clock;
+      renderClockButtons();
+      renderModeButtons();
     }
     function selectMode(mode) {
       selectedMode = mode;
@@ -968,15 +1008,23 @@ const INDEX_HTML: &str = r#"<!doctype html>
       document.getElementById('start-vs-engine').hidden = twoPlayer;
       document.getElementById('start-two-player').hidden = !twoPlayer;
       // Engine-only settings are meaningless in two-player mode.
-      document.getElementById('row-difficulty').hidden = twoPlayer;
+      document.getElementById('row-clock-mode').hidden = twoPlayer;
+      document.getElementById('row-difficulty').hidden = twoPlayer || selectedClock === 'timed';
+      document.getElementById('row-time-limit').hidden = twoPlayer || selectedClock !== 'timed';
       document.getElementById('row-multithread').hidden = twoPlayer;
     }
     function restartSameSide() {
-      if (state && state.params && state.params.mode === 'two_player') {
-        selectedMode = 'two_player';
+      if (state && state.params) {
+        selectedMode = state.params.mode || selectedMode;
+        selectedRule = state.params.rule || selectedRule;
+        selectedClock = state.params.clock_mode || selectedClock;
+        renderRuleButtons();
+        renderClockButtons();
         renderModeButtons();
-        startTwoPlayer();
-        return;
+        if (state.params.mode === 'two_player') {
+          startTwoPlayer();
+          return;
+        }
       }
       const side = state && state.human_side === -1 ? 'white' : 'black';
       newGame(side);
@@ -1146,6 +1194,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
       freestyleButton.disabled = disabled;
       renjuButton.disabled = disabled;
     }
+    function renderClockButtons() {
+      const untimedButton = document.getElementById('clock-untimed');
+      const timedButton = document.getElementById('clock-timed');
+      if (!untimedButton || !timedButton) return;
+      untimedButton.className = 'secondary' + (selectedClock === 'untimed' ? ' active' : '');
+      timedButton.className = 'secondary' + (selectedClock === 'timed' ? ' active' : '');
+      const disabled = !!(state && state.engine_thinking);
+      untimedButton.disabled = disabled;
+      timedButton.disabled = disabled;
+    }
     function renderInfo() {
       const status = document.getElementById('status');
       status.textContent = state.status;
@@ -1154,9 +1212,20 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const r = state.last_result;
       const t = state.last_trace;
       const p = state.params;
+      if (!syncedInitialSelection) {
+        selectedRule = p.rule || selectedRule;
+        selectedMode = p.mode || selectedMode;
+        selectedClock = p.clock_mode || selectedClock;
+        syncedInitialSelection = true;
+      }
       const difficultySelect = document.getElementById('difficulty-select');
       if (p.difficulty !== 'custom') difficultySelect.value = p.difficulty;
       difficultySelect.disabled = !!state.engine_thinking;
+      const timeLimitSelect = document.getElementById('time-limit-select');
+      if (timeLimitSelect && p.time_limit_ms) {
+        timeLimitSelect.value = String(p.time_limit_ms);
+        timeLimitSelect.disabled = !!state.engine_thinking;
+      }
       const mtToggle = document.getElementById('multithread-toggle');
       const mtLabel = document.getElementById('multithread-label');
       mtToggle.checked = p.threads > 1;
@@ -1165,6 +1234,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       // Undo is rejected server-side while the engine thinks; disable it to match.
       document.getElementById('undo-btn').disabled = !!state.engine_thinking;
       renderRuleButtons();
+      renderClockButtons();
+      renderModeButtons();
       if (p.mode === 'two_player') {
         const rows = [
           ['对战', '双人对弈'],
@@ -1183,15 +1254,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
         ['胜者', sideName(state.winner)],
         ['手数', state.move_count],
         ['规则', p.rule === 'renju' ? '有禁手' : '无禁手'],
-        ['难度', {
+        ['思考模式', p.clock_mode === 'timed' ? `限时（AI 每步上限 ${p.time_limit_ms} ms）` : '不限时'],
+        ['难度', p.clock_mode === 'timed' ? '不限深度' : ({
           beginner: '入门',
           junior: '初级',
           intermediate: '中级',
           senior: '高级',
           master: '大师',
           custom: '自定义',
-        }[p.difficulty] || p.difficulty],
-        ['搜索参数', `d${p.depth} / w${p.width} / ${p.threads}T`],
+        }[p.difficulty] || p.difficulty)],
+        ['搜索参数', p.clock_mode === 'timed' ? `限时 ${p.time_limit_ms}ms / w${p.width} / ${p.threads}T` : `d${p.depth} / w${p.width} / ${p.threads}T`],
         ['VCF/VCT', `${p.compute_vcf ? 'VCF' + p.root_vcf_depth : 'VCF off'} / ${p.compute_vct ? 'VCT' + p.root_vct_depth : 'VCT off'}`],
         ['Overlap VCT/AB', yesNo(p.overlap_vct_alphabeta)],
         ['窗口', p.static_board ? 'static board' : `dynamic margin ${p.dynamic_board_margin}`],

@@ -10,7 +10,8 @@ use jni::sys::{jlong, jstring};
 use jni::JNIEnv;
 use rust_gomoku::{
     default_interactive_threads, load_default_config, GameController, GameMode, RuleSet,
-    SearchDifficulty, BLACK, BOARD_SIZE, MAX_SEARCH_THREADS, WHITE,
+    SearchClockMode, SearchDifficulty, BLACK, BOARD_SIZE, MAX_SEARCH_THREADS,
+    SUPPORTED_TIME_LIMITS_MS, WHITE,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -35,6 +36,7 @@ enum BridgeRequest {
         human_side: String,
         rule: String,
         mode: Option<String>,
+        clock_mode: Option<String>,
     },
     Play {
         x: usize,
@@ -43,6 +45,9 @@ enum BridgeRequest {
     Undo,
     SetDifficulty {
         difficulty: String,
+    },
+    SetTimeLimit {
+        time_limit_ms: u32,
     },
     SetThreads {
         threads: usize,
@@ -146,9 +151,10 @@ fn parse_request(request_json: &str) -> Result<BridgeRequest, BridgeError> {
         .ok_or_else(|| BridgeError::invalid_request("Request field \"op\" must be a string."))?;
     let allowed_fields: &[&str] = match operation {
         "state" | "undo" | "engine_move" => &["op"],
-        "new_game" => &["op", "human_side", "rule", "mode"],
+        "new_game" => &["op", "human_side", "rule", "mode", "clock_mode"],
         "play" => &["op", "x", "y"],
         "set_difficulty" => &["op", "difficulty"],
+        "set_time_limit" => &["op", "time_limit_ms"],
         "set_threads" => &["op", "threads"],
         "set_multithread" => &["op", "enabled"],
         _ => {
@@ -179,14 +185,16 @@ fn dispatch_request(
             human_side,
             rule,
             mode,
+            clock_mode,
         } => {
             let side = parse_side(&human_side)?;
             let rule = parse_rule(&rule)?;
             let mode = parse_mode(mode.as_deref())?;
+            let clock_mode = parse_clock_mode(clock_mode.as_deref())?;
             controller
                 .lock()
                 .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
-                .new_game(side, rule, mode);
+                .new_game_with_clock(side, rule, mode, clock_mode);
             snapshot_response(&controller)
         }
         BridgeRequest::Play { x, y } => {
@@ -214,6 +222,18 @@ fn dispatch_request(
                 .lock()
                 .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
                 .set_difficulty(difficulty);
+            snapshot_response(&controller)
+        }
+        BridgeRequest::SetTimeLimit { time_limit_ms } => {
+            if !SUPPORTED_TIME_LIMITS_MS.contains(&time_limit_ms) {
+                return Err(BridgeError::invalid_request(
+                    "time_limit_ms must be 200, 500, 1000, 2000, or 5000.",
+                ));
+            }
+            controller
+                .lock()
+                .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
+                .set_time_limit_ms(time_limit_ms);
             snapshot_response(&controller)
         }
         BridgeRequest::SetThreads { threads } => {
@@ -284,6 +304,16 @@ fn parse_mode(value: Option<&str>) -> Result<GameMode, BridgeError> {
         Some("two_player") => Ok(GameMode::TwoPlayer),
         Some(_) => Err(BridgeError::invalid_request(
             "mode must be \"vs_engine\" or \"two_player\".",
+        )),
+    }
+}
+
+fn parse_clock_mode(value: Option<&str>) -> Result<SearchClockMode, BridgeError> {
+    match value {
+        None | Some("untimed") => Ok(SearchClockMode::Untimed),
+        Some("timed") => Ok(SearchClockMode::Timed),
+        Some(_) => Err(BridgeError::invalid_request(
+            "clock_mode must be \"untimed\" or \"timed\".",
         )),
     }
 }
@@ -445,6 +475,23 @@ mod tests {
         );
         assert_eq!(mt_off["ok"], true);
         assert_eq!(mt_off["state"]["params"]["threads"], 1);
+
+        let timed = response(
+            &registry,
+            handle,
+            r#"{"op":"new_game","human_side":"black","rule":"renju","mode":"vs_engine","clock_mode":"timed"}"#,
+        );
+        assert_eq!(timed["ok"], true);
+        assert_eq!(timed["state"]["params"]["clock_mode"], "timed");
+        assert_eq!(timed["state"]["params"]["time_limit_ms"], 500);
+
+        let time_updated = response(
+            &registry,
+            handle,
+            r#"{"op":"set_time_limit","time_limit_ms":2000}"#,
+        );
+        assert_eq!(time_updated["ok"], true);
+        assert_eq!(time_updated["state"]["params"]["time_limit_ms"], 2000);
     }
 
     #[test]
@@ -505,6 +552,14 @@ mod tests {
             ),
             (r#"{"op":"set_threads","threads":0}"#, "invalid_request"),
             (r#"{"op":"set_threads","threads":999}"#, "invalid_request"),
+            (
+                r#"{"op":"set_time_limit","time_limit_ms":750}"#,
+                "invalid_request",
+            ),
+            (
+                r#"{"op":"new_game","human_side":"black","rule":"renju","clock_mode":"blitz"}"#,
+                "invalid_request",
+            ),
         ] {
             let value = response(&registry, handle, request);
             assert_eq!(value["ok"], false, "{request}");
