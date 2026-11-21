@@ -23,10 +23,10 @@ use crate::search::{order_candidates_root_classic, TTEntry, TranspositionTable};
 use crate::threats::VCFSearcher;
 use crate::types::{Move, Side};
 
-pub(crate) const SUBPLY_TT_SCALE: u8 = 128;
-const SUBPLY_TT_SCALE_F64: f64 = 128.0;
-const SUBPLY_TT_DEPTH_CAP: i32 = 2800;
-const SUBPLY_TT_WIN_BONUS: i32 = 1280;
+pub(crate) const SUBPLY_TT_SCALE: u8 = 16;
+const SUBPLY_TT_SCALE_F64: f64 = 16.0;
+const SUBPLY_TT_DEPTH_CAP: i32 = 190;
+const SUBPLY_TT_WIN_BONUS: i32 = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RootCandidateProfile {
@@ -329,17 +329,13 @@ impl AlphaBetaSearcher {
             if depth <= 0.0 {
                 0
             } else {
-                ((depth * SUBPLY_TT_SCALE_F64).floor() as i32).clamp(1, SUBPLY_TT_DEPTH_CAP)
+                ((depth * SUBPLY_TT_SCALE_F64).ceil() as i32).clamp(1, SUBPLY_TT_DEPTH_CAP)
             }
         } else {
             depth as i32
         };
         let probe_depth = if subply_tt {
-            if depth <= 0.0 {
-                0
-            } else {
-                ((depth * SUBPLY_TT_SCALE_F64).ceil() as i32).clamp(1, SUBPLY_TT_DEPTH_CAP)
-            }
+            hash_depth
         } else {
             depth.ceil() as i32
         };
@@ -594,20 +590,11 @@ impl AlphaBetaSearcher {
             (false, 0)
         };
         let mut running_downf = options.downf;
-        let raw_depthdown = 0.0_f64.max(
+        let base_depthdown = 0.0_f64.max(
             1.0 - self.config.search.extend_ratio
                 + self.config.search.extend_ratio * (case_count.max(1) as f64).ln()
                     / (wide.max(2) as f64).ln(),
         );
-        // Quantize fractional depth reductions to exact 1/128-ply dyadic steps
-        // in multi-threaded mode so internal nodes hit exact same-depth TT
-        // entries while store=floor / probe=ceil remains strictly sound for all
-        // arbitrary f64 depths (a shallower entry can never cut off a deeper probe).
-        let base_depthdown = if subply_tt {
-            (raw_depthdown * SUBPLY_TT_SCALE_F64).round() / SUBPLY_TT_SCALE_F64
-        } else {
-            raw_depthdown
-        };
         let use_abdada = abdada.is_some() && depth >= ABDADA_MIN_DEPTH && search_limit > 1;
 
         #[derive(Clone, Copy)]
@@ -706,7 +693,7 @@ impl AlphaBetaSearcher {
                 if use_abdada && pass == 0 && index > 0 {
                     if let Some(ctx) = abdada {
                         let depth_tag =
-                            ((depth - depthdown).max(0.0) * SUBPLY_TT_SCALE_F64).floor() as u64;
+                            ((depth - depthdown).max(0.0) * SUBPLY_TT_SCALE_F64).ceil() as u64;
                         let child_key = board.zobrist_key_after(candidate.move_, side)
                             ^ depth_tag.wrapping_mul(0x9E37_79B9_7F4A_7C15);
                         if found_pv
@@ -998,12 +985,11 @@ impl AlphaBetaSearcher {
                 value: score_to_tt(current, options.ply),
                 flag: hash_flag,
                 depth: store_depth,
-                priority: priority_base * 10
-                    + if subply_tt {
-                        hash_depth / i32::from(SUBPLY_TT_SCALE)
-                    } else {
-                        hash_depth
-                    },
+                priority: if subply_tt {
+                    priority_base * 160 + hash_depth
+                } else {
+                    priority_base * 10 + hash_depth
+                },
                 best_move,
                 generation: self.tt_generation,
             });

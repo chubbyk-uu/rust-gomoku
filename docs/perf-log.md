@@ -938,13 +938,15 @@ from that unsound cutoff. Four reproduced bugs, all fixed with regressions:
    It works through every new `RootSearcher::with_tt`. `GameController::set_threads`
    also drops `search_tt` when crossing the 1T/MT boundary. Regression covers
    4→1 (hot result == cold 1T: move, score, nodes) and 1→4 on d4/w20 Freestyle.
-4. **Sub-ply TT floor/floor cutoff.** Now sound: store `floor(depth*128)`, probe
-   `ceil(depth*128)`. Fractional `base_depthdown` is rounded to 1/128-ply dyadic steps
-   (MT only), so internal-node depths stay exact and same-depth hits survive.
-   Shallower entries only give a move hint. TT packing widened: depth 12 bits,
-   priority 14 bits, generation 12 bits. Regression: `[[7,7],[7,6],[8,8],[6,6],[6,8],[5,8]]`,
-   2T, w12, VCF/VCT off. Cold `1.10` gives `[8,6]`/`9`, and warm `1.00 -> 1.10`
-   now searches (>1 node) with the same result.
+4. **Sub-ply TT floor/floor cutoff.** Now sound: use 1/16-ply `ceil(depth * 16.0)`
+   for sub-ply TT depth encoding (`1.00 -> 16 < 1.10 -> 18`, keeping `base_depthdown`
+   100% untouched so near-full-width branches never lose fractional extension plies)
+   and preserve full sub-ply depth in replacement priority (`priority_base * 160 + hash_depth`,
+   preventing shallower sub-ply entries from overwriting deeper sub-ply entries in
+   `slot 0` of the 2-way TT bucket). Shallower entries only give a move hint.
+   Regression: `[[7,7],[7,6],[8,8],[6,6],[6,8],[5,8]]`, 2T, w12, VCF/VCT off. Cold
+   `1.10` gives `[8,6]`/`9`, and warm `1.00 -> 1.10` now searches (>1 node) with the
+   same result.
 
 Verification: `cargo test` and the Android bridge pass, and 13/13 reference diffs
 pass (1T base unchanged).
@@ -964,16 +966,18 @@ to the Route B commit:
 | Threads | Move | Score | Nodes | Elapsed |
 | --- | --- | ---: | ---: | ---: |
 | 1T | `[8,1]` | 28 | 73,267,291 | 70,109 ms |
-| 4T | `[8,1]` | 27 | 16,701,957 | 6,488 ms (`10.8x`) |
-| 8T | `[8,1]` | 27 | 19,824,463 | 4,366 ms (`16.1x`) |
+| 4T | `[8,1]` | 29 | 10,708,913 | 4,441 ms (`15.8x`) |
+| 8T | `[8,1]` | 29 | 12,832,664 | 2,875 ms (`24.4x`) |
 
-100-game Renju `center_50_prefixes.jsonl` (`4T_sound_subply` vs `1T_base`, d8/w40,
+100-game Renju `center_50_prefixes.jsonl` (`4T_ceil16_prio` vs `1T_base`, d8/w40,
 `--reuse-engine-state`, 0 errors / 0 timeouts / 0 capped pairs):
 
-- Strength: `45-50-5`, **`47.50%`** (`-17.39 Elo`, 95% CI `[-68.7, +33.1]`;
-  pentanomial `WW=5, WD=2, WL/DD=33, LD=3, LL=7`). This is below the `>= 50%`
-  point gate. It is statistically indistinguishable from earlier 4T-vs-1T runs
-  (`47.5%`–`52.5%`), but it is not yet cleared for the recommended configuration.
-- Timing: 4T avg `492.5 ms` / median `237.0 ms` / p95 `1,873.1 ms` / max `11,351.7 ms`.
-  1T avg `1,505.9` / `662.2` / `6,104.1` / `28,868.4`. 4T is `3.06x` / `2.79x` /
-  `3.26x` / `2.54x` faster.
+- Strength: **`49-48-3` (`50.50%`, `+3.47 Elo`**, 95% CI `[-38.7, +45.8]`;
+  pentanomial `WW=4, WD=2, WL/DD=39, LD=1, LL=4`) — clears the `>= 50%` gate.
+  (An intermediate 1/128-ply build that truncated `priority` to `hash_depth / 128`
+  let shallower sub-ply entries overwrite deeper ones in `slot 0` and scored
+  `42-56-2` / `43.0%`; preserving `priority_base * 160 + hash_depth` immediately
+  restored `50.50%` and `4.44s` on `vct_dense_ply78`).
+- Timing: 4T avg **`358.8 ms`** / median **`160.4 ms`** / p95 **`1,289.8 ms`** /
+  max **`8,340.3 ms`** vs 1T avg `1,021.1 ms` / `404.0 ms` / `3,825.5 ms` /
+  `20,577.8 ms` (**`2.85x` / `2.52x` / `2.97x` / `2.47x`** faster).
