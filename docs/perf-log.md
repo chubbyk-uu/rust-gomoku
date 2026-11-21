@@ -938,15 +938,23 @@ from that unsound cutoff. Four reproduced bugs, all fixed with regressions:
    It works through every new `RootSearcher::with_tt`. `GameController::set_threads`
    also drops `search_tt` when crossing the 1T/MT boundary. Regression covers
    4→1 (hot result == cold 1T: move, score, nodes) and 1→4 on d4/w20 Freestyle.
-4. **Sub-ply TT floor/floor cutoff.** Now sound: use 1/16-ply `ceil(depth * 16.0)`
-   for sub-ply TT depth encoding (`1.00 -> 16 < 1.10 -> 18`, keeping `base_depthdown`
-   100% untouched so near-full-width branches never lose fractional extension plies)
-   and preserve full sub-ply depth in replacement priority (`priority_base * 160 + hash_depth`,
-   preventing shallower sub-ply entries from overwriting deeper sub-ply entries in
-   `slot 0` of the 2-way TT bucket). Shallower entries only give a move hint.
-   Regression: `[[7,7],[7,6],[8,8],[6,6],[6,8],[5,8]]`, 2T, w12, VCF/VCT off. Cold
-   `1.10` gives `[8,6]`/`9`, and warm `1.00 -> 1.10` now searches (>1 node) with the
-   same result.
+4. **Sub-ply TT floor/floor cutoff & d13+ depth-cap saturation.** Now strictly
+   sound up to 50 plies:
+   - Widened TT `depth` to 12 bits (`0..=4095`), kept `priority` at full 16 bits
+     (`0..=65535`), and set `generation` to 10 bits (`0..=1023`) inside the 64-bit
+     `RawEntry::data` word.
+   - Multi-threaded TT uses 1/64-ply `store = floor(depth * 64.0)` and
+     `probe = ceil(depth * 64.0)` with `SUBPLY_TT_DEPTH_CAP = 3200` (50 plies,
+     well above `timed_max_depth = 25`; `+640` win/loss bonus = `3840 <= 4095`),
+     floor-quantized `base_depthdown = floor(raw_depthdown * 64.0) / 64.0` (so
+     internal nodes hit exact same-depth TT entries without ever rounding
+     near-full-width reductions up to `1.0`), and full sub-ply replacement
+     priority `priority_base * 256 + hash_depth` (so shallower sub-ply entries
+     never overwrite deeper ones in `slot 0`).
+   - Regressions: `1.00 -> 1.10`, `1.563125 -> 1.625`, and `1.6095 -> 1.625`
+     never cut off deeper searches (`subply_tt_shallower_depth_never_cuts_off_deeper_search`),
+     and 2-thread `d14/w2` genuinely expands `d13` and `d14` matching `1T`
+     (`multithread_deep_search_above_d12_does_not_saturate_tt_depth_cap`).
 
 Verification: `cargo test` and the Android bridge pass, and 13/13 reference diffs
 pass (1T base unchanged).
@@ -966,18 +974,14 @@ to the Route B commit:
 | Threads | Move | Score | Nodes | Elapsed |
 | --- | --- | ---: | ---: | ---: |
 | 1T | `[8,1]` | 28 | 73,267,291 | 70,109 ms |
-| 4T | `[8,1]` | 29 | 10,708,913 | 4,441 ms (`15.8x`) |
-| 8T | `[8,1]` | 29 | 12,832,664 | 2,875 ms (`24.4x`) |
+| 4T | `[8,1]` | 29 | 17,737,980 | 6,456 ms (`10.9x`) |
+| 8T | `[8,1]` | 29 | 19,744,653 | 3,865 ms (`18.1x`) |
 
-100-game Renju `center_50_prefixes.jsonl` (`4T_ceil16_prio` vs `1T_base`, d8/w40,
+100-game Renju `center_50_prefixes.jsonl` (`4T_sound64_prio` vs `1T_base`, d8/w40,
 `--reuse-engine-state`, 0 errors / 0 timeouts / 0 capped pairs):
 
-- Strength: **`49-48-3` (`50.50%`, `+3.47 Elo`**, 95% CI `[-38.7, +45.8]`;
-  pentanomial `WW=4, WD=2, WL/DD=39, LD=1, LL=4`) — clears the `>= 50%` gate.
-  (An intermediate 1/128-ply build that truncated `priority` to `hash_depth / 128`
-  let shallower sub-ply entries overwrite deeper ones in `slot 0` and scored
-  `42-56-2` / `43.0%`; preserving `priority_base * 160 + hash_depth` immediately
-  restored `50.50%` and `4.44s` on `vct_dense_ply78`).
-- Timing: 4T avg **`358.8 ms`** / median **`160.4 ms`** / p95 **`1,289.8 ms`** /
-  max **`8,340.3 ms`** vs 1T avg `1,021.1 ms` / `404.0 ms` / `3,825.5 ms` /
-  `20,577.8 ms` (**`2.85x` / `2.52x` / `2.97x` / `2.47x`** faster).
+- Strength: **`50-47-3` (`51.50%`, `+10.43 Elo`**, 95% CI `[-33.7, +54.9]`;
+  pentanomial `WW=5, WD=2, WL/DD=38, LD=1, LL=4`) — clears the `>= 50%` gate.
+- Timing: 4T avg **`463.1 ms`** / median **`217.3 ms`** / p95 **`1,721.5 ms`** /
+  max **`11,102.6 ms`** vs 1T avg `1,410.9 ms` / `586.5 ms` / `5,709.0 ms` /
+  `26,465.7 ms` (**`3.05x` / `2.70x` / `3.32x` / `2.38x`** faster).

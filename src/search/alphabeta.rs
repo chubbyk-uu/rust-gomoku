@@ -23,10 +23,10 @@ use crate::search::{order_candidates_root_classic, TTEntry, TranspositionTable};
 use crate::threats::VCFSearcher;
 use crate::types::{Move, Side};
 
-pub(crate) const SUBPLY_TT_SCALE: u8 = 16;
-const SUBPLY_TT_SCALE_F64: f64 = 16.0;
-const SUBPLY_TT_DEPTH_CAP: i32 = 190;
-const SUBPLY_TT_WIN_BONUS: i32 = 64;
+pub(crate) const SUBPLY_TT_SCALE: u8 = 64;
+const SUBPLY_TT_SCALE_F64: f64 = 64.0;
+const SUBPLY_TT_DEPTH_CAP: i32 = 3200;
+const SUBPLY_TT_WIN_BONUS: i32 = 640;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RootCandidateProfile {
@@ -329,13 +329,17 @@ impl AlphaBetaSearcher {
             if depth <= 0.0 {
                 0
             } else {
-                ((depth * SUBPLY_TT_SCALE_F64).ceil() as i32).clamp(1, SUBPLY_TT_DEPTH_CAP)
+                ((depth * SUBPLY_TT_SCALE_F64).floor() as i32).clamp(1, SUBPLY_TT_DEPTH_CAP)
             }
         } else {
             depth as i32
         };
         let probe_depth = if subply_tt {
-            hash_depth
+            if depth <= 0.0 {
+                0
+            } else {
+                ((depth * SUBPLY_TT_SCALE_F64).ceil() as i32).clamp(1, SUBPLY_TT_DEPTH_CAP)
+            }
         } else {
             depth.ceil() as i32
         };
@@ -590,11 +594,21 @@ impl AlphaBetaSearcher {
             (false, 0)
         };
         let mut running_downf = options.downf;
-        let base_depthdown = 0.0_f64.max(
+        let raw_depthdown = 0.0_f64.max(
             1.0 - self.config.search.extend_ratio
                 + self.config.search.extend_ratio * (case_count.max(1) as f64).ln()
                     / (wide.max(2) as f64).ln(),
         );
+        // Floor-quantize fractional depth reductions to exact 1/64-ply dyadic
+        // steps in multi-threaded mode so internal nodes hit exact same-depth
+        // TT entries (floor == ceil) without ever rounding near-full-width
+        // reductions up to 1.0 (preserving fractional extension plies) while
+        // store=floor / probe=ceil remains strictly sound for all f64 depths.
+        let base_depthdown = if subply_tt {
+            (raw_depthdown * SUBPLY_TT_SCALE_F64).floor() / SUBPLY_TT_SCALE_F64
+        } else {
+            raw_depthdown
+        };
         let use_abdada = abdada.is_some() && depth >= ABDADA_MIN_DEPTH && search_limit > 1;
 
         #[derive(Clone, Copy)]
@@ -693,7 +707,7 @@ impl AlphaBetaSearcher {
                 if use_abdada && pass == 0 && index > 0 {
                     if let Some(ctx) = abdada {
                         let depth_tag =
-                            ((depth - depthdown).max(0.0) * SUBPLY_TT_SCALE_F64).ceil() as u64;
+                            ((depth - depthdown).max(0.0) * SUBPLY_TT_SCALE_F64).floor() as u64;
                         let child_key = board.zobrist_key_after(candidate.move_, side)
                             ^ depth_tag.wrapping_mul(0x9E37_79B9_7F4A_7C15);
                         if found_pv
@@ -986,7 +1000,7 @@ impl AlphaBetaSearcher {
                 flag: hash_flag,
                 depth: store_depth,
                 priority: if subply_tt {
-                    priority_base * 160 + hash_depth
+                    priority_base * 256 + hash_depth
                 } else {
                     priority_base * 10 + hash_depth
                 },
@@ -1092,7 +1106,7 @@ mod tests {
         let mut stats_same = SearchStats::default();
         let (same_score, same_move) = warm_searcher.search(
             &mut board.clone(),
-            &mut caches,
+            &mut caches.clone(),
             side,
             1.00,
             -INF,
@@ -1108,5 +1122,123 @@ mod tests {
         assert_eq!(stats_same.nodes, 1);
         assert_eq!(same_move, cold_move);
         assert_eq!(same_score, cold_score);
+
+        // Same 1/16 bucket (1.563125 -> 1.625) and same 1/64 bucket (1.6095 -> 1.625)
+        // must also never let a shallower search cut off a deeper search.
+        let mut board2 = board.clone();
+        board2
+            .play_for_rule(xy_to_move(9, 9).unwrap(), None, RuleSet::Freestyle)
+            .unwrap();
+        let mut caches2 = EvalCaches::new();
+        recompute_all_for_rule(&mut board2, &mut caches2, RuleSet::Freestyle);
+        let side2 = board2.side_to_move();
+
+        let mut cold_1625 = AlphaBetaSearcher::new(warm_searcher.config.clone());
+        let mut cold_1625_stats = SearchStats::default();
+        let (cold_1625_score, cold_1625_move) = cold_1625.search(
+            &mut board2.clone(),
+            &mut caches2.clone(),
+            side2,
+            1.625,
+            -INF,
+            INF,
+            12,
+            &mut cold_1625_stats,
+            SearchOptions {
+                opo: 1,
+                root: true,
+                ..SearchOptions::default()
+            },
+        );
+
+        for shallow_d in [1.563125, 1.6095] {
+            let mut warm_1625 = AlphaBetaSearcher::new(warm_searcher.config.clone());
+            let mut shallow_stats = SearchStats::default();
+            let (shallow_score, _) = warm_1625.search(
+                &mut board2.clone(),
+                &mut caches2.clone(),
+                side2,
+                shallow_d,
+                -INF,
+                INF,
+                12,
+                &mut shallow_stats,
+                SearchOptions {
+                    opo: 1,
+                    root: true,
+                    ..SearchOptions::default()
+                },
+            );
+            if shallow_d == 1.563125 {
+                assert_ne!(
+                    shallow_score, cold_1625_score,
+                    "shallow {shallow_d} should differ from 1.625 on this fixture"
+                );
+            }
+
+            let mut warm_1625_stats = SearchStats::default();
+            let (warm_1625_score, warm_1625_move) = warm_1625.search(
+                &mut board2.clone(),
+                &mut caches2.clone(),
+                side2,
+                1.625,
+                -INF,
+                INF,
+                12,
+                &mut warm_1625_stats,
+                SearchOptions {
+                    opo: 1,
+                    root: true,
+                    ..SearchOptions::default()
+                },
+            );
+            assert!(
+                warm_1625_stats.nodes > 1,
+                "shallower depth {shallow_d} must not cut off depth 1.625"
+            );
+            assert_eq!(warm_1625_move, cold_1625_move);
+            assert_eq!(warm_1625_score, cold_1625_score);
+        }
+    }
+
+    #[test]
+    fn multithread_deep_search_above_d12_does_not_saturate_tt_depth_cap() {
+        let mut board = Board::new();
+        board
+            .play_for_rule(xy_to_move(7, 7).unwrap(), None, RuleSet::Freestyle)
+            .unwrap();
+        let limits = crate::search::SearchLimits {
+            max_depth: 14,
+            root_width: 2,
+            node_limit: None,
+            time_limit_ms: None,
+        };
+
+        let mut cfg_1t = load_default_config();
+        cfg_1t.rule_set = RuleSet::Freestyle;
+        cfg_1t.runtime.threads = 1;
+        cfg_1t.runtime.compute_vcf = false;
+        cfg_1t.runtime.compute_vct = false;
+        let mut s1 = crate::search::RootSearcher::new(cfg_1t.clone());
+        let res_1t = s1.search(&mut board.clone(), Some(limits));
+
+        let mut cfg_2t = cfg_1t;
+        cfg_2t.runtime.threads = 2;
+        cfg_2t.runtime.root_profile = true;
+        let mut s2 = crate::search::RootSearcher::new(cfg_2t);
+        let res_2t = s2.search(&mut board, Some(limits));
+        assert_eq!(res_2t.depth, 14);
+        assert_eq!(res_2t.score, res_1t.score);
+        let trace = s2.last_trace.as_ref().expect("trace recorded");
+        assert_eq!(trace.root_profiles.len(), 14);
+        for d in [13, 14] {
+            let prof = &trace.root_profiles[(d - 1) as usize];
+            assert_eq!(prof.depth, d);
+            assert!(
+                prof.nodes > 10,
+                "depth {d} should genuinely expand tree, got only {} nodes",
+                prof.nodes
+            );
+        }
     }
 }
