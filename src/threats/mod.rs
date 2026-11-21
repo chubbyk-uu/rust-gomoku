@@ -1,5 +1,6 @@
 //! Threat-search helpers aligned with the classic reference.
 
+pub(crate) mod pattern4;
 pub mod threat_board;
 pub mod types;
 pub mod vcf;

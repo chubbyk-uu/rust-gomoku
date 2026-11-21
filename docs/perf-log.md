@@ -21,7 +21,7 @@ Current active target:
   - Serial root `VCT6` remains single-threaded and uncapped in untimed mode, dominating dense 70+-ply moves even with 4T ABDADA enabled (timed mode already caps root VCT to 30% of remaining move time).
   - Candidate directions to evaluate later (check `AGENTS.md` rules before modifying base):
     1. **Route A (low risk)**: evaluate an explicit node/time cap for untimed root VCT (or compare `root_vct_depth = 4` vs `6` strength/latency tradeoff).
-    2. **Route B (behavior-equivalent speedup)**: replace `ThreatBoardView` board scans/trial plays with a Rapfi-style incremental 4-direction `Pattern4` bitboard/LUT so `collect_attack_moves` / `first_counter_win` / `forcing_threat_moves` become O(1) lookups (avoiding the previously rejected `play()`-only `win_moves`/`line_counts` overhead).
+    2. **Route B (behavior-equivalent speedup — DONE on `feat/threat-pattern4-bitboard`)**: replaced `ThreatBoardView` board scans and quiet trial plays with a Rapfi-style incremental 4-direction `Pattern4` bitboard/LUT (`6.65x–9.33x` VCT6 speedup across dense Renju cases; see 2026-11-21 entry below).
     3. **Route C (experimental branch)**: upgrade `VCTSearcher` from IDDFS to `df-pn` (proof-number search with TT), validated for zero Renju false positives.
 
 ## 2026-11-19 (3) — Incremental `dgn`, sparse `bucket_dot`, deferred rest-sort, and 4-line direct `value_wide_compute`
@@ -785,3 +785,74 @@ Decision:
 - Enable interactive default `default_interactive_threads()` (`4` on `>= 4` cores
   with `64 MiB TT`, `min(2, cores)` on `< 4` cores with `32 MiB TT`) in desktop
   GUI (`gomoku_gui`) and Android JNI bridge.
+
+### 2026-11-21: Route B — Incremental 4-direction `Pattern4` bitboard/LUT for `ThreatBoardView` / VCT / VCF (`feat/threat-pattern4-bitboard`)
+
+Hotspot evidence & target:
+
+- Prior VCT/VCF profiles (`2026-07-02` + dense late-game Renju probes) showed
+  `ThreatBoardView::threat_moves`, `collect_attack_moves`, `first_counter_win`,
+  and `collect_counter_forcing_defenses` running ~100 quiet trial `play/undo`
+  cycles per OR/AND node. That trial-play dominance is also why earlier
+  `play()`-only incremental bitsets regressed (`+52.7%`).
+- Target: achieve a major behavior-equivalent speedup on dense VCT6 positions
+  (`cases/renju/vct_dense_ply78.json`, `cases/renju/vct_counter_win_scan_ply75.json`,
+  `target/match-results/vct_slow_probe_case.json`) without altering moves,
+  scores, or reference diff baselines.
+
+Modification scope:
+
+- Added `src/threats/pattern4.rs`: 88 padded 2-bit-per-cell `u64` lines, a
+  59,049-entry (`3^10`) ternary LUT for exact ±5 1D patterns (`Win5`, `Overline`,
+  `A4`, `DoubleFour1D`, `B4` + exact reply offset, `A3` + exact gain/completion
+  offsets with multi-window ambiguity fallback), column-major `BitBoard225`
+  threat masks (`win5_bits`, `a4_bits`, `b4_bits`, `a3_bits`), and O(1)
+  `fast_rule_legal_empty` (calling `rule_legal_cached` only on Renju Black
+  `maybe_33` candidates).
+- Updated `src/threats/threat_board.rs`, `src/threats/vct.rs`, and
+  `src/threats/vcf.rs`: eliminated quiet trial plays in `first_counter_win`,
+  `broken_four_point_for_side`, `collect_attack_moves` (including zero-`play/undo`
+  `try_a3_defense_info_fast` with slow fallback on orthogonal interaction or
+  multi-window lines), `winning_threat_moves`, `forcing_threat_moves`,
+  `has_vct_trigger_for_rule`, `vct::collect_counter_forcing_defenses`,
+  `vct::a4_attack_wins_immediately`, `vct::search_defense_stage` instant
+  refutations, and `vcf::search_attacker`; replaced per-AND-node `HashSet<Move>`
+  with stack `MoveSet225` and removed unused `adjacency` tracking from
+  `ThreatBoardView`.
+- Added fixture `cases/renju/vct_dense_ply78.json` (78-ply dense Renju game).
+
+Net-benefit hypothesis & stop-loss:
+
+- Added cost: incremental ±5 neighbor LUT updates on real tree `play/undo`
+  (4 axes × ≤10 empty cells, zero-allocation bit shifts + table lookups).
+- Saved cost: eliminates ~20x–30x quiet trial `play/undo` calls per node,
+  per-node board scans, per-AND-node `HashSet<Move>` allocations, and repeated
+  Renju forbidden checks on non-`3-3` squares.
+- Stop-loss: revert if net VCT6 speedup < `2x` or if any fixed case / 13-case
+  reference diff regressed.
+
+Correctness & equivalence verification:
+
+- `cargo fmt --check`, `git diff --check`: clean.
+- `cargo test` + `android/rust_bridge` tests: all passed, including new random
+  oracle tests (`incremental_play_undo_matches_fresh_rebuild_for_both_rules`,
+  `pattern4_win5_a4_b4_and_b4_reply_match_threat_board_oracle` [2,000 boards],
+  `fast_a3_defense_info_matches_slow_oracle_for_both_rules` [1,600 boards], and
+  `counter_forcing_defenses_match_legacy_trial_oracle_for_freestyle` [400 boards]).
+- `python3 scripts/run_diff.py --profile all --check-baselines --jobs 8`: **13/13
+  passed**.
+
+A/B VCT6 timing comparison (`case_probe --rule renju --depth 1 --width 10`,
+release build, 3-run median vs `master` `cbd0a7c`):
+
+| Case | Baseline (`cbd0a7c`) | Route B (median) | Speedup | Move / Score / VCT Stats |
+| --- | ---: | ---: | ---: | --- |
+| `cases/renju/vct_dense_ply78.json` | `1555.0 ms` | **`166.6 ms`** | **`9.33x`** | **100% bit-identical** (`[10,10]`, `68`, `or: 164,384`, `and: 252,506`, `atk: 272,226`, `def: 252,506`, `memo: 37,047 / 0 / 19,720`) |
+| `cases/renju/vct_counter_win_scan_ply75.json` | `2659.1 ms` | **`339.6 ms`** | **`7.83x`** | **100% bit-identical** (`[7,1]`, `24`, `or: 385,483`, `and: 511,034`, `atk: 526,615`, `def: 511,802`, `memo: 61,702 / 18 / 2,713`) |
+| `target/match-results/vct_slow_probe_case.json` | `3491.9 ms` | **`525.3 ms`** | **`6.65x`** | `move [8,13]`, `score 59`, `and: 648,797`, `memo: 58,537 / 838 / 25,222` identical; `or/def` `-24` (`478,893` vs `478,917`) from excluding 24 fake Renju-Black overline fours previously miscounted as `counter_b4` |
+| **3-case total** | **`7,706.0 ms`** | **`1,031.5 ms`** | **`7.47x`** | — |
+
+Note on untimed Master `d8/w40` on `vct_dense_ply78.json`: VCT6 is now `~165–184 ms`
+(`0.3%` of total), while uncapped `d8/w40` Alpha-Beta itself still takes `67.6s`
+(`1T`) / `48.2s` (`4T`, `208M` nodes). In timed mode (e.g. `2s`/move), full VCT6
+now completes inside `~0.17s` instead of hitting the 30% sub-budget cap.

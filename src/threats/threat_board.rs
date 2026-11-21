@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use crate::board::{move_to_xy, xy_to_move, Board};
 use crate::constants::{BLACK, BOARD_SIZE, EMPTY};
 use crate::rules::RuleSet;
+use crate::threats::pattern4::{col_major_idx, idx_to_move, idx_to_xy, Pattern4State, P1};
 use crate::threats::types::{AttackMove, ThreatLevel};
 use crate::types::{Move, Side};
 
@@ -150,11 +151,6 @@ impl ThreatLine {
         crate::patterns::line::scan_a4(&self.cells, point_index)
     }
 
-    fn has_a4_with_stone(mut self, point_index: usize, side: Side) -> bool {
-        self.cells[point_index + 2] = i32::from(side);
-        self.a4(point_index) > 0
-    }
-
     fn a6(&self, point_index: usize) -> i32 {
         crate::patterns::line::scan_a6(&self.cells, point_index)
     }
@@ -252,51 +248,9 @@ pub struct ThreatBoardView {
     /// no invalidation across play/undo. Freestyle and white are never cached
     /// (their legality is a cheap empty/winner check).
     legality_cache: RefCell<Option<Box<LegalityCache>>>,
-    /// Per-side count of own stones inside each empty point's `THREAT_DIRS`
-    /// neighborhood, maintained incrementally on `play`/`undo`. Slot 0 = black,
-    /// slot 1 = white; index = `x * BOARD_SIZE + y`. `threat_moves` uses
-    /// `adjacency[slot][idx] > 0` instead of rescanning the 16 neighbor cells,
-    /// which is the dominant VCT/VCF hot spot. This tracks *adjacency only*; the
-    /// Renju forbidden-move legality of a candidate is still checked per output
-    /// via `rule_legal_cached`.
-    adjacency: [[u8; BOARD_SIZE * BOARD_SIZE]; 2],
-}
-
-#[inline]
-fn adjacency_slot(side: Side) -> usize {
-    if side == BLACK {
-        0
-    } else {
-        1
-    }
-}
-
-#[inline]
-fn adjacency_index(x: usize, y: usize) -> usize {
-    x * BOARD_SIZE + y
-}
-
-/// Add (`add = true`) or remove (`add = false`) a `side` stone at `(x, y)` from
-/// the adjacency counts. Because `THREAT_DIRS` is symmetric, the empty points
-/// that see this stone as a neighbor are exactly `(x, y) + off` for every `off`
-/// in `THREAT_DIRS`.
-fn bump_adjacency_array(
-    adjacency: &mut [[u8; BOARD_SIZE * BOARD_SIZE]; 2],
-    x: usize,
-    y: usize,
-    side: Side,
-    add: bool,
-) {
-    let slot = adjacency_slot(side);
-    let size = BOARD_SIZE as isize;
-    for (dx, dy) in THREAT_DIRS {
-        let nx = x as isize + dx;
-        let ny = y as isize + dy;
-        if nx >= 0 && ny >= 0 && nx < size && ny < size {
-            let cell = &mut adjacency[slot][adjacency_index(nx as usize, ny as usize)];
-            *cell = if add { *cell + 1 } else { *cell - 1 };
-        }
-    }
+    /// Incremental 4-direction pattern and 225-bit threat bitsets, eliminating
+    /// full-board scans and quiet trial plays in VCT/VCF hot paths.
+    pub(crate) pat4: Pattern4State,
 }
 
 impl ThreatBoardView {
@@ -338,15 +292,7 @@ impl ThreatBoardView {
                 }
             }
         }
-        let mut adjacency = [[0u8; BOARD_SIZE * BOARD_SIZE]; 2];
-        for x in 0..size {
-            for y in 0..size {
-                let value = grid[y][x];
-                if value != EMPTY {
-                    bump_adjacency_array(&mut adjacency, x, y, value, true);
-                }
-            }
-        }
+        let pat4 = Pattern4State::from_board(&board, rule_set);
         Self {
             board,
             x1,
@@ -356,17 +302,12 @@ impl ThreatBoardView {
             rule_set,
             previous_sides: Vec::new(),
             legality_cache: RefCell::new(legality_cache),
-            adjacency,
+            pat4,
         }
     }
 
     pub(crate) fn take_legality_cache(&mut self) -> Option<Box<LegalityCache>> {
         self.legality_cache.get_mut().take()
-    }
-
-    #[inline]
-    fn bump_adjacency(&mut self, x: usize, y: usize, side: Side, add: bool) {
-        bump_adjacency_array(&mut self.adjacency, x, y, side, add);
     }
 
     fn lines_for(
@@ -413,7 +354,7 @@ impl ThreatBoardView {
             .expect("threat board play should stay legal");
         let (x, y) = move_to_xy(move_).expect("move stays in range");
         self.set_point(x, y, side);
-        self.bump_adjacency(x, y, side, true);
+        self.pat4.play(move_, side);
     }
 
     pub fn undo(&mut self) {
@@ -427,26 +368,55 @@ impl ThreatBoardView {
             .expect("tracked previous side remains valid");
         let (x, y) = move_to_xy(played.move_).expect("move stays in range");
         self.set_point(x, y, EMPTY);
-        self.bump_adjacency(x, y, played.side, false);
+        self.pat4.undo(played.move_);
+    }
+
+    /// O(1) legality check for a known-empty cell on a non-terminal board using
+    /// `Pattern4State`, falling back to `rule_legal_cached` only for Renju Black
+    /// double-three (`maybe_33`) candidates.
+    #[inline]
+    pub(crate) fn fast_rule_legal_empty(&self, move_: Move, idx: usize, side: Side) -> bool {
+        if self.rule_set != RuleSet::Renju || side != BLACK {
+            return true;
+        }
+        let pat = self.pat4.cell_pattern(BLACK, idx);
+        if pat.is_win5() {
+            return true;
+        }
+        if pat.is_forbidden_definite() {
+            return false;
+        }
+        if !pat.maybe_33() {
+            return true;
+        }
+        self.rule_legal_cached(move_, BLACK)
     }
 
     pub fn threat_moves(&self, side: Side) -> Vec<Move> {
+        if self.board.winner() != EMPTY {
+            return Vec::new();
+        }
         let size = self.board.size();
         let grid = self.board.grid_rows();
-        let slot = adjacency_slot(side);
         let mut candidates = Vec::new();
         for x in 0..size {
             for y in 0..size {
                 if grid[y][x] != EMPTY {
                     continue;
                 }
-                // `adjacency[slot][idx] > 0` is exactly "some `THREAT_DIRS`
-                // neighbor holds a `side` stone", maintained incrementally so
-                // this replaces the per-point 16-neighbor rescan. Legality is
-                // still verified per candidate below.
-                if self.adjacency[slot][adjacency_index(x, y)] > 0 {
+                let has_neighbor = THREAT_DIRS.iter().any(|&(dx, dy)| {
+                    let nx = x as isize + dx;
+                    let ny = y as isize + dy;
+                    nx >= 0
+                        && ny >= 0
+                        && nx < size as isize
+                        && ny < size as isize
+                        && grid[ny as usize][nx as usize] == side
+                });
+                if has_neighbor {
                     let move_ = xy_to_move(x, y).expect("threat move stays valid");
-                    if self.rule_legal_cached(move_, side) {
+                    let idx = col_major_idx(x, y);
+                    if self.fast_rule_legal_empty(move_, idx, side) {
                         candidates.push(move_);
                     }
                 }
@@ -463,53 +433,24 @@ impl ThreatBoardView {
         if self.board.winner() != EMPTY {
             return None;
         }
-        let slot = adjacency_slot(side);
-        // Match threat_moves' order. An immediate counter-win refutes the
-        // attack on its own, so later counter-wins need not be collected.
-        for x in 0..self.board.size() {
-            for y in 0..self.board.size() {
-                if self.board.grid_rows()[y][x] != EMPTY
-                    || self.adjacency[slot][adjacency_index(x, y)] == 0
-                {
-                    continue;
-                }
-                let move_ = xy_to_move(x, y).expect("threat move stays valid");
-                // Renju black exact-five has priority over every forbidden
-                // shape. A rule-aware five is sufficient without a trial move.
-                if self
-                    .board
-                    .is_winning_move_for_rule(x, y, side, self.rule_set)
-                {
-                    return Some(move_);
-                }
-                if include_open_four && self.lays_winning_open_four(x, y, move_, side) {
-                    return Some(move_);
-                }
+        let win5_idx = self.pat4.win5_bits(side).first_idx();
+        if !include_open_four {
+            return win5_idx.map(idx_to_move);
+        }
+        let limit = win5_idx.unwrap_or(usize::MAX);
+        for idx in self.pat4.a4_bits(side).iter_indices() {
+            if idx >= limit {
+                break;
+            }
+            if !self.pat4.cell_pattern(side, idx).has_straight_a4() {
+                continue;
+            }
+            let move_ = idx_to_move(idx);
+            if self.fast_rule_legal_empty(move_, idx, side) {
+                return Some(move_);
             }
         }
-        None
-    }
-
-    fn lays_winning_open_four(&mut self, x: usize, y: usize, move_: Move, side: Side) -> bool {
-        let (l1, l2, l3, l4, p1, p2, p3, p4) = self.lines_for(x, y);
-        let raw_open_four = l1.has_a4_with_stone(p1, side)
-            || l2.has_a4_with_stone(p2, side)
-            || l3.has_a4_with_stone(p3, side)
-            || l4.has_a4_with_stone(p4, side);
-        if !raw_open_four {
-            return false;
-        }
-        if self.rule_set != RuleSet::Renju || side != BLACK {
-            return true;
-        }
-        if !self.rule_legal_cached(move_, side) {
-            return false;
-        }
-        self.play(move_, side);
-        // The apparent four can have an endpoint that would be an overline.
-        let wins = self.legal_win_completions(x, y, side).len() >= 2;
-        self.undo();
-        wins
+        win5_idx.map(idx_to_move)
     }
 
     pub fn has_a4(&self, x: usize, y: usize) -> bool {
@@ -769,58 +710,18 @@ impl ThreatBoardView {
     }
 
     pub fn broken_four_point_for_side(&self, side: Side) -> (Option<Move>, bool) {
-        if self.rule_set != RuleSet::Freestyle {
-            return self.broken_four_legal_point_for_side(side);
+        if self.board.winner() != EMPTY {
+            return (None, false);
         }
-        let grid = self.board.grid_rows();
-        let size = self.board.size();
-        let mut first_reply = None;
-        for x in 0..size {
-            for y in 0..size {
-                if grid[y][x] != side {
-                    continue;
-                }
-                let (reply, local_ambiguous) = self.broken_four_reply_with_ambiguity(x, y);
-                if reply.is_none() {
-                    continue;
-                }
-                if local_ambiguous {
-                    return (reply, true);
-                }
-                if first_reply.is_none() {
-                    first_reply = reply;
-                } else if reply != first_reply {
-                    return (reply, true);
-                }
-            }
-        }
-        (first_reply, false)
+        let bits = self.pat4.win5_bits(side);
+        let Some(first) = bits.first_idx() else {
+            return (None, false);
+        };
+        (Some(idx_to_move(first)), bits.count() > 1)
     }
 
     pub fn broken_four_legal_point_for_side(&self, side: Side) -> (Option<Move>, bool) {
-        let grid = self.board.grid_rows();
-        let size = self.board.size();
-        let mut first_reply = None;
-        for x in 0..size {
-            for y in 0..size {
-                if grid[y][x] != side {
-                    continue;
-                }
-                let replies = self.broken_four_legal_replies_for_side(x, y, side);
-                let Some(reply) = replies.first() else {
-                    continue;
-                };
-                if replies.len() > 1 {
-                    return (Some(reply), true);
-                }
-                if first_reply.is_none() {
-                    first_reply = Some(reply);
-                } else if first_reply != Some(reply) {
-                    return (Some(reply), true);
-                }
-            }
-        }
-        (first_reply, false)
+        self.broken_four_point_for_side(side)
     }
 
     pub fn a3_gain_squares(&self, x: usize, y: usize) -> Vec<Move> {
@@ -872,14 +773,24 @@ impl ThreatBoardView {
         let defender = -attacker;
         let gains = self.a3_gain_squares(x, y);
         let mut info = A3DefenseInfo::default();
+        let pre_win5_empty = self.pat4.win5_bits(attacker).is_empty();
         for gain in gains {
-            if !self.rule_legal_cached(gain, attacker) {
+            let (gx, gy) = move_to_xy(gain).expect("gain stays valid");
+            let gidx = col_major_idx(gx, gy);
+            if !self.fast_rule_legal_empty(gain, gidx, attacker) {
                 continue;
             }
-            let gain_is_defense = self.rule_legal_cached(gain, defender);
+            let gain_is_defense = self.fast_rule_legal_empty(gain, gidx, defender);
             self.play(gain, attacker);
-            let (gx, gy) = move_to_xy(gain).expect("gain stays valid");
-            let completions = self.legal_win_completions(gx, gy, attacker);
+            let completions: Vec<Move> = if pre_win5_empty {
+                self.pat4
+                    .win5_bits(attacker)
+                    .iter_indices()
+                    .map(idx_to_move)
+                    .collect()
+            } else {
+                self.legal_win_completions(gx, gy, attacker)
+            };
             let real_gain = self.board.winner() == attacker || completions.len() >= 2;
             self.undo();
             if !real_gain {
@@ -890,7 +801,9 @@ impl ThreatBoardView {
                 Self::push_unique_move(&mut info.defenses, gain);
             }
             for completion in completions {
-                if self.rule_legal_cached(completion, defender) {
+                let (cx, cy) = move_to_xy(completion).expect("completion stays valid");
+                let cidx = col_major_idx(cx, cy);
+                if self.fast_rule_legal_empty(completion, cidx, defender) {
                     Self::push_unique_move(&mut info.defenses, completion);
                 }
             }
@@ -1117,46 +1030,257 @@ impl ThreatBoardView {
         !self.legal_win_completions(x, y, BLACK).is_empty()
     }
 
-    pub fn collect_attack_moves(&mut self, attacker: Side) -> Vec<AttackMove> {
-        let moves = self.threat_moves(attacker);
-        let mut attacks = Vec::new();
-        for move_ in moves {
-            self.play(move_, attacker);
-            let (x, y) = move_to_xy(move_).expect("move stays valid");
-            let attack = self.classify_attack_at(x, y, attacker, move_);
-            self.undo();
-            if let Some(attack) = attack {
-                attacks.push(attack);
+    /// Zero-`play/undo` A3 defense computation using `Pattern4State::a3_line_defenses`.
+    /// Returns `None` only in the rare case where `gain` interacts with another
+    /// axis (e.g. creates an extra four/win on an orthogonal axis, or requires
+    /// recursive Renju 3-3 legality checks on `gain`/`completions`).
+    fn try_a3_defense_info_fast(
+        &self,
+        x: usize,
+        y: usize,
+        idx: usize,
+        attacker: Side,
+    ) -> Option<A3DefenseInfo> {
+        let defender = -attacker;
+        let renju = self.rule_set == RuleSet::Renju;
+        let mut info = A3DefenseInfo::default();
+        for dir in 0..4 {
+            if self.pat4.p1_code(attacker, idx, dir) != P1::A3 {
+                continue;
+            }
+            let def = self.pat4.a3_line_defenses(attacker, idx, dir);
+            if def.is_ambiguous() {
+                return None;
+            }
+            let (dx, dy) = Pattern4State::dir_step(dir);
+            // `scan_a3`'s `comc(1, left, right)` packs `right` (larger offset)
+            // in the low byte (`ga`) and `left` in `gb`; `x4` (dir 3) scans along
+            // `(-1, -1)`, opposite to `DIR_STEPS[3] = (1, 1)`.
+            let gain_order: [usize; 2] = if dir == 3 { [0, 1] } else { [1, 0] };
+            for gi in gain_order {
+                let g_off = def.gains[gi];
+                if g_off == 0 {
+                    continue;
+                }
+                let gx = (x as isize + dx * g_off as isize) as usize;
+                let gy = (y as isize + dy * g_off as isize) as usize;
+                let gidx = col_major_idx(gx, gy);
+                let gain = xy_to_move(gx, gy).expect("gain stays valid");
+
+                // Check orthogonal axes of `gain` for attacker:
+                // - For Renju Black: overline/four makes `gain` illegal (4-4/overline),
+                //   win5 or >=2 orthogonal A3s fall back to exact slow check.
+                // - For Freestyle / Renju White: any orthogonal B4/A4/Win5 adds extra
+                //   completions beyond `[c0, c1]`, so fall back to exact slow check.
+                if renju && attacker == BLACK {
+                    match self.pat4.renju_black_a3_gain_legality(gidx, dir) {
+                        Some(true) => {
+                            // If `gain` also wins on an orthogonal axis, fall back so
+                            // `completions` stays exact.
+                            if self.pat4.cell_pattern(BLACK, gidx).is_win5() {
+                                return None;
+                            }
+                        }
+                        Some(false) => continue,
+                        None => return None,
+                    }
+                } else {
+                    for other_dir in 0..4 {
+                        if other_dir == dir {
+                            continue;
+                        }
+                        if matches!(
+                            self.pat4.p1_code(attacker, gidx, other_dir),
+                            P1::B4 | P1::A4 | P1::DoubleFour1D | P1::Win5
+                        ) {
+                            return None;
+                        }
+                    }
+                }
+
+                // Decode the two open-four completions in column-major order.
+                let c0_off = def.completions[gi][0];
+                let c1_off = def.completions[gi][1];
+                let c0x = (x as isize + dx * c0_off as isize) as usize;
+                let c0y = (y as isize + dy * c0_off as isize) as usize;
+                let c1x = (x as isize + dx * c1_off as isize) as usize;
+                let c1y = (y as isize + dy * c1_off as isize) as usize;
+                let mut c0_idx = col_major_idx(c0x, c0y);
+                let mut c1_idx = col_major_idx(c1x, c1y);
+                let mut c0 = xy_to_move(c0x, c0y).expect("completion stays valid");
+                let mut c1 = xy_to_move(c1x, c1y).expect("completion stays valid");
+                if c1_idx < c0_idx {
+                    std::mem::swap(&mut c0_idx, &mut c1_idx);
+                    std::mem::swap(&mut c0, &mut c1);
+                }
+
+                // If defender is Renju Black, placing White at (x, y) blocks `dir`,
+                // which can change Black's forbiddenness at `gain`/`c0`/`c1` ONLY
+                // if Black had a win5, definite forbidden, or maybe_33 there beforehand.
+                if renju && defender == BLACK {
+                    for &d_idx in &[gidx, c0_idx, c1_idx] {
+                        let dpat = self.pat4.cell_pattern(BLACK, d_idx);
+                        if dpat.is_win5() || dpat.is_forbidden_definite() || dpat.maybe_33() {
+                            return None;
+                        }
+                    }
+                }
+
+                info.has_real_gain = true;
+                Self::push_unique_move(&mut info.defenses, gain);
+                Self::push_unique_move(&mut info.defenses, c0);
+                Self::push_unique_move(&mut info.defenses, c1);
             }
         }
-        attacks.sort_by_key(|attack| std::cmp::Reverse(attack.level));
+        Some(info)
+    }
+
+    pub fn collect_attack_moves(&mut self, attacker: Side) -> Vec<AttackMove> {
+        if self.board.winner() != EMPTY {
+            return Vec::new();
+        }
+        // Rare path: attacker already has an existing five-point on the board.
+        // Fall back to the full classifier so `attacks_generated` counts stay
+        // bit-identical even if pre-existing five-points lie on attack lines.
+        if !self.pat4.win5_bits(attacker).is_empty() {
+            let moves = self.threat_moves(attacker);
+            let mut attacks = Vec::new();
+            for move_ in moves {
+                self.play(move_, attacker);
+                let (x, y) = move_to_xy(move_).expect("move stays valid");
+                let attack = self.classify_attack_at(x, y, attacker, move_);
+                self.undo();
+                if let Some(attack) = attack {
+                    attacks.push(attack);
+                }
+            }
+            attacks.sort_by_key(|attack| std::cmp::Reverse(attack.level));
+            return attacks;
+        }
+
+        let defender = -attacker;
+        let a4_bits = self.pat4.a4_bits(attacker);
+        let b4_bits = self.pat4.b4_bits(attacker);
+        let a3_bits = self.pat4.a3_bits(attacker);
+
+        let total_cap = (a4_bits.count() + b4_bits.count() + a3_bits.count()) as usize;
+        let mut attacks = Vec::with_capacity(total_cap);
+
+        if self.rule_set == RuleSet::Renju && defender == BLACK {
+            let mut b4_attacks = Vec::with_capacity(b4_bits.count() as usize);
+            for idx in a4_bits.union(b4_bits).iter_indices() {
+                let move_ = idx_to_move(idx);
+                if !self.fast_rule_legal_empty(move_, idx, attacker) {
+                    continue;
+                }
+                if a4_bits.contains(idx) {
+                    attacks.push(AttackMove {
+                        move_,
+                        level: ThreatLevel::A4,
+                        defenses: Vec::new(),
+                    });
+                } else if let Some(reply) = self.pat4.b4_reply_move(attacker, idx) {
+                    let (rx, ry) = move_to_xy(reply).expect("reply stays valid");
+                    let ridx = col_major_idx(rx, ry);
+                    if self.fast_rule_legal_empty(reply, ridx, defender) {
+                        b4_attacks.push(AttackMove {
+                            move_,
+                            level: ThreatLevel::B4,
+                            defenses: vec![reply],
+                        });
+                    } else {
+                        attacks.push(AttackMove {
+                            move_,
+                            level: ThreatLevel::A4,
+                            defenses: Vec::new(),
+                        });
+                    }
+                }
+            }
+            attacks.extend(b4_attacks);
+        } else {
+            for idx in a4_bits.iter_indices() {
+                let move_ = idx_to_move(idx);
+                if self.fast_rule_legal_empty(move_, idx, attacker) {
+                    attacks.push(AttackMove {
+                        move_,
+                        level: ThreatLevel::A4,
+                        defenses: Vec::new(),
+                    });
+                }
+            }
+            for idx in b4_bits.iter_indices() {
+                let move_ = idx_to_move(idx);
+                if !self.fast_rule_legal_empty(move_, idx, attacker) {
+                    continue;
+                }
+                if let Some(reply) = self.pat4.b4_reply_move(attacker, idx) {
+                    attacks.push(AttackMove {
+                        move_,
+                        level: ThreatLevel::B4,
+                        defenses: vec![reply],
+                    });
+                }
+            }
+        }
+
+        for idx in a3_bits.iter_indices() {
+            let move_ = idx_to_move(idx);
+            if !self.fast_rule_legal_empty(move_, idx, attacker) {
+                continue;
+            }
+            let (x, y) = idx_to_xy(idx);
+            let a3 = if let Some(fast) = self.try_a3_defense_info_fast(x, y, idx, attacker) {
+                fast
+            } else {
+                self.play(move_, attacker);
+                let slow = self.a3_defense_info(x, y, attacker);
+                self.undo();
+                slow
+            };
+            if a3.has_real_gain {
+                attacks.push(AttackMove {
+                    move_,
+                    level: ThreatLevel::A3,
+                    defenses: a3.defenses,
+                });
+            }
+        }
+
         attacks
     }
 
     pub fn winning_threat_moves(&mut self, side: Side) -> Vec<Move> {
-        let moves = self.threat_moves(side);
+        if self.board.winner() != EMPTY {
+            return Vec::new();
+        }
+        let candidates = self.pat4.win5_bits(side).union(self.pat4.a4_bits(side));
         let mut wins = Vec::new();
-        for move_ in moves {
-            self.play(move_, side);
-            let (x, y) = move_to_xy(move_).expect("move stays valid");
-            if self.board.winner() == side || self.has_a4(x, y) {
+        for idx in candidates.iter_indices() {
+            if !self.pat4.win5_bits(side).contains(idx)
+                && !self.pat4.cell_pattern(side, idx).has_straight_a4()
+            {
+                continue;
+            }
+            let move_ = idx_to_move(idx);
+            if self.fast_rule_legal_empty(move_, idx, side) {
                 wins.push(move_);
             }
-            self.undo();
         }
         wins
     }
 
     pub fn forcing_threat_moves(&mut self, side: Side) -> Vec<Move> {
-        let moves = self.threat_moves(side);
+        if self.board.winner() != EMPTY {
+            return Vec::new();
+        }
+        let candidates = self.pat4.a4_bits(side).union(self.pat4.b4_bits(side));
         let mut forcing = Vec::new();
-        for move_ in moves {
-            self.play(move_, side);
-            let (x, y) = move_to_xy(move_).expect("move stays valid");
-            if self.broken_four_reply(x, y).is_some() && self.four_has_rule_legal_completion(x, y) {
+        for idx in candidates.iter_indices() {
+            let move_ = idx_to_move(idx);
+            if self.fast_rule_legal_empty(move_, idx, side) {
                 forcing.push(move_);
             }
-            self.undo();
         }
         forcing
     }
@@ -1167,20 +1291,34 @@ pub fn has_vct_trigger(board: &Board, side: Side) -> bool {
 }
 
 pub fn has_vct_trigger_for_rule(board: &Board, side: Side, rule: RuleSet) -> bool {
+    if board.winner() != EMPTY {
+        return false;
+    }
     let mut view = ThreatBoardView::from_board_with_rule(board.clone(), rule);
-    let moves = view.threat_moves(side);
-    for move_ in moves {
-        if !view.is_rule_legal(move_, side) {
+    if !view.pat4.win5_bits(side).is_empty() {
+        return true;
+    }
+    for idx in view
+        .pat4
+        .a4_bits(side)
+        .union(view.pat4.b4_bits(side))
+        .iter_indices()
+    {
+        let move_ = idx_to_move(idx);
+        if view.fast_rule_legal_empty(move_, idx, side) {
+            return true;
+        }
+    }
+    for idx in view.pat4.a3_bits(side).iter_indices() {
+        let move_ = idx_to_move(idx);
+        if !view.fast_rule_legal_empty(move_, idx, side) {
             continue;
         }
+        let (x, y) = idx_to_xy(idx);
         view.play(move_, side);
-        let (x, y) = move_to_xy(move_).expect("move stays valid");
-        let is_b4_plus = view.board.winner() == side
-            || view.has_winning_a4(x, y)
-            || (view.b4_count(x, y) >= 1 && view.four_has_rule_legal_completion(x, y));
-        let is_dual_a3 = !is_b4_plus && view.a3r_count(x, y) >= 2;
+        let is_dual_a3 = view.a3r_count(x, y) >= 2;
         view.undo();
-        if is_b4_plus || is_dual_a3 {
+        if is_dual_a3 {
             return true;
         }
     }
@@ -1443,5 +1581,61 @@ mod tests {
             !has_vct_trigger_for_rule(&board, BLACK, RuleSet::Renju),
             "renju: black has no real four or dual three, the trigger must stay off"
         );
+    }
+
+    #[test]
+    fn fast_a3_defense_info_matches_slow_oracle_for_both_rules() {
+        let mut seed = 0xabcd_ef01_2345_6789_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        for rule in [RuleSet::Freestyle, RuleSet::Renju] {
+            for trial in 0..800 {
+                let mut board = Board::new();
+                let stones = 12 + (next() % 40) as usize;
+                let mut side = BLACK;
+                for _ in 0..stones {
+                    if board.winner() != EMPTY {
+                        break;
+                    }
+                    let x = (next() % BOARD_SIZE as u64) as usize;
+                    let y = (next() % BOARD_SIZE as u64) as usize;
+                    let m = xy_to_move(x, y).unwrap();
+                    if board.is_legal_move_for_rule(m, side, rule) {
+                        board.play_for_rule(m, Some(side), rule).unwrap();
+                        side = -side;
+                    }
+                }
+                if board.winner() != EMPTY {
+                    continue;
+                }
+                let mut view = ThreatBoardView::from_board_with_rule(board, rule);
+                for attacker in [BLACK, WHITE] {
+                    if !view.pat4.win5_bits(attacker).is_empty() {
+                        continue;
+                    }
+                    for idx in view.pat4.a3_bits(attacker).iter_indices() {
+                        let m = idx_to_move(idx);
+                        if !view.fast_rule_legal_empty(m, idx, attacker) {
+                            continue;
+                        }
+                        let (x, y) = idx_to_xy(idx);
+                        if let Some(fast) = view.try_a3_defense_info_fast(x, y, idx, attacker) {
+                            view.play(m, attacker);
+                            let slow = view.a3_defense_info(x, y, attacker);
+                            view.undo();
+                            assert_eq!(
+                                fast, slow,
+                                "A3 defense mismatch rule={rule:?} trial={trial} attacker={attacker} ({x},{y})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

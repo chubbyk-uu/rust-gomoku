@@ -437,10 +437,16 @@ impl VCTSearcher {
         if attack.level >= ThreatLevel::WIN5 {
             return true;
         }
-        view.play(attack.move_, attacker);
-        let defender_five = view.broken_four_point_for_side(-attacker).0;
-        view.undo();
-        defender_five.is_none()
+        let defender_wins = view.pat4.win5_bits(-attacker);
+        if defender_wins.is_empty() {
+            return true;
+        }
+        if defender_wins.count() == 1 {
+            let (ax, ay) = crate::board::move_to_xy(attack.move_).expect("attack stays valid");
+            let aidx = crate::threats::pattern4::col_major_idx(ax, ay);
+            return defender_wins.contains(aidx);
+        }
+        false
     }
 
     fn observe_and_memo_context(
@@ -510,7 +516,7 @@ impl VCTSearcher {
         }
         self.stats.and_nodes += 1;
 
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = MoveSet225::default();
         let mut searched_any = false;
         let mut solved = true;
 
@@ -575,11 +581,12 @@ impl VCTSearcher {
         depth: i32,
         attack_level: ThreatLevel,
         defenses: I,
-        seen: &mut std::collections::HashSet<Move>,
+        seen: &mut MoveSet225,
     ) -> DefenseStageResult
     where
         I: IntoIterator<Item = Move>,
     {
+        let defender = -attacker;
         let mut solved = true;
         let mut searched = false;
         for d_move in defenses {
@@ -592,16 +599,12 @@ impl VCTSearcher {
             self.stats.current_depth_max_defense_count =
                 self.stats.current_depth_max_defense_count.max(seen.len());
 
-            view.play(d_move, -attacker);
+            // A defender five refutes any threat. A defender straight open four
+            // refutes an open-three-level attack without needing play/undo.
             let (dx, dy) = crate::board::move_to_xy(d_move).expect("move stays valid");
-            // A defender five refutes any threat. A defender open four only
-            // refutes an open-three-level attack: against a four (B4) the
-            // attacker completes five first, so the reply is searched like any
-            // other defense and the child OR node claims the win.
-            if view.board.winner() == -attacker
-                || (attack_level < ThreatLevel::B4 && view.has_winning_a4(dx, dy))
-            {
-                view.undo();
+            let didx = crate::threats::pattern4::col_major_idx(dx, dy);
+            let dpat = view.pat4.cell_pattern(defender, didx);
+            if dpat.is_win5() || (attack_level < ThreatLevel::B4 && dpat.has_straight_a4()) {
                 return DefenseStageResult {
                     refutation: Some(VCTResult {
                         move_: None,
@@ -613,6 +616,7 @@ impl VCTSearcher {
                 };
             }
 
+            view.play(d_move, defender);
             let or_result = self.or_node(view, attacker, depth - 1);
             view.undo();
 
@@ -642,30 +646,110 @@ impl VCTSearcher {
         &mut self,
         view: &mut ThreatBoardView,
         attacker: Side,
-        seen: &std::collections::HashSet<Move>,
+        seen: &MoveSet225,
     ) -> Vec<Move> {
+        use crate::threats::pattern4::{idx_to_move, idx_to_xy};
+
         let defender = -attacker;
         let mut counter_b4 = Vec::new();
         let mut counter_a3 = Vec::new();
 
-        for m in view.threat_moves(defender) {
-            if seen.contains(&m) {
+        // `first_counter_win(-attacker, true)` already ran before this stage, so
+        // defender has no WIN5 and no winning straight A4. Any forcing four is
+        // in `b4_bits` (or non-straight double-four in `a4_bits` for non-Renju-Black).
+        let four_bits = view
+            .pat4
+            .b4_bits(defender)
+            .union(view.pat4.a4_bits(defender));
+        for idx in four_bits.iter_indices() {
+            if view.pat4.cell_pattern(defender, idx).has_straight_a4() {
                 continue;
             }
-            view.play(m, defender);
-            let (dx, dy) = crate::board::move_to_xy(m).expect("move stays valid");
-            if view.board.winner() != defender && !view.has_winning_a4(dx, dy) {
-                let b4 = view.b4_count(dx, dy);
-                if b4 >= 1 {
-                    counter_b4.push(m);
-                } else if view.a3r_count(dx, dy) >= 1 {
+            let m = idx_to_move(idx);
+            if seen.contains(m) || !view.fast_rule_legal_empty(m, idx, defender) {
+                continue;
+            }
+            counter_b4.push(m);
+        }
+
+        for idx in view.pat4.a3_bits(defender).iter_indices() {
+            let m = idx_to_move(idx);
+            if seen.contains(m) || !view.fast_rule_legal_empty(m, idx, defender) {
+                continue;
+            }
+            if defender == crate::constants::BLACK {
+                let (dx, dy) = idx_to_xy(idx);
+                let mut has_a3r = false;
+                let mut need_fallback = false;
+                for dir in 0..4 {
+                    if view.pat4.p1_code(defender, idx, dir) != crate::threats::pattern4::P1::A3 {
+                        continue;
+                    }
+                    let def = view.pat4.a3_line_defenses(defender, idx, dir);
+                    if def.is_ambiguous() {
+                        need_fallback = true;
+                        break;
+                    }
+                    let (sx, sy) = crate::threats::pattern4::Pattern4State::dir_step(dir);
+                    for &g_off in &def.gains {
+                        if g_off == 0 {
+                            continue;
+                        }
+                        let gx = (dx as isize + sx * g_off as isize) as usize;
+                        let gy = (dy as isize + sy * g_off as isize) as usize;
+                        let gidx = crate::threats::pattern4::col_major_idx(gx, gy);
+                        if !view.pat4.black_gain_has_other_a5(gidx, dir) {
+                            has_a3r = true;
+                            break;
+                        }
+                    }
+                    if has_a3r {
+                        break;
+                    }
+                }
+                if need_fallback {
+                    view.play(m, defender);
+                    has_a3r = view.a3r_count(dx, dy) > 0;
+                    view.undo();
+                }
+                if has_a3r {
                     counter_a3.push(m);
                 }
+            } else {
+                counter_a3.push(m);
             }
-            view.undo();
         }
 
         counter_b4.into_iter().chain(counter_a3).collect()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct MoveSet225 {
+    bits: crate::threats::pattern4::BitBoard225,
+    len: usize,
+}
+
+impl MoveSet225 {
+    #[inline]
+    fn insert(&mut self, m: Move) -> bool {
+        let idx = m as usize;
+        if self.bits.contains(idx) {
+            return false;
+        }
+        self.bits.set(idx);
+        self.len += 1;
+        true
+    }
+
+    #[inline]
+    fn contains(&self, m: Move) -> bool {
+        self.bits.contains(m as usize)
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.len
     }
 }
 
@@ -804,5 +888,66 @@ mod tests {
             searcher.stats.and_memo_context_collision_samples[0].current_depth,
             4
         );
+    }
+
+    #[test]
+    fn counter_forcing_defenses_match_legacy_trial_oracle_for_freestyle() {
+        let mut seed = 0x1357_9bdf_2468_ace0_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        let mut searcher = VCTSearcher::default();
+        for trial in 0..400 {
+            let mut board = Board::new();
+            let stones = 12 + (next() % 35) as usize;
+            let mut side = BLACK;
+            for _ in 0..stones {
+                if board.winner() != 0 {
+                    break;
+                }
+                let x = (next() % 15) as usize;
+                let y = (next() % 15) as usize;
+                let m = xy_to_move(x, y).unwrap();
+                if board.is_legal_move_for_rule(m, side, RuleSet::Freestyle) {
+                    board
+                        .play_for_rule(m, Some(side), RuleSet::Freestyle)
+                        .unwrap();
+                    side = -side;
+                }
+            }
+            if board.winner() != 0 {
+                continue;
+            }
+            let mut view = ThreatBoardView::from_board_with_rule(board, RuleSet::Freestyle);
+            for attacker in [BLACK, WHITE] {
+                let defender = -attacker;
+                if view.first_counter_win(defender, true).is_some() {
+                    continue;
+                }
+                let seen = MoveSet225::default();
+                let fast = searcher.collect_counter_forcing_defenses(&mut view, attacker, &seen);
+                let mut slow_b4 = Vec::new();
+                let mut slow_a3 = Vec::new();
+                for m in view.threat_moves(defender) {
+                    view.play(m, defender);
+                    let (dx, dy) = crate::board::move_to_xy(m).unwrap();
+                    if view.b4_count(dx, dy) > 0 {
+                        slow_b4.push(m);
+                    } else if view.a3r_count(dx, dy) > 0 {
+                        slow_a3.push(m);
+                    }
+                    view.undo();
+                }
+                let slow: Vec<Move> = slow_b4.into_iter().chain(slow_a3).collect();
+                assert_eq!(
+                    fast, slow,
+                    "counter_forcing mismatch trial={trial} attacker={attacker}"
+                );
+            }
+        }
     }
 }

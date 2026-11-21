@@ -247,16 +247,17 @@ impl VCFSearcher {
         }
 
         let mut solved = true;
-        let ordered_moves = view.threat_moves(side);
         let mut forcing_moves = Vec::new();
-        for move_ in ordered_moves {
+        let four_bits = view.pat4.a4_bits(side).union(view.pat4.b4_bits(side));
+        for idx in four_bits.iter_indices() {
             if self.budget.stopped() {
                 return VCFResult::default();
             }
-            view.play(move_, side);
-            let (x, y) = crate::board::move_to_xy(move_).expect("move stays valid");
-            if view.board.winner() == side || view.has_winning_a4(x, y) {
-                view.undo();
+            let move_ = crate::threats::pattern4::idx_to_move(idx);
+            if !view.fast_rule_legal_empty(move_, idx, side) {
+                continue;
+            }
+            if view.pat4.cell_pattern(side, idx).has_straight_a4() {
                 let result = VCFResult {
                     move_: Some(move_),
                     found: true,
@@ -265,10 +266,7 @@ impl VCFSearcher {
                 self.memo.insert(key, VcfMemoEntry { depth, result });
                 return result;
             }
-            if view.broken_four_reply(x, y).is_some() {
-                forcing_moves.push(move_);
-            }
-            view.undo();
+            forcing_moves.push(move_);
         }
 
         for move_ in forcing_moves {
