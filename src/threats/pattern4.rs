@@ -53,6 +53,9 @@ pub(crate) enum P1 {
     /// Renju Black only: placing here creates a 6+ overline (forbidden unless
     /// another axis makes an exact WIN5).
     Overline = 6,
+    /// Renju Black only: not a standard straight `A3` for VCT/VCF, but `rules::forbidden`
+    /// recognizes a candidate open-three gain on this axis (must contribute to `maybe_33`).
+    RenjuOpen3Candidate = 7,
 }
 
 impl P1 {
@@ -65,6 +68,7 @@ impl P1 {
             4 => Self::DoubleFour1D,
             5 => Self::Win5,
             6 => Self::Overline,
+            7 => Self::RenjuOpen3Candidate,
             _ => Self::None,
         }
     }
@@ -412,6 +416,77 @@ fn scan_a3_window_gains_reversed(w: &[u8; 11]) -> [i8; 2] {
     }
 }
 
+/// Mirrors `rules::forbidden::DirectionalLine::{open_three_gain_indices, has_open_four_through_gain}`
+/// on `w[0..11]` (anchor = 5) so `maybe_33` is a guaranteed superset of full Renju double-three.
+fn has_renju_forbidden_open3_1d(w: &[u8; 11]) -> bool {
+    let mut gains = [usize::MAX; 2];
+    let mut gain_len = 0_usize;
+
+    let mut idx = 5_usize;
+    for _ in 0..4 {
+        if idx == 0 {
+            break;
+        }
+        idx -= 1;
+        match w[idx] {
+            0 => {
+                gains[gain_len] = idx;
+                gain_len += 1;
+                break;
+            }
+            1 => {}
+            _ => break,
+        }
+    }
+
+    idx = 5;
+    for _ in 0..4 {
+        if idx + 1 >= 11 {
+            break;
+        }
+        idx += 1;
+        match w[idx] {
+            0 => {
+                gains[gain_len] = idx;
+                gain_len += 1;
+                break;
+            }
+            1 => {}
+            _ => break,
+        }
+    }
+
+    let mut tmp = *w;
+    for &gain in &gains[..gain_len] {
+        tmp[gain] = 1;
+        let mut winning_extensions = 0_usize;
+        for ext in 1..=9 {
+            if ext == 5 || ext == gain || tmp[ext] != 0 {
+                continue;
+            }
+            tmp[ext] = 1;
+            let mut l = ext;
+            while l > 0 && tmp[l - 1] == 1 {
+                l -= 1;
+            }
+            let mut r = ext;
+            while r + 1 < 11 && tmp[r + 1] == 1 {
+                r += 1;
+            }
+            tmp[ext] = 0;
+            if r - l + 1 == 5 && l <= 5 && 5 <= r && l <= gain && gain <= r {
+                winning_extensions += 1;
+                if winning_extensions >= 2 {
+                    return true;
+                }
+            }
+        }
+        tmp[gain] = 0;
+    }
+
+    false
+}
+
 /// Evaluates the exact 1D pattern at `w[5] == 1` for either Freestyle (`renju_black = false`)
 /// or Renju Black (`renju_black = true`).
 fn eval_window_1d(w: &[u8; 11], renju_black: bool) -> (P1, i8, A3LineDefenses) {
@@ -520,6 +595,10 @@ fn eval_window_1d(w: &[u8; 11], renju_black: bool) -> (P1, i8, A3LineDefenses) {
             return (P1::A3, 0, A3LineDefenses::AMBIGUOUS);
         }
         return (P1::A3, 0, a3_def);
+    }
+
+    if renju_black && has_renju_forbidden_open3_1d(w) {
+        return (P1::RenjuOpen3Candidate, 0, empty_def);
     }
 
     (P1::None, 0, empty_def)
@@ -693,11 +772,18 @@ impl Pattern4State {
         let mut four_count = 0_u8;
         let mut b4_dir = 0_u8;
         let mut a3_count = 0_u8;
+        let mut open3_count = 0_u8;
 
         for (dir, &code) in p1s.iter().enumerate() {
             match P1::from_u8(code) {
                 P1::None => {}
-                P1::A3 => a3_count += 1,
+                P1::A3 => {
+                    a3_count += 1;
+                    open3_count += 1;
+                }
+                P1::RenjuOpen3Candidate => {
+                    open3_count += 1;
+                }
                 P1::B4 => {
                     four_count += 1;
                     b4_dir = dir as u8;
@@ -723,7 +809,7 @@ impl Pattern4State {
                     packed: CLASS_FORBIDDEN,
                 };
             }
-            let maybe_33 = if a3_count >= 2 { FLAG_MAYBE_33 } else { 0 };
+            let maybe_33 = if open3_count >= 2 { FLAG_MAYBE_33 } else { 0 };
             if has_a4 {
                 return CellPattern {
                     packed: CLASS_A4 | maybe_33 | FLAG_STRAIGHT_A4,
@@ -739,7 +825,9 @@ impl Pattern4State {
                     packed: CLASS_A3 | maybe_33,
                 };
             }
-            return CellPattern { packed: CLASS_NONE };
+            return CellPattern {
+                packed: CLASS_NONE | maybe_33,
+            };
         }
 
         // Freestyle or Renju White: no forbidden moves.
@@ -966,7 +1054,7 @@ impl Pattern4State {
                 P1::Overline | P1::B4 | P1::A4 | P1::DoubleFour1D => {
                     has_four_or_overline = true;
                 }
-                P1::A3 => a3_count += 1,
+                P1::A3 | P1::RenjuOpen3Candidate => a3_count += 1,
                 P1::None => {}
             }
         }

@@ -911,3 +911,69 @@ Fixed-position `cases/renju/vct_dense_ply78.json` (`d8/w40`, Renju):
   - `4T_subply_abdada`: avg **`431.7 ms` (`2.97x`)**, median **`204.0 ms` (`2.77x`)**,
     p95 **`1,677.9 ms` (`2.99x`)**, max **`15,051.6 ms` (`2.35x`)** (previous `4T`
     was `~1.97x–2.16x` across avg/med/p95/max).
+
+### 2026-11-21 (3): Correctness fixes for Pattern4 VCT and sub-ply TT (4 reproduced bugs)
+
+The 1/8-ply TT above was **unsound**: store and probe both used `floor`, so a
+`depth 1.00` entry could cut off a `depth 1.10` search. Part of the `4.03s` came
+from that unsound cutoff. Four reproduced bugs, all fixed with regressions:
+
+1. **VCT promoted a blockable Renju four to A4** (`threat_board.rs::collect_attack_moves`).
+   The black reply legality was checked *before* White's B4 stone. White can
+   break a Black double-three and make the only block legal again. Now: if the
+   reply had no win5/forbidden/`maybe_33` flag before the move, it stays legal
+   (a White stone cannot create Black patterns). Otherwise it is rechecked after
+   `play(move)`. Regression: `[[6,9],[0,11],[7,4],[2,9],[5,6],[1,10],[5,8]]`.
+   White `[3,8]` is B4 with defense `[4,7]`, and root d1/w10 returns `[4,7]` / `-22`.
+2. **Pattern4 `maybe_33` missed full-rule double threes.** `maybe_33` counted only
+   straight-VCT `A3` axes. New `P1::RenjuOpen3Candidate` reproduces
+   `rules::forbidden::{open_three_gain_indices, has_open_four_through_gain}` on the ±5
+   window. Now `maybe_33` is a superset of full-rule DoubleThree, falling back to
+   `rule_legal_cached`. Regression: the 17-ply game; White `[7,6]` A3 defenses are
+   exactly `{[5,4],[10,9]}`, and `[8,7]` is flagged `maybe_33` and judged illegal.
+3. **Mixed TT depth encodings on thread switch with the same capacity** (GUI/Android).
+   `TTStorage` now records `depth_scale` (`1` = integer ply, `128` = sub-ply).
+   `TranspositionTable::ensure_depth_scale` clears the table on any scale change.
+   It is called from `RootSearcher::search_alphabeta_only` and `search_with_abdada`.
+   It works through every new `RootSearcher::with_tt`. `GameController::set_threads`
+   also drops `search_tt` when crossing the 1T/MT boundary. Regression covers
+   4→1 (hot result == cold 1T: move, score, nodes) and 1→4 on d4/w20 Freestyle.
+4. **Sub-ply TT floor/floor cutoff.** Now sound: store `floor(depth*128)`, probe
+   `ceil(depth*128)`. Fractional `base_depthdown` is rounded to 1/128-ply dyadic steps
+   (MT only), so internal-node depths stay exact and same-depth hits survive.
+   Shallower entries only give a move hint. TT packing widened: depth 12 bits,
+   priority 14 bits, generation 12 bits. Regression: `[[7,7],[7,6],[8,8],[6,6],[6,8],[5,8]]`,
+   2T, w12, VCF/VCT off. Cold `1.10` gives `[8,6]`/`9`, and warm `1.00 -> 1.10`
+   now searches (>1 node) with the same result.
+
+Verification: `cargo test` and the Android bridge pass, and 13/13 reference diffs
+pass (1T base unchanged).
+
+VCT6 (`--depth 1 --width 10`, 3-run median, final build). Node stats are identical
+to the Route B commit:
+
+| Case | Baseline `cbd0a7c` | Final | Speedup |
+| --- | ---: | ---: | ---: |
+| `vct_dense_ply78` | `1555.0 ms` | `181.2 ms` | `8.58x` |
+| `vct_counter_win_scan_ply75` | `2659.1 ms` | `368.1 ms` | `7.22x` |
+| `vct_slow_probe_case` | `3491.9 ms` | `637.2 ms` | `5.48x` |
+| **Total** | **`7706.0 ms`** | **`1186.5 ms`** | **`6.49x`** |
+
+`vct_dense_ply78` d8/w40, 64 MiB TT (`--tt-bits 21`):
+
+| Threads | Move | Score | Nodes | Elapsed |
+| --- | --- | ---: | ---: | ---: |
+| 1T | `[8,1]` | 28 | 73,267,291 | 70,109 ms |
+| 4T | `[8,1]` | 27 | 16,701,957 | 6,488 ms (`10.8x`) |
+| 8T | `[8,1]` | 27 | 19,824,463 | 4,366 ms (`16.1x`) |
+
+100-game Renju `center_50_prefixes.jsonl` (`4T_sound_subply` vs `1T_base`, d8/w40,
+`--reuse-engine-state`, 0 errors / 0 timeouts / 0 capped pairs):
+
+- Strength: `45-50-5`, **`47.50%`** (`-17.39 Elo`, 95% CI `[-68.7, +33.1]`;
+  pentanomial `WW=5, WD=2, WL/DD=33, LD=3, LL=7`). This is below the `>= 50%`
+  point gate. It is statistically indistinguishable from earlier 4T-vs-1T runs
+  (`47.5%`–`52.5%`), but it is not yet cleared for the recommended configuration.
+- Timing: 4T avg `492.5 ms` / median `237.0 ms` / p95 `1,873.1 ms` / max `11,351.7 ms`.
+  1T avg `1,505.9` / `662.2` / `6,104.1` / `28,868.4`. 4T is `3.06x` / `2.79x` /
+  `3.26x` / `2.54x` faster.

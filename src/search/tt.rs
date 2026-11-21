@@ -2,7 +2,7 @@
 
 use std::array;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU64, AtomicU8, Ordering},
     Arc,
 };
 
@@ -89,6 +89,7 @@ impl Default for ProbeResult {
 #[derive(Debug)]
 struct TTStorage {
     buckets: Vec<[RawEntry; 2]>,
+    depth_scale: AtomicU8,
 }
 
 impl TTStorage {
@@ -98,7 +99,10 @@ impl TTStorage {
             .try_reserve_exact(bucket_count)
             .map_err(|_| TTError::AllocationFailed)?;
         buckets.extend((0..bucket_count).map(|_| array::from_fn(|_| RawEntry::default())));
-        Ok(Self { buckets })
+        Ok(Self {
+            buckets,
+            depth_scale: AtomicU8::new(0),
+        })
     }
 
     fn bucket_count(&self) -> usize {
@@ -161,11 +165,15 @@ impl RawEntry {
 
 const VALUE_SHIFT: u64 = 48;
 const FLAG_SHIFT: u64 = 46;
-const DEPTH_SHIFT: u64 = 38;
-const PRIORITY_SHIFT: u64 = 22;
-const BEST_MOVE_SHIFT: u64 = 14;
+const DEPTH_SHIFT: u64 = 34;
+const DEPTH_MASK: u64 = 0x0FFF;
+const DEPTH_MAX: i32 = 0x0FFF;
+const PRIORITY_SHIFT: u64 = 20;
+const PRIORITY_MASK: u64 = 0x3FFF;
+const PRIORITY_MAX: i32 = 0x3FFF;
+const BEST_MOVE_SHIFT: u64 = 12;
 const BEST_MOVE_NONE: u8 = 0xFF;
-const GENERATION_MASK: u16 = 0x3FFF;
+pub(crate) const GENERATION_MASK: u16 = 0x0FFF;
 
 fn pack_entry(entry: TTEntry) -> u64 {
     debug_assert!(
@@ -174,19 +182,19 @@ fn pack_entry(entry: TTEntry) -> u64 {
         entry.value
     );
     debug_assert!(
-        (0..=i32::from(u8::MAX)).contains(&entry.depth),
-        "TT depth {} outside the u8 packing range",
+        (0..=DEPTH_MAX).contains(&entry.depth),
+        "TT depth {} outside the 12-bit packing range",
         entry.depth
     );
     debug_assert!(
-        (0..=i32::from(u16::MAX)).contains(&entry.priority),
-        "TT priority {} outside the u16 packing range",
+        (0..=PRIORITY_MAX).contains(&entry.priority),
+        "TT priority {} outside the 14-bit packing range",
         entry.priority
     );
     let value = (entry.value as i16 as u16 as u64) << VALUE_SHIFT;
     let flag = (u64::from(entry.flag) & 0x3) << FLAG_SHIFT;
-    let depth = (entry.depth.clamp(0, u8::MAX as i32) as u64) << DEPTH_SHIFT;
-    let priority = (entry.priority.clamp(0, u16::MAX as i32) as u64) << PRIORITY_SHIFT;
+    let depth = (entry.depth.clamp(0, DEPTH_MAX) as u64) << DEPTH_SHIFT;
+    let priority = (entry.priority.clamp(0, PRIORITY_MAX) as u64) << PRIORITY_SHIFT;
     let best_move = entry
         .best_move
         .and_then(|move_| u8::try_from(move_).ok())
@@ -199,8 +207,8 @@ fn pack_entry(entry: TTEntry) -> u64 {
 fn unpack_entry(key: u64, data: u64) -> TTEntry {
     let value = ((data >> VALUE_SHIFT) as u16) as i16 as i32;
     let flag = ((data >> FLAG_SHIFT) & 0x3) as u8;
-    let depth = ((data >> DEPTH_SHIFT) & 0xFF) as i32;
-    let priority = ((data >> PRIORITY_SHIFT) & 0xFFFF) as i32;
+    let depth = ((data >> DEPTH_SHIFT) & DEPTH_MASK) as i32;
+    let priority = ((data >> PRIORITY_SHIFT) & PRIORITY_MASK) as i32;
     let best_move = ((data >> BEST_MOVE_SHIFT) & 0xFF) as u8;
     let generation = (data & u64::from(GENERATION_MASK)) as u16;
     TTEntry {
@@ -277,6 +285,22 @@ impl TranspositionTable {
                 entry.store_words(0, 0);
             }
         }
+        self.storage.depth_scale.store(0, Ordering::Release);
+    }
+
+    /// Ensures all entries in this table share the same depth encoding scale.
+    /// If a caller switches between integer-ply (1T) and sub-ply (MT) modes on
+    /// a reused table (even when bucket capacity is unchanged), clears stale
+    /// entries so mismatched depth scales can never interact.
+    pub fn ensure_depth_scale(&self, scale: u8) {
+        let prev = self.storage.depth_scale.load(Ordering::Acquire);
+        if prev == scale {
+            return;
+        }
+        if prev != 0 {
+            self.clear();
+        }
+        self.storage.depth_scale.store(scale, Ordering::Release);
     }
 
     pub fn fork_snapshot(&self) -> Self {
@@ -287,6 +311,10 @@ impl TranspositionTable {
                     .expect("existing TT capacity remains allocatable for snapshot"),
             ),
         };
+        snapshot.storage.depth_scale.store(
+            self.storage.depth_scale.load(Ordering::Acquire),
+            Ordering::Release,
+        );
         for (src_bucket, dst_bucket) in self
             .storage
             .buckets

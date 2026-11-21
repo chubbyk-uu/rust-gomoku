@@ -581,6 +581,7 @@ impl GameController {
             let depth = self.search_limits().max_depth;
             if default_tt_bits_for_search(prev_threads, depth)
                 != default_tt_bits_for_search(threads, depth)
+                || (prev_threads > 1) != (threads > 1)
             {
                 self.search_tt = None;
             }
@@ -1463,5 +1464,70 @@ mod tests {
             snapshot.error.as_deref(),
             Some("内存不足，无法分配置换表。")
         );
+    }
+
+    #[test]
+    fn switching_threads_with_same_tt_capacity_does_not_mix_tt_depth_scales() {
+        let mut cfg = load_default_config();
+        SearchDifficulty::Intermediate.apply_to_config(&mut cfg);
+        cfg.rule_set = RuleSet::Freestyle;
+        cfg.runtime.threads = 4;
+
+        let mut controller = GameController::new(cfg.clone());
+        assert!(controller.new_game_with_clock(
+            BLACK,
+            RuleSet::Freestyle,
+            GameMode::VsEngine,
+            SearchClockMode::Untimed,
+        ));
+        assert!(controller.play_human(7, 7));
+        let first_task = controller.prepare_engine_search().unwrap();
+        let first_done = first_task.run();
+        assert!(controller.commit_engine_search(first_done));
+        let board_after_reply = controller.board.clone();
+
+        // Switch 4 -> 1 on d4/w20 (same TT capacity) and play [5,7].
+        controller.set_threads(1);
+        assert!(controller.play_human(5, 7));
+        let second_task = controller.prepare_engine_search().unwrap();
+        let second_done = second_task.run();
+        let (hot_move, hot_score, hot_nodes) = match &second_done.outcome {
+            EngineSearchOutcome::Completed { result, .. } => {
+                (result.move_, result.score, result.nodes)
+            }
+            EngineSearchOutcome::Failed { error, .. } => panic!("unexpected failure: {error:?}"),
+        };
+        assert!(controller.commit_engine_search(second_done));
+
+        // Compare against a cold 1T search on the exact same board.
+        let mut cold_board = board_after_reply;
+        cold_board
+            .play_for_rule(xy_to_move(5, 7).unwrap(), None, RuleSet::Freestyle)
+            .unwrap();
+        let mut cold_cfg = cfg.clone();
+        cold_cfg.runtime.threads = 1;
+        let mut cold_searcher = RootSearcher::new(cold_cfg.clone());
+        let limits = controller.search_limits();
+        let cold = cold_searcher.search(&mut cold_board.clone(), Some(limits));
+        assert_eq!(hot_move, cold.move_);
+        assert_eq!(hot_score, cold.score);
+        assert_eq!(hot_nodes, cold.nodes);
+
+        // Also verify direct TT reuse across new RootSearcher instances (4 -> 1 and 1 -> 4).
+        let shared_tt = TranspositionTable::new(16);
+        let mut cfg_4t = cfg;
+        cfg_4t.runtime.threads = 4;
+        let mut s4 = RootSearcher::with_tt(cfg_4t.clone(), shared_tt.clone());
+        let _ = s4.search(&mut cold_board.clone(), Some(limits));
+
+        let mut s1 = RootSearcher::with_tt(cold_cfg, shared_tt.clone());
+        let r1 = s1.search(&mut cold_board.clone(), Some(limits));
+        assert_eq!(r1.move_, cold.move_);
+        assert_eq!(r1.score, cold.score);
+        assert_eq!(r1.nodes, cold.nodes);
+
+        let mut s4_again = RootSearcher::with_tt(cfg_4t, shared_tt);
+        let r4 = s4_again.search(&mut cold_board.clone(), Some(limits));
+        assert!(cold_board.is_legal_move(r4.move_));
     }
 }

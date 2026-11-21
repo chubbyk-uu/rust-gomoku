@@ -1182,7 +1182,21 @@ impl ThreatBoardView {
                 } else if let Some(reply) = self.pat4.b4_reply_move(attacker, idx) {
                     let (rx, ry) = move_to_xy(reply).expect("reply stays valid");
                     let ridx = col_major_idx(rx, ry);
-                    if self.fast_rule_legal_empty(reply, ridx, defender) {
+                    let rpat = self.pat4.cell_pattern(BLACK, ridx);
+                    // Placing White at `move_` can only block Black lines along `b4_dir`,
+                    // so a previously legal Black point without a win5/forbidden/maybe_33
+                    // stays legal; otherwise re-verify after playing `move_` because White
+                    // may break a Black double-three/four and restore legality at `reply`.
+                    let reply_legal =
+                        if !rpat.is_win5() && !rpat.is_forbidden_definite() && !rpat.maybe_33() {
+                            true
+                        } else {
+                            self.play(move_, attacker);
+                            let legal = self.fast_rule_legal_empty(reply, ridx, defender);
+                            self.undo();
+                            legal
+                        };
+                    if reply_legal {
                         b4_attacks.push(AttackMove {
                             move_,
                             level: ThreatLevel::B4,
@@ -1637,5 +1651,91 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn renju_white_b4_does_not_promote_to_a4_when_move_restores_black_reply_legality() {
+        let mut board = Board::new();
+        let moves = [(6, 9), (0, 11), (7, 4), (2, 9), (5, 6), (1, 10), (5, 8)];
+        for (x, y) in moves {
+            let m = xy_to_move(x, y).unwrap();
+            board.play_for_rule(m, None, RuleSet::Renju).unwrap();
+        }
+        let mut view = ThreatBoardView::from_board_with_rule(board.clone(), RuleSet::Renju);
+        let white_b4 = xy_to_move(3, 8).unwrap();
+        let black_reply = xy_to_move(4, 7).unwrap();
+        let attacks = view.collect_attack_moves(crate::constants::WHITE);
+        let found = attacks
+            .iter()
+            .find(|a| a.move_ == white_b4)
+            .expect("white [3,8] should be classified as a threat");
+        assert_eq!(found.level, ThreatLevel::B4);
+        assert_eq!(found.defenses, vec![black_reply]);
+
+        let mut cfg = crate::config::load_default_config();
+        cfg.rule_set = RuleSet::Renju;
+        let mut searcher = crate::search::RootSearcher::new(cfg);
+        let res = searcher.search(
+            &mut board,
+            Some(crate::search::SearchLimits {
+                max_depth: 1,
+                root_width: 10,
+                node_limit: None,
+                time_limit_ms: None,
+            }),
+        );
+        assert_eq!(move_to_xy(res.move_).unwrap(), (4, 7));
+        assert_eq!(res.score, -22);
+    }
+
+    #[test]
+    fn renju_pattern4_flags_double_three_defense_as_illegal() {
+        let mut board = Board::new();
+        let moves = [
+            (6, 8),
+            (9, 8),
+            (6, 6),
+            (4, 7),
+            (6, 7),
+            (4, 9),
+            (7, 8),
+            (9, 7),
+            (8, 8),
+            (11, 4),
+            (4, 11),
+            (9, 5),
+            (10, 5),
+            (10, 4),
+            (6, 10),
+            (6, 5),
+            (8, 6),
+        ];
+        for (x, y) in moves {
+            let m = xy_to_move(x, y).unwrap();
+            board.play_for_rule(m, None, RuleSet::Renju).unwrap();
+        }
+        let mut view = ThreatBoardView::from_board_with_rule(board, RuleSet::Renju);
+        let white_a3 = xy_to_move(7, 6).unwrap();
+        let attacks = view.collect_attack_moves(crate::constants::WHITE);
+        let atk = attacks
+            .iter()
+            .find(|a| a.move_ == white_a3)
+            .expect("white [7,6] should be an A3 attack");
+        assert_eq!(atk.level, ThreatLevel::A3);
+        let mut defense_xys: Vec<(usize, usize)> = atk
+            .defenses
+            .iter()
+            .map(|&m| move_to_xy(m).unwrap())
+            .collect();
+        defense_xys.sort_unstable();
+        assert_eq!(defense_xys, vec![(5, 4), (10, 9)]);
+
+        // Also verify directly after playing [7,6] that [8,7] is flagged as illegal.
+        view.play(white_a3, crate::constants::WHITE);
+        let forbidden_pt = xy_to_move(8, 7).unwrap();
+        let fidx = col_major_idx(8, 7);
+        assert!(view.pat4.cell_pattern(BLACK, fidx).maybe_33());
+        assert!(!view.fast_rule_legal_empty(forbidden_pt, fidx, BLACK));
+        view.undo();
     }
 }
