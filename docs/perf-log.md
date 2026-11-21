@@ -856,3 +856,58 @@ Note on untimed Master `d8/w40` on `vct_dense_ply78.json`: VCT6 is now `~165–1
 (`0.3%` of total), while uncapped `d8/w40` Alpha-Beta itself still takes `67.6s`
 (`1T`) / `48.2s` (`4T`, `208M` nodes). In timed mode (e.g. `2s`/move), full VCT6
 now completes inside `~0.17s` instead of hitting the 30% sub-budget cap.
+
+### 2026-11-21 (2): Fix multi-threaded ABDADA fractional-depth TT miss & worker collision (`feat/abdada-multithread-scaling`)
+
+Hotspot evidence & root cause:
+
+- On `cases/renju/vct_dense_ply78.json` (`d7/w40` & `d8/w40`), `4T` ABDADA
+  previously suffered **`2.99x` node inflation** (`d7`: `45.9M` vs `15.3M`,
+  `d8`: `208.4M` vs `71.5M`), yielding only `1.39x–1.40x` speedup (`67.8s -> 48.5s`).
+  Increasing TT from `64 MiB` to `128 MiB` barely moved node count (`45.79M`),
+  ruling out TT capacity overflow.
+- Root cause: `AlphaBetaSearcher` stored `depth as i32` (floor) and probed
+  `depth.ceil() as i32` (ceil). Because `base_depthdown` is fractional whenever
+  `case_count < wide`, almost every deep tactical subtree had a non-integer
+  `depth` (e.g. `5.4`), storing `5` and probing `6` — making it **impossible**
+  for ABDADA workers returning in `pass == 1` to hit the TT entry just written
+  by another worker. In addition, `AbdadaTable` ignored depth in its busy key
+  and all workers iterated `pass == 1` deferred moves in identical order.
+
+Modification scope:
+
+- `src/search/alphabeta.rs`: for multi-threaded searches (`threads > 1`) only,
+  quantize TT store & probe depths consistently in 1/8-ply fixed point
+  (`((depth * 8.0).floor() as i32).clamp(1, 200)` for `depth > 0.0`, `0` for
+  leaves, `+40` win/loss bonus); mix 1/8-ply depth into `AbdadaTable` busy keys;
+  rotate `pass == 1` deferred move order by `worker_id`. Single-threaded (`1T`)
+  path is 100% unchanged.
+- `src/search/abdada.rs`, `src/search/root.rs`, `src/search/tt.rs`: pass
+  `worker_id` into `AbdadaContext`; add `TranspositionTable::clear()` and clear
+  TT if a `RootSearcher` switches between `threads == 1` and `threads > 1`
+  mid-game so integer and 1/8-ply TT entries never mix.
+
+Correctness & equivalence verification:
+
+- `cargo fmt --check`, `git diff --check`: clean.
+- `cargo test` + `android/rust_bridge` tests: all passed.
+- `python3 scripts/run_diff.py --profile all --check-baselines --jobs 8`: **13/13
+  passed** (`1T` `base` 100% unchanged).
+
+Fixed-position `cases/renju/vct_dense_ply78.json` (`d8/w40`, Renju):
+
+- `1T` baseline: `move [8,1]`, `score 29`, `71,533,289` nodes, `67,822 ms`
+- Old `4T` (`031053e`): `move [8,1]`, `score 29`, `208,386,127` nodes, `48,453 ms` (`1.40x`)
+- New `4T`: `move [8,1]`, `score 29`, **`9,235,714` nodes**, **`4,034 ms`** (**`16.8x` vs `1T`, `12.0x` vs old `4T`**)
+- New `8T`: `move [8,1]`, `score 29`, **`11,400,102` nodes**, **`2,676 ms`** (**`25.3x` vs `1T`**)
+
+100-game Renju `center_50_prefixes.jsonl` match (`4T_subply_abdada` vs `1T_base`,
+`d8/w40`, `--reuse-engine-state`, `--jobs 5`, 0 errors / 0 timeouts / 0 capped pairs):
+
+- **Strength**: **`51-46-3`** (**`52.50%`**, **`+17.39 Elo`**, 95% CI `[-37.4, +73.0]`,
+  pentanomial `WW=8, WD=3, WL/DD=32, LD=0, LL=7`) — passes `>= 50%` gate.
+- **Timing** (`2,289` vs `2,287` moves):
+  - `1T_base`: avg `1,283.5 ms`, median `564.8 ms`, p95 `5,010.1 ms`, max `35,390.7 ms`
+  - `4T_subply_abdada`: avg **`431.7 ms` (`2.97x`)**, median **`204.0 ms` (`2.77x`)**,
+    p95 **`1,677.9 ms` (`2.99x`)**, max **`15,051.6 ms` (`2.35x`)** (previous `4T`
+    was `~1.97x–2.16x` across avg/med/p95/max).

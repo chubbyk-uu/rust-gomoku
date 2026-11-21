@@ -336,6 +336,7 @@ pub struct RootSearcher {
     pub fallback_rng: ClassicFallbackRng,
     pub last_trace: Option<RootTrace>,
     worker_pool: Option<SearchWorkerPool>,
+    last_subply_tt: Option<bool>,
 }
 
 impl Clone for RootSearcher {
@@ -349,6 +350,7 @@ impl Clone for RootSearcher {
             fallback_rng: self.fallback_rng.clone(),
             last_trace: self.last_trace.clone(),
             worker_pool: None,
+            last_subply_tt: self.last_subply_tt,
         }
     }
 }
@@ -423,6 +425,7 @@ impl RootSearcher {
             fallback_rng: new_classic_fallback_rng(),
             last_trace: None,
             worker_pool: None,
+            last_subply_tt: None,
         }
     }
 
@@ -639,6 +642,11 @@ impl RootSearcher {
         recompute_all_for_rule(board, &mut caches, self.config.rule_set);
 
         self.alphabeta.config = self.config.clone();
+        let subply_tt = self.config.runtime.threads > 1;
+        if self.last_subply_tt.is_some_and(|prev| prev != subply_tt) {
+            self.tt.clear();
+        }
+        self.last_subply_tt = Some(subply_tt);
         self.alphabeta.advance_tt_generation();
         let mut best_move = None;
         let mut best_score = -INF;
@@ -749,6 +757,7 @@ impl RootSearcher {
                     ..SearchStats::default()
                 };
                 let main_abdada = AbdadaContext {
+                    worker_id: 0,
                     table: abdada_table,
                     salt: abdada_salt,
                     root_best,

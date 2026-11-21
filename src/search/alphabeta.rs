@@ -313,7 +313,21 @@ impl AlphaBetaSearcher {
     ) -> (i32, Option<Move>) {
         let root_depth = options.root_depth.unwrap_or(depth);
         let priority_base = options.priority_base.unwrap_or(board.move_count() as i32);
-        let hash_depth = depth as i32;
+        let subply_tt = self.config.runtime.threads > 1;
+        let hash_depth = if subply_tt {
+            if depth <= 0.0 {
+                0
+            } else {
+                ((depth * 8.0).floor() as i32).clamp(1, 200)
+            }
+        } else {
+            depth as i32
+        };
+        let probe_depth = if subply_tt {
+            hash_depth
+        } else {
+            depth.ceil() as i32
+        };
         let original_beta = beta;
 
         let next_node = stats.nodes + 1;
@@ -379,7 +393,7 @@ impl AlphaBetaSearcher {
         // cuts off a positive-depth search, even after fractional reductions.
         let probe = self.tt.probe(
             board.zobrist_key(),
-            depth.ceil() as i32,
+            probe_depth,
             score_to_tt(alpha, options.ply),
             score_to_tt(beta, options.ply),
         );
@@ -629,7 +643,15 @@ impl AlphaBetaSearcher {
                     running_downf = local_downf;
                     (index, candidate, local_downf, depthdown, net)
                 } else {
-                    let item = deferred[step];
+                    let wid = abdada.map_or(0, |ctx| ctx.worker_id);
+                    let d_idx = if wid == 0 || deferred_len <= 1 {
+                        step
+                    } else if wid % 2 == 1 {
+                        (deferred_len - 1 - step + wid) % deferred_len
+                    } else {
+                        (step + wid) % deferred_len
+                    };
+                    let item = deferred[d_idx];
                     (
                         item.index,
                         item.candidate,
@@ -659,7 +681,9 @@ impl AlphaBetaSearcher {
                 let mut marked_busy_key: Option<u64> = None;
                 if use_abdada && pass == 0 && index > 0 {
                     if let Some(ctx) = abdada {
-                        let child_key = board.zobrist_key_after(candidate.move_, side);
+                        let depth_tag = ((depth - depthdown).max(0.0) * 8.0).floor() as u64;
+                        let child_key = board.zobrist_key_after(candidate.move_, side)
+                            ^ depth_tag.wrapping_mul(0x9E37_79B9_7F4A_7C15);
                         if found_pv
                             && deferred_len < deferred.len()
                             && ctx.table.is_busy(child_key, ctx.salt)
@@ -942,14 +966,19 @@ impl AlphaBetaSearcher {
                 || (current <= -WIN && current < original_beta)
             {
                 hash_flag = HASHF_EXACT;
-                store_depth += 10;
+                store_depth += if subply_tt { 40 } else { 10 };
             }
             self.tt.store(TTEntry {
                 key: board.zobrist_key(),
                 value: score_to_tt(current, options.ply),
                 flag: hash_flag,
                 depth: store_depth,
-                priority: priority_base * 10 + hash_depth,
+                priority: priority_base * 10
+                    + if subply_tt {
+                        hash_depth / 8
+                    } else {
+                        hash_depth
+                    },
                 best_move,
                 generation: self.tt_generation,
             });

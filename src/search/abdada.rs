@@ -130,6 +130,7 @@ impl SharedRootBest {
 /// Per-depth shared coordination context passed to each participating thread.
 #[derive(Clone, Debug)]
 pub(crate) struct AbdadaContext {
+    pub worker_id: usize,
     pub table: Arc<AbdadaTable>,
     pub salt: u64,
     pub root_best: Arc<SharedRootBest>,
@@ -256,7 +257,7 @@ impl SearchWorkerPool {
             match thread::Builder::new()
                 .name(format!("gomoku-abdada-{worker_id}"))
                 .stack_size(WORKER_STACK_BYTES)
-                .spawn(move || worker_loop(shared_ref))
+                .spawn(move || worker_loop(shared_ref, worker_id))
             {
                 Ok(handle) => handles.push(handle),
                 Err(_) => {
@@ -345,7 +346,7 @@ impl Drop for SearchWorkerPool {
     }
 }
 
-fn run_depth_job(job: &DepthJob) {
+fn run_depth_job(job: &DepthJob, worker_id: usize) {
     let mut board = job.board.clone();
     let mut caches = job.caches.clone();
     let mut searcher = AlphaBetaSearcher::with_tt(job.config.clone(), job.tt.clone());
@@ -356,6 +357,7 @@ fn run_depth_job(job: &DepthJob) {
         ..SearchStats::default()
     };
     let abdada_ctx = AbdadaContext {
+        worker_id,
         table: Arc::clone(&job.abdada_table),
         salt: job.abdada_salt,
         root_best: Arc::clone(&job.root_best),
@@ -396,7 +398,7 @@ fn run_depth_job(job: &DepthJob) {
     }
 }
 
-fn worker_loop(shared: Arc<PoolShared>) {
+fn worker_loop(shared: Arc<PoolShared>, worker_id: usize) {
     let mut seen_generation = 0_u64;
     loop {
         let job = {
@@ -419,7 +421,7 @@ fn worker_loop(shared: Arc<PoolShared>) {
         };
         if let Some(job) = job {
             let _ = catch_unwind(AssertUnwindSafe(|| {
-                run_depth_job(&job);
+                run_depth_job(&job, worker_id);
             }));
         }
     }

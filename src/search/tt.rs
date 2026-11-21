@@ -271,6 +271,14 @@ impl TranspositionTable {
         Arc::ptr_eq(&self.storage, &other.storage)
     }
 
+    pub fn clear(&self) {
+        for bucket in &self.storage.buckets {
+            for entry in bucket {
+                entry.store_words(0, 0);
+            }
+        }
+    }
+
     pub fn fork_snapshot(&self) -> Self {
         let snapshot = Self {
             bucket_mask: self.bucket_mask,
