@@ -639,12 +639,9 @@ impl RootSearcher {
         recompute_all_for_rule(board, &mut caches, self.config.rule_set);
 
         self.alphabeta.config = self.config.clone();
-        let tt_scale = if self.config.runtime.threads > 1 {
-            crate::search::alphabeta::SUBPLY_TT_SCALE
-        } else {
-            1
-        };
-        self.tt.ensure_depth_scale(tt_scale);
+        let subply = self.config.runtime.threads > 1;
+        self.tt.set_subply(subply);
+        self.alphabeta.tt.set_subply(subply);
         self.alphabeta.advance_tt_generation();
         let mut best_move = None;
         let mut best_score = -INF;

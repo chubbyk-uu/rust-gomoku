@@ -931,26 +931,29 @@ from that unsound cutoff. Four reproduced bugs, all fixed with regressions:
    window. Now `maybe_33` is a superset of full-rule DoubleThree, falling back to
    `rule_legal_cached`. Regression: the 17-ply game; White `[7,6]` A3 defenses are
    exactly `{[5,4],[10,9]}`, and `[8,7]` is flagged `maybe_33` and judged illegal.
-3. **Mixed TT depth encodings on thread switch with the same capacity** (GUI/Android).
-   `TTStorage` now records `depth_scale` (`1` = integer ply, `128` = sub-ply).
-   `TranspositionTable::ensure_depth_scale` clears the table on any scale change.
-   It is called from `RootSearcher::search_alphabeta_only` and `search_with_abdada`.
-   It works through every new `RootSearcher::with_tt`. `GameController::set_threads`
-   also drops `search_tt` when crossing the 1T/MT boundary. Regression covers
-   4→1 (hot result == cold 1T: move, score, nodes) and 1→4 on d4/w20 Freestyle.
-4. **Sub-ply TT floor/floor cutoff & d13+ depth-cap saturation.** Now strictly
-   sound up to 50 plies:
+3. **Mixed TT depth encodings on thread switch or concurrent shared TT** (GUI/Android/library).
+   `TranspositionTable` now carries a handle-local `subply: bool` mode selector
+   (`set_subply`), while `TTStorage` binds the first mode used to its primary bucket
+   array (zero extra memory in single-mode runs) and lazily routes the other mode to
+   an isolated secondary bucket array (with per-entry mode-bit tagging inside
+   `RawEntry::data` as an OOM fallback). Sequential (`4→1`, `1→4`) and concurrent
+   `1T + 4T` searchers sharing the same `TranspositionTable` are completely isolated
+   down to exact node counts (`concurrent_and_interleaved_1t_and_mt_searches_on_shared_tt_stay_isolated`).
+4. **Sub-ply TT floor/floor cutoff & d13+ / d51+ depth-cap saturation.** Now strictly
+   sound for arbitrary depths:
    - Widened TT `depth` to 12 bits (`0..=4095`), kept `priority` at full 16 bits
-     (`0..=65535`), and set `generation` to 10 bits (`0..=1023`) inside the 64-bit
-     `RawEntry::data` word.
+     (`0..=65535`), tagged `subply` in 1 bit, and set `generation` to 9 bits
+     (`0..=511`) inside the 64-bit `RawEntry::data` word.
    - Multi-threaded TT uses 1/64-ply `store = floor(depth * 64.0)` and
      `probe = ceil(depth * 64.0)` with `SUBPLY_TT_DEPTH_CAP = 3200` (50 plies,
      well above `timed_max_depth = 25`; `+640` win/loss bonus = `3840 <= 4095`),
-     floor-quantized `base_depthdown = floor(raw_depthdown * 64.0) / 64.0` (so
-     internal nodes hit exact same-depth TT entries without ever rounding
-     near-full-width reductions up to `1.0`), and full sub-ply replacement
-     priority `priority_base * 256 + hash_depth` (so shallower sub-ply entries
-     never overwrite deeper ones in `slot 0`).
+     floor-quantized `base_depthdown = floor(raw_depthdown * 64.0) / 64.0`, and full
+     sub-ply replacement priority `priority_base * 256 + hash_depth`.
+   - When the actual requested depth exceeds the encodable range (`> 50` plies in MT
+     mode or `> 4085` plies in 1T mode), `probe_depth` is raised to `DEPTH_MAX + 1`
+     (`4096`) instead of being clamped down, so saturated TT entries only supply
+     move-ordering hints and never cut off or narrow the window
+     (`depth_above_50_uses_tt_move_hint_only_without_saturated_cutoff`).
    - Regressions: `1.00 -> 1.10`, `1.563125 -> 1.625`, and `1.6095 -> 1.625`
      never cut off deeper searches (`subply_tt_shallower_depth_never_cuts_off_deeper_search`),
      and 2-thread `d14/w2` genuinely expands `d13` and `d14` matching `1T`

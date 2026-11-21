@@ -23,10 +23,10 @@ use crate::search::{order_candidates_root_classic, TTEntry, TranspositionTable};
 use crate::threats::VCFSearcher;
 use crate::types::{Move, Side};
 
-pub(crate) const SUBPLY_TT_SCALE: u8 = 64;
 const SUBPLY_TT_SCALE_F64: f64 = 64.0;
 const SUBPLY_TT_DEPTH_CAP: i32 = 3200;
 const SUBPLY_TT_WIN_BONUS: i32 = 640;
+const INTEGER_TT_DEPTH_CAP: i32 = crate::search::tt::DEPTH_MAX - 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RootCandidateProfile {
@@ -283,12 +283,7 @@ impl AlphaBetaSearcher {
         options: SearchOptions<'_>,
         abdada: Option<&AbdadaContext>,
     ) -> (i32, Option<Move>) {
-        let tt_scale = if self.config.runtime.threads > 1 {
-            SUBPLY_TT_SCALE
-        } else {
-            1
-        };
-        self.tt.ensure_depth_scale(tt_scale);
+        self.tt.set_subply(self.config.runtime.threads > 1);
         let mut coverage = CoverageTracker::from_board(board);
         self.search_with_coverage(
             board,
@@ -325,23 +320,33 @@ impl AlphaBetaSearcher {
         let root_depth = options.root_depth.unwrap_or(depth);
         let priority_base = options.priority_base.unwrap_or(board.move_count() as i32);
         let subply_tt = self.config.runtime.threads > 1;
-        let hash_depth = if subply_tt {
-            if depth <= 0.0 {
-                0
-            } else {
-                ((depth * SUBPLY_TT_SCALE_F64).floor() as i32).clamp(1, SUBPLY_TT_DEPTH_CAP)
-            }
+        let max_encodable_depth = if subply_tt {
+            SUBPLY_TT_DEPTH_CAP
         } else {
-            depth as i32
+            INTEGER_TT_DEPTH_CAP
         };
-        let probe_depth = if subply_tt {
-            if depth <= 0.0 {
-                0
-            } else {
-                ((depth * SUBPLY_TT_SCALE_F64).ceil() as i32).clamp(1, SUBPLY_TT_DEPTH_CAP)
-            }
+        let raw_hash_depth = if depth <= 0.0 {
+            0
+        } else if subply_tt {
+            ((depth * SUBPLY_TT_SCALE_F64).floor() as i64).clamp(1, i64::from(i32::MAX)) as i32
         } else {
-            depth.ceil() as i32
+            (depth.floor() as i64).clamp(1, i64::from(i32::MAX)) as i32
+        };
+        let hash_depth = raw_hash_depth.min(max_encodable_depth);
+        let raw_probe_depth = if depth <= 0.0 {
+            0
+        } else if subply_tt {
+            ((depth * SUBPLY_TT_SCALE_F64).ceil() as i64).clamp(1, i64::from(i32::MAX)) as i32
+        } else {
+            (depth.ceil() as i64).clamp(1, i64::from(i32::MAX)) as i32
+        };
+        // If the requested depth exceeds the encodable range, raise probe_depth
+        // above DEPTH_MAX so saturated TT records can only provide move hints
+        // and never cut off or narrow the search window.
+        let probe_depth = if raw_probe_depth > max_encodable_depth {
+            crate::search::tt::DEPTH_MAX + 1
+        } else {
+            raw_probe_depth
         };
         let original_beta = beta;
 
@@ -1240,5 +1245,127 @@ mod tests {
                 prof.nodes
             );
         }
+    }
+
+    #[test]
+    fn depth_above_50_uses_tt_move_hint_only_without_saturated_cutoff() {
+        let mut board = Board::new();
+        for (x, y) in [(7, 7), (7, 6), (8, 8), (6, 6), (6, 8), (5, 8)] {
+            let m = xy_to_move(x, y).unwrap();
+            board.play_for_rule(m, None, RuleSet::Freestyle).unwrap();
+        }
+        let mut cfg = load_default_config();
+        cfg.rule_set = RuleSet::Freestyle;
+        cfg.runtime.threads = 2;
+        cfg.runtime.compute_vcf = false;
+        cfg.runtime.compute_vct = false;
+
+        let mut caches = EvalCaches::new();
+        recompute_all_for_rule(&mut board, &mut caches, RuleSet::Freestyle);
+        let side = board.side_to_move();
+
+        let mut searcher = AlphaBetaSearcher::new(cfg);
+        searcher.tt.set_subply(true);
+        // Store a normal d50 record (encoded at the saturation cap 3200).
+        searcher.tt.store(TTEntry {
+            key: board.zobrist_key(),
+            value: 95,
+            flag: HASHF_EXACT,
+            depth: SUBPLY_TT_DEPTH_CAP,
+            priority: 1000,
+            best_move: Some(xy_to_move(8, 7).unwrap()),
+            generation: 1,
+        });
+
+        // Request d51 (with node_limit so it stops quickly after expanding root):
+        // it must NOT cut off at 1 node from the d50 record.
+        let mut stats = SearchStats {
+            node_limit: Some(32),
+            ..SearchStats::default()
+        };
+        let _ = searcher.search(
+            &mut board,
+            &mut caches,
+            side,
+            51.0,
+            -INF,
+            INF,
+            2,
+            &mut stats,
+            SearchOptions {
+                opo: 1,
+                root: true,
+                ..SearchOptions::default()
+            },
+        );
+        assert!(
+            stats.nodes > 1,
+            "d51 search must not cut off at 1 node from a saturated d50 TT entry"
+        );
+        assert_eq!(stats.tt_hits, 0);
+    }
+
+    #[test]
+    fn concurrent_and_interleaved_1t_and_mt_searches_on_shared_tt_stay_isolated() {
+        let mut board = Board::new();
+        for (x, y) in [(7, 7), (7, 6), (8, 8), (6, 6), (6, 8), (5, 8)] {
+            let m = xy_to_move(x, y).unwrap();
+            board.play_for_rule(m, None, RuleSet::Freestyle).unwrap();
+        }
+        let limits_d7 = crate::search::SearchLimits {
+            max_depth: 7,
+            root_width: 10,
+            node_limit: None,
+            time_limit_ms: None,
+        };
+        let limits_d5 = crate::search::SearchLimits {
+            max_depth: 5,
+            root_width: 10,
+            node_limit: None,
+            time_limit_ms: None,
+        };
+
+        let mut cfg_1t = load_default_config();
+        cfg_1t.rule_set = RuleSet::Freestyle;
+        cfg_1t.runtime.threads = 1;
+        cfg_1t.runtime.compute_vcf = false;
+        cfg_1t.runtime.compute_vct = false;
+
+        // Cold 1T d7 baseline.
+        let mut cold_1t = crate::search::RootSearcher::new(cfg_1t.clone());
+        let cold_res = cold_1t.search(&mut board.clone(), Some(limits_d7));
+        assert!(cold_res.nodes > 100);
+
+        // Shared TT between a 4T searcher and a 1T searcher running concurrently.
+        let shared_tt = TranspositionTable::new(16);
+        let mut cfg_4t = cfg_1t.clone();
+        cfg_4t.runtime.threads = 4;
+
+        let (res_1t, _) = std::thread::scope(|s| {
+            let b1 = board.clone();
+            let b4 = board.clone();
+            let tt1 = shared_tt.clone();
+            let tt4 = shared_tt.clone();
+            let c1 = cfg_1t.clone();
+            let c4 = cfg_4t.clone();
+
+            let h4 = s.spawn(move || {
+                let mut s4 = crate::search::RootSearcher::with_tt(c4, tt4);
+                for _ in 0..3 {
+                    let _ = s4.search(&mut b4.clone(), Some(limits_d5));
+                }
+            });
+            let h1 = s.spawn(move || {
+                let mut s1 = crate::search::RootSearcher::with_tt(c1, tt1);
+                s1.search(&mut b1.clone(), Some(limits_d7))
+            });
+            let r1 = h1.join().unwrap();
+            h4.join().unwrap();
+            (r1, ())
+        });
+
+        assert_eq!(res_1t.move_, cold_res.move_);
+        assert_eq!(res_1t.score, cold_res.score);
+        assert_eq!(res_1t.nodes, cold_res.nodes);
     }
 }

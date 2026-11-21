@@ -3,7 +3,7 @@
 use std::array;
 use std::sync::{
     atomic::{AtomicU64, AtomicU8, Ordering},
-    Arc,
+    Arc, OnceLock,
 };
 
 use crate::constants::{HASHF_ALPHA, HASHF_BETA, HASHF_EMPTY, HASHF_EXACT};
@@ -89,24 +89,56 @@ impl Default for ProbeResult {
 #[derive(Debug)]
 struct TTStorage {
     buckets: Vec<[RawEntry; 2]>,
-    depth_scale: AtomicU8,
+    primary_mode: AtomicU8,
+    secondary_buckets: OnceLock<Option<Vec<[RawEntry; 2]>>>,
 }
 
 impl TTStorage {
-    fn try_new(bucket_count: usize) -> Result<Self, TTError> {
+    fn alloc_buckets(bucket_count: usize) -> Result<Vec<[RawEntry; 2]>, TTError> {
         let mut buckets = Vec::new();
         buckets
             .try_reserve_exact(bucket_count)
             .map_err(|_| TTError::AllocationFailed)?;
         buckets.extend((0..bucket_count).map(|_| array::from_fn(|_| RawEntry::default())));
+        Ok(buckets)
+    }
+
+    fn try_new(bucket_count: usize) -> Result<Self, TTError> {
         Ok(Self {
-            buckets,
-            depth_scale: AtomicU8::new(0),
+            buckets: Self::alloc_buckets(bucket_count)?,
+            primary_mode: AtomicU8::new(0),
+            secondary_buckets: OnceLock::new(),
         })
     }
 
     fn bucket_count(&self) -> usize {
         self.buckets.len()
+    }
+
+    #[inline]
+    fn buckets_for_mode(&self, subply: bool) -> &[[RawEntry; 2]] {
+        let wanted = if subply { 2_u8 } else { 1_u8 };
+        let current = self.primary_mode.load(Ordering::Acquire);
+        if current == wanted {
+            return &self.buckets;
+        }
+        if current == 0
+            && self
+                .primary_mode
+                .compare_exchange(0, wanted, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            return &self.buckets;
+        }
+        if let Some(sec) = self
+            .secondary_buckets
+            .get_or_init(|| Self::alloc_buckets(self.buckets.len()).ok())
+            .as_ref()
+        {
+            sec
+        } else {
+            &self.buckets
+        }
     }
 }
 
@@ -138,26 +170,26 @@ impl RawEntry {
         self.key_check.store(key_check, Ordering::Relaxed);
     }
 
-    fn load_for_key(&self, key: u64) -> TTEntry {
+    fn load_for_key(&self, key: u64, expected_subply: bool) -> TTEntry {
         let data = self.data.load(Ordering::Relaxed);
         let key_check = self.key_check.load(Ordering::Relaxed);
-        if data == 0 || (key_check ^ data) != key {
+        if data == 0 || (key_check ^ data) != key || unpack_subply(data) != expected_subply {
             return TTEntry::default();
         }
         unpack_entry(key, data)
     }
 
-    fn load_raw(&self) -> TTEntry {
+    fn load_raw_with_mode(&self) -> (TTEntry, bool) {
         let data = self.data.load(Ordering::Relaxed);
         let key_check = self.key_check.load(Ordering::Relaxed);
         if data == 0 {
-            return TTEntry::default();
+            return (TTEntry::default(), false);
         }
-        unpack_entry(key_check ^ data, data)
+        (unpack_entry(key_check ^ data, data), unpack_subply(data))
     }
 
-    fn store(&self, entry: TTEntry) {
-        let data = pack_entry(entry);
+    fn store(&self, entry: TTEntry, subply: bool) {
+        let data = pack_entry(entry, subply);
         self.data.store(data, Ordering::Relaxed);
         self.key_check.store(entry.key ^ data, Ordering::Relaxed);
     }
@@ -167,15 +199,21 @@ const VALUE_SHIFT: u64 = 48;
 const FLAG_SHIFT: u64 = 46;
 const DEPTH_SHIFT: u64 = 34;
 const DEPTH_MASK: u64 = 0x0FFF;
-const DEPTH_MAX: i32 = 0x0FFF;
+pub(crate) const DEPTH_MAX: i32 = 0x0FFF;
 const PRIORITY_SHIFT: u64 = 18;
 const PRIORITY_MASK: u64 = 0xFFFF;
 const PRIORITY_MAX: i32 = 0xFFFF;
 const BEST_MOVE_SHIFT: u64 = 10;
 const BEST_MOVE_NONE: u8 = 0xFF;
-pub(crate) const GENERATION_MASK: u16 = 0x03FF;
+const SUBPLY_SHIFT: u64 = 9;
+pub(crate) const GENERATION_MASK: u16 = 0x01FF;
 
-fn pack_entry(entry: TTEntry) -> u64 {
+#[inline]
+fn unpack_subply(data: u64) -> bool {
+    ((data >> SUBPLY_SHIFT) & 1) != 0
+}
+
+fn pack_entry(entry: TTEntry, subply: bool) -> u64 {
     debug_assert!(
         i32::from(entry.value as i16) == entry.value,
         "TT value {} does not fit the i16 packing field",
@@ -200,8 +238,9 @@ fn pack_entry(entry: TTEntry) -> u64 {
         .and_then(|move_| u8::try_from(move_).ok())
         .unwrap_or(BEST_MOVE_NONE);
     let best_move = u64::from(best_move) << BEST_MOVE_SHIFT;
+    let subply_bit = u64::from(subply) << SUBPLY_SHIFT;
     let generation = u64::from(entry.generation & GENERATION_MASK);
-    value | flag | depth | priority | best_move | generation
+    value | flag | depth | priority | best_move | subply_bit | generation
 }
 
 fn unpack_entry(key: u64, data: u64) -> TTEntry {
@@ -226,6 +265,7 @@ fn unpack_entry(key: u64, data: u64) -> TTEntry {
 pub struct TranspositionTable {
     pub bucket_mask: u64,
     storage: Arc<TTStorage>,
+    subply: bool,
 }
 
 impl TranspositionTable {
@@ -239,6 +279,7 @@ impl TranspositionTable {
         Ok(Self {
             bucket_mask: (1_u64 << bucket_bits) - 1,
             storage: Arc::new(TTStorage::try_new(bucket_count)?),
+            subply: false,
         })
     }
 
@@ -266,9 +307,9 @@ impl TranspositionTable {
     }
 
     pub fn bucket(&self, key: u64) -> [TTEntry; 2] {
-        self.storage.buckets[self.bucket_index(key)]
+        self.storage.buckets_for_mode(self.subply)[self.bucket_index(key)]
             .each_ref()
-            .map(|entry| entry.load_for_key(key))
+            .map(|entry| entry.load_for_key(key, self.subply))
     }
 
     pub fn bucket_count(&self) -> usize {
@@ -285,22 +326,26 @@ impl TranspositionTable {
                 entry.store_words(0, 0);
             }
         }
-        self.storage.depth_scale.store(0, Ordering::Release);
+        if let Some(Some(sec)) = self.storage.secondary_buckets.get() {
+            for bucket in sec {
+                for entry in bucket {
+                    entry.store_words(0, 0);
+                }
+            }
+        }
     }
 
-    /// Ensures all entries in this table share the same depth encoding scale.
-    /// If a caller switches between integer-ply (1T) and sub-ply (MT) modes on
-    /// a reused table (even when bucket capacity is unchanged), clears stale
-    /// entries so mismatched depth scales can never interact.
-    pub fn ensure_depth_scale(&self, scale: u8) {
-        let prev = self.storage.depth_scale.load(Ordering::Acquire);
-        if prev == scale {
-            return;
-        }
-        if prev != 0 {
-            self.clear();
-        }
-        self.storage.depth_scale.store(scale, Ordering::Release);
+    /// Selects the depth encoding partition (`false` = integer-ply 1T mode,
+    /// `true` = 1/64-ply multi-threaded mode) on this table handle.
+    /// The first mode used claims the primary bucket array; if the other mode
+    /// is also used on the same `Arc<TTStorage>`, it automatically routes to
+    /// an isolated secondary bucket array (plus per-entry mode-bit tagging).
+    pub fn set_subply(&mut self, subply: bool) {
+        self.subply = subply;
+    }
+
+    pub fn is_subply(&self) -> bool {
+        self.subply
     }
 
     pub fn fork_snapshot(&self) -> Self {
@@ -310,17 +355,11 @@ impl TranspositionTable {
                 TTStorage::try_new(self.storage.bucket_count())
                     .expect("existing TT capacity remains allocatable for snapshot"),
             ),
+            subply: self.subply,
         };
-        snapshot.storage.depth_scale.store(
-            self.storage.depth_scale.load(Ordering::Acquire),
-            Ordering::Release,
-        );
-        for (src_bucket, dst_bucket) in self
-            .storage
-            .buckets
-            .iter()
-            .zip(snapshot.storage.buckets.iter())
-        {
+        let src_buckets = self.storage.buckets_for_mode(self.subply);
+        let dst_buckets = snapshot.storage.buckets_for_mode(self.subply);
+        for (src_bucket, dst_bucket) in src_buckets.iter().zip(dst_buckets.iter()) {
             for (src, dst) in src_bucket.iter().zip(dst_bucket.iter()) {
                 let (key_check, data) = src.load_words();
                 dst.store_words(key_check, data);
@@ -330,13 +369,15 @@ impl TranspositionTable {
     }
 
     pub fn store(&self, entry: TTEntry) {
-        let bucket = &self.storage.buckets[self.bucket_index(entry.key)];
-        let first = bucket[0].load_raw();
+        let bucket = &self.storage.buckets_for_mode(self.subply)[self.bucket_index(entry.key)];
+        let (first, first_subply) = bucket[0].load_raw_with_mode();
         let mut slot = 0_usize;
-        if first.flag != HASHF_EMPTY && first.priority > entry.priority {
+        if first.flag != HASHF_EMPTY
+            && (first_subply != self.subply || first.priority > entry.priority)
+        {
             slot = 1;
         }
-        bucket[slot].store(entry);
+        bucket[slot].store(entry, self.subply);
     }
 
     pub fn probe(&self, key: u64, depth: i32, alpha: i32, beta: i32) -> ProbeResult {
