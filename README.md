@@ -6,17 +6,17 @@ A Chinese version of this document is available at [README-cn.md](README-cn.md).
 
 ## Screenshots
 
-Download the Windows x64 program and signed Android ARM64 APK from the [latest release](https://github.com/chubbyk-uu/rust-gomoku/releases/latest).
+Download the Windows x64 program and signed Android ARM64 APK / AAB from the [latest release](https://github.com/chubbyk-uu/rust-gomoku/releases/latest).
 
 ### Windows / Desktop GUI
 
-The Windows program opens this local browser interface. Play against the engine or another person, choose freestyle or Renju, and adjust difficulty from the side panel.
+The Windows program opens this local browser interface. Play against the engine or another person, choose freestyle or Renju, switch between Untimed (five difficulty presets) and Timed (per-move time budget) modes, and toggle multi-threaded search from the side panel.
 
-![Desktop GUI showing a game against the engine and the rule and difficulty controls](docs/screenshots/desktop-gui.png)
+![Desktop GUI showing a game against the engine and the rule, thinking-mode, difficulty, and multi-thread controls](docs/screenshots/desktop-gui.png)
 
 ### Android
 
-The mobile interface puts the board, turn status, and undo/new-game controls together. Five difficulty levels range from Beginner to Master; Intermediate is the default.
+The mobile interface puts the board, turn status, and undo/new-game controls together. It supports both Untimed mode (five difficulty levels from Beginner to Master; Intermediate is the default) and Timed mode (`200 ms`–`5000 ms` per move), plus a multi-threaded search toggle.
 
 <p>
   <img src="docs/screenshots/android-portrait.png" alt="Android interface in portrait orientation during a Renju game" width="320">
@@ -40,6 +40,8 @@ Completed:
 - Rust/reference diff harness, Rust/reference matches, head-to-head matches, and same-position benchmark scaffolding.
 - Renju oracle, dense-stress, exhaustive-line, candidate-diagnostic, performance, and rule-aware match-referee tooling.
 - Non-root candidate ordering cost optimization: keeps the original ordering key while reducing `getmi` and candidate copy overhead (lazy tie-group `getmi` + TT-best-move deferred primary sort).
+- Incremental 4-direction `Pattern4` bitboard/LUT tactical accelerator for VCF and VCT (`5.5x`–`8.6x` speedup on dense Renju VCT6 cases), with exact Renju open-three superset filtering (`maybe_33`) and White `B4` post-move forbidden-reply re-verification.
+- Multi-threaded ABDADA search (`--threads N` / `INFO thread_num N`) with `1/64`-ply sub-ply TT depth encoding (`store = floor(d * 64)`, `probe = ceil(d * 64)` up to 50 plies; `> 50` plies degrades to move-ordering hints only), full sub-ply replacement priority, and mode-isolated dual TT bucket planes for safe concurrent single/multi-threaded sharing.
 - External reference engines such as SlowRenju and Rapfi are used from local
   checkouts when needed; bundled lightweight opponents are no longer committed.
 
@@ -81,7 +83,9 @@ The main defaults live in `src/config.rs`.
 | `static_board` | on |
 | `dynamic_board_margin` | `4` |
 
-The desktop GUI and Android app expose five shared difficulty presets:
+The desktop GUI and Android app support two thinking modes:
+
+1. **Untimed mode** (default) — five shared fixed-depth difficulty presets:
 
 | Difficulty | Search | VCF / VCT |
 |---|---:|---:|
@@ -91,7 +95,9 @@ The desktop GUI and Android app expose five shared difficulty presets:
 | Senior | `d6 / w30` | on, `root_vct_depth=6` |
 | Master | `d8 / w40` | on, `root_vct_depth=6` |
 
-Intermediate is the default for the desktop GUI and Android app. Difficulty controls depth, width, and tactical search.
+Intermediate is the default difficulty for the desktop GUI and Android app. Difficulty controls depth, width, and tactical search.
+
+2. **Timed mode** — per-move time limit presets (`200 ms`, `500 ms`, `1000 ms`, `2000 ms`, `5000 ms`; default `500 ms`), running iterative deepening up to `d25 / w40` with VCF/VCT enabled (root VCT is capped at 30% of the move time budget so alpha-beta always retains search time).
 
 For strict diffs against the Python reference or reproducing reference experiments, `depth=6,width=20,root_vct_depth=4` is typically passed explicitly.
 
@@ -152,7 +158,7 @@ Launch the GUI:
 cargo run --release --bin gomoku_gui
 ```
 
-The GUI opens `http://127.0.0.1:18080` in the default browser automatically; pass `--no-open-browser` to disable that behavior. It supports a vs-engine mode (playing black/white) and a two-player mode (two humans alternating on the same board with no engine), freestyle or Renju rules, five difficulty levels, undo, restart, async thinking, move number display, a result dialog, and a status panel; shortcuts: `U` to undo, `R` to restart. The engine-only controls (side, difficulty) are hidden in two-player mode. Rule selection applies only when starting a new game. During a Renju black turn, forbidden intersections are marked with red crosses and forbidden input is rejected without placing a stone (this holds in both modes). Difficulty can only change while the engine is idle and affects the next engine think without resetting the board.
+The GUI opens `http://127.0.0.1:18080` in the default browser automatically; pass `--no-open-browser` to disable that behavior. It supports a vs-engine mode (playing black/white) and a two-player mode (two humans alternating on the same board with no engine), freestyle or Renju rules, Untimed (five difficulty levels) and Timed (`200 ms`–`5000 ms` per move) thinking modes, a multi-threaded search toggle, undo, restart, async thinking, move number display, a result dialog, and a status panel; shortcuts: `U` to undo, `R` to restart. The engine-only controls (side, thinking mode, difficulty/time limit, multi-threading) are hidden in two-player mode. On an empty board, rule, game mode, and thinking mode apply immediately; once a game is underway (`move_count > 0`), changing them shows a pending notice and takes effect when starting the next game. During a Renju black turn, forbidden intersections are marked with red crosses and forbidden input is rejected without placing a stone (this holds in both modes). Difficulty, per-move time limit, and the multi-thread toggle can be adjusted mid-game while the engine is idle and affect the next engine move without resetting the board.
 
 Gomocup engine:
 
@@ -187,7 +193,9 @@ Common `INFO` commands:
 - `INFO root_profile 0|1`
 
 VCF, VCT and alpha-beta share a deadline and cumulative node budget across a move.
-When both time controls are given the smaller limit applies. Cancellation is
+When both time controls are given the smaller limit applies; under a time limit,
+root VCT is capped at 30% of the move budget so alpha-beta still runs when VCT
+does not find a forced win. Cancellation is
 cooperative. Finishing a board operation, selecting a legal fallback and
 protocol setup can add wall time. Under a budget, the reported node count
 includes tactical visits. Without limits it retains the alpha-beta count.

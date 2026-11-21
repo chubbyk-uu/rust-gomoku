@@ -4,17 +4,17 @@
 
 ## 界面截图
 
-Windows x64 程序和已签名的 Android ARM64 APK 可从[最新 Release](https://github.com/chubbyk-uu/rust-gomoku/releases/latest)下载。
+Windows x64 程序和已签名的 Android ARM64 APK / AAB 可从[最新 Release](https://github.com/chubbyk-uu/rust-gomoku/releases/latest)下载。
 
 ### Windows / 桌面 GUI
 
-Windows 程序启动后打开本地网页界面。可与引擎对弈或进行双人对局，在右侧选择无禁手或连珠规则、调整难度。
+Windows 程序启动后打开本地网页界面。可与引擎对弈或进行双人对局，在右侧选择无禁手或连珠规则、切换不限时（五档难度）或限时（每步时间上限）思考模式，并可开关多线程搜索。
 
-![桌面 GUI：与引擎对弈，右侧提供规则与难度设置](docs/screenshots/desktop-gui.png)
+![桌面 GUI：与引擎对弈，右侧提供规则、思考模式、难度与多线程设置](docs/screenshots/desktop-gui.png)
 
 ### Android
 
-手机界面集中展示棋盘、当前回合，以及悔棋和新局操作。提供入门、初级、中级、高级、大师五档难度，默认中级。
+手机界面集中展示棋盘、当前回合，以及悔棋和新局操作。支持不限时（入门、初级、中级、高级、大师五档难度，默认中级）和限时（每步 `200 ms`–`5000 ms`）两种思考模式，以及多线程搜索开关。
 
 <p>
   <img src="docs/screenshots/android-portrait.png" alt="Android 竖屏界面：连珠对局进行中" width="320">
@@ -38,6 +38,8 @@ Windows 程序启动后打开本地网页界面。可与引擎对弈或进行双
 - Rust/reference 差分、Rust/reference 对战、双引擎对战和同局面 benchmark 脚手架。
 - 连珠 oracle、定向密集压测、一维穷举、候选诊断、性能测试和规则感知对局裁判工具。
 - 非 root 候选排序成本优化：保持原排序 key 不变，减少 `getmi` 和候选复制开销（惰性 tie-group `getmi` + TT best move 延迟主排序）。
+- 四方向增量 `Pattern4` 位棋盘/LUT 战术加速（VCF 与 VCT），在连珠密集 VCT6 局面提速 `5.5x`–`8.6x`，包含精确连珠活三超集过滤（`maybe_33`）及白棋 `B4` 落子后对黑方禁手防点的复验。
+- 多线程 ABDADA 搜索（`--threads N` / `INFO thread_num N`），配备 `1/64` 层细粒度 TT 深度编码（`store = floor(d * 64)`、`probe = ceil(d * 64)`，编码上限 50 层；超过 50 层仅使用 TT 走法提示）、完整子层替换优先级，以及按单/多线程模式隔离的双平面共享置换表。
 - SlowRenju、Rapfi 等外部参考引擎按需从本地 checkout 使用；仓库不再提交轻量对手或完整 Python reference。
 
 可选诊断/实验：
@@ -49,8 +51,8 @@ Windows 程序启动后打开本地网页界面。可与引擎对弈或进行双
 GUI 入口仅在单线程（`--threads 1`）手动对局时默认开启 `overlap_vct_alphabeta`；多线程模式下保持关闭以避免额外 64 MiB TT 快照与核心争抢。Gomocup、diff、case probe 和库默认均保持关闭。
 历史性能实验和止损结论记录在 `docs/perf-log.md`，README 不重复维护失败方案清单。
 Android 架构、手机界面、JNI 边界和分阶段验证门槛记录在
-`docs/android-app-design.md`。Android 应用已可构建 ARM64 APK，并通过
-JNI 使用共享 Rust 控制器。
+`docs/android-app-design.md`。Android 应用可构建 ARM64 debug 与已签名
+release 产物（APK / AAB），并通过 JNI 使用共享 Rust 控制器。
 
 ## 默认参数
 
@@ -76,7 +78,9 @@ JNI 使用共享 Rust 控制器。
 | `static_board` | 开启 |
 | `dynamic_board_margin` | `4` |
 
-桌面 GUI 和 Android 应用提供五档共享难度：
+桌面 GUI 和 Android 应用支持两种思考模式：
+
+1. **不限时模式**（默认）——提供五档共享固定深度难度：
 
 | 难度 | 搜索参数 | VCF / VCT |
 |---|---:|---:|
@@ -87,6 +91,8 @@ JNI 使用共享 Rust 控制器。
 | 大师 | `d8 / w40` | 开启，`root_vct_depth=6` |
 
 中级是桌面 GUI 和 Android 应用的默认难度。难度控制深度、宽度和战术搜索。
+
+2. **限时模式**——提供每步时间上限档位（`200 ms`、`500 ms`、`1000 ms`、`2000 ms`、`5000 ms`，默认 `500 ms`），在 `w40` 下迭代加深至最多 `d25` 并开启 VCF/VCT（限时模式下 root VCT 最多使用整手预算的 30%，确保未算杀成功时 alpha-beta 仍有充足搜索时间）。
 
 与 Python reference 严格差分或复现实验时，通常显式使用 `depth=6,width=20,root_vct_depth=4`。
 
@@ -122,6 +128,16 @@ cargo test --quiet
 python3 scripts/run_diff.py --jobs 10
 ```
 
+Android debug/release 验证与构建：
+
+```bash
+cd android
+./gradlew test lint assembleDebug
+./gradlew test lint assembleRelease bundleRelease
+```
+
+Release 签名默认读取 `~/.android/rust-gomoku-release.properties`；本地签名文件格式和覆盖环境变量详见 `docs/android-app-design.md`。
+
 Gomocup smoke：
 
 ```bash
@@ -135,7 +151,7 @@ printf 'START 15\nINFO rule 4\nBEGIN\nEND\n' | cargo run --quiet --bin gomocup_e
 cargo run --release --bin gomoku_gui
 ```
 
-GUI 会自动用默认浏览器打开 `http://127.0.0.1:18080`；如需关闭自动打开行为，可加 `--no-open-browser`。GUI 支持人机对战（执黑/执白）和双人对弈（两人在同一棋盘轮流落子、不启动引擎）两种对战模式，无禁手或连珠规则、五档难度、悔棋、重新开局、异步思考、手数显示、胜负弹窗和状态面板；快捷键 `U` 悔棋，`R` 重新开局。双人模式下会隐藏仅人机模式有意义的控件（执棋、难度）。规则选择只在新局开始时生效；连珠黑方回合会用红叉标出禁手点，点击禁手点会被拒绝且不会落子（两种模式都如此）。难度只在引擎未思考时允许切换，不重置当前棋局，只影响下一次引擎思考。
+GUI 会自动用默认浏览器打开 `http://127.0.0.1:18080`；如需关闭自动打开行为，可加 `--no-open-browser`。GUI 支持人机对战（执黑/执白）和双人对弈（两人在同一棋盘轮流落子、不启动引擎）两种对战模式，无禁手或连珠规则、不限时（五档难度）和限时（每步 `200 ms`–`5000 ms`）两种思考模式、多线程搜索开关、悔棋、重新开局、异步思考、手数显示、胜负弹窗和状态面板；快捷键 `U` 悔棋，`R` 重新开局。双人模式下会隐藏仅人机模式有意义的控件（执棋、思考模式、难度/每步限时、多线程）。空棋盘时切换对战模式、规则或思考模式会立即生效；落子后（`move_count > 0`）切换会显示待生效提示，并在点击开局按钮开始新局时生效。连珠黑方回合会用红叉标出禁手点，点击禁手点会被拒绝且不会落子（两种模式都如此）。难度、每步限时和多线程开关可在对局中途引擎空闲时随时调整，不重置当前棋局，只影响下一次引擎思考。
 
 Gomocup engine：
 
@@ -170,7 +186,7 @@ target/release/gomocup_engine --tt-bits 22
 - `INFO root_profile 0|1`
 
 VCF、VCT 与 alpha-beta 在一手棋内共用截止时间和累计节点预算。同时给出
-`timeout_turn` 与 `time_left` 时取较小值。搜索采用协作式中止，完成当前棋盘
+`timeout_turn` 与 `time_left` 时取较小值；限时搜索下 root VCT 子预算上限为整手预算的 30%，确保未算杀时留出 alpha-beta 搜索时间。搜索采用协作式中止，完成当前棋盘
 操作、选择合法后备手及协议初始化仍可能产生额外耗时。限额搜索报告的节点数
 包含战术节点，无限额搜索沿用 alpha-beta 节点数。
 
