@@ -213,16 +213,19 @@ pub struct AlphaBetaSearcher {
 
 impl AlphaBetaSearcher {
     pub fn new(config: EngineConfig) -> Self {
+        let mut tt = TranspositionTable::default();
+        tt.set_subply(config.runtime.threads > 1);
         Self {
             config,
-            tt: TranspositionTable::default(),
+            tt,
             vcf: VCFSearcher::default(),
             tt_generation: 0,
             movegen_scratch: MoveAnalysis::new(),
         }
     }
 
-    pub fn with_tt(config: EngineConfig, tt: TranspositionTable) -> Self {
+    pub fn with_tt(config: EngineConfig, mut tt: TranspositionTable) -> Self {
+        tt.set_subply(config.runtime.threads > 1);
         Self {
             config,
             tt,
@@ -319,7 +322,7 @@ impl AlphaBetaSearcher {
     ) -> (i32, Option<Move>) {
         let root_depth = options.root_depth.unwrap_or(depth);
         let priority_base = options.priority_base.unwrap_or(board.move_count() as i32);
-        let subply_tt = self.config.runtime.threads > 1;
+        let subply_tt = self.tt.is_subply();
         let max_encodable_depth = if subply_tt {
             SUBPLY_TT_DEPTH_CAP
         } else {
@@ -328,9 +331,9 @@ impl AlphaBetaSearcher {
         let raw_hash_depth = if depth <= 0.0 {
             0
         } else if subply_tt {
-            ((depth * SUBPLY_TT_SCALE_F64).floor() as i64).clamp(1, i64::from(i32::MAX)) as i32
+            ((depth * SUBPLY_TT_SCALE_F64).floor() as i64).clamp(0, i64::from(i32::MAX)) as i32
         } else {
-            (depth.floor() as i64).clamp(1, i64::from(i32::MAX)) as i32
+            (depth.floor() as i64).clamp(0, i64::from(i32::MAX)) as i32
         };
         let hash_depth = raw_hash_depth.min(max_encodable_depth);
         let raw_probe_depth = if depth <= 0.0 {
@@ -1331,8 +1334,9 @@ mod tests {
         cfg_1t.runtime.compute_vcf = false;
         cfg_1t.runtime.compute_vct = false;
 
-        // Cold 1T d7 baseline.
-        let mut cold_1t = crate::search::RootSearcher::new(cfg_1t.clone());
+        // Cold 1T d7 baseline with the same 16-bit TT capacity.
+        let mut cold_1t =
+            crate::search::RootSearcher::with_tt(cfg_1t.clone(), TranspositionTable::new(16));
         let cold_res = cold_1t.search(&mut board.clone(), Some(limits_d7));
         assert!(cold_res.nodes > 100);
 
@@ -1367,5 +1371,119 @@ mod tests {
         assert_eq!(res_1t.move_, cold_res.move_);
         assert_eq!(res_1t.score, cold_res.score);
         assert_eq!(res_1t.nodes, cold_res.nodes);
+    }
+
+    #[test]
+    fn single_thread_sub_one_depth_stores_zero_and_never_cuts_off_depth_one() {
+        let mut board = Board::new();
+        for (x, y) in [(7, 7), (7, 6), (8, 8), (6, 6), (6, 8), (5, 8)] {
+            let m = xy_to_move(x, y).unwrap();
+            board.play_for_rule(m, None, RuleSet::Freestyle).unwrap();
+        }
+        let mut cfg = load_default_config();
+        cfg.rule_set = RuleSet::Freestyle;
+        cfg.runtime.threads = 1;
+        cfg.runtime.compute_vcf = false;
+        cfg.runtime.compute_vct = false;
+
+        let mut caches = EvalCaches::new();
+        recompute_all_for_rule(&mut board, &mut caches, RuleSet::Freestyle);
+        let side = board.side_to_move();
+
+        let mut cold_10 = AlphaBetaSearcher::new(cfg.clone());
+        let mut cold_stats = SearchStats::default();
+        let (cold_score, cold_move) = cold_10.search(
+            &mut board.clone(),
+            &mut caches.clone(),
+            side,
+            1.0,
+            -INF,
+            INF,
+            12,
+            &mut cold_stats,
+            SearchOptions {
+                opo: 1,
+                root: true,
+                ..SearchOptions::default()
+            },
+        );
+        assert!(cold_stats.nodes > 1);
+
+        let mut warm = AlphaBetaSearcher::new(cfg);
+        let mut stats_025 = SearchStats::default();
+        let _ = warm.search(
+            &mut board.clone(),
+            &mut caches.clone(),
+            side,
+            0.25,
+            -INF,
+            INF,
+            12,
+            &mut stats_025,
+            SearchOptions {
+                opo: 1,
+                root: true,
+                ..SearchOptions::default()
+            },
+        );
+
+        let mut warm_stats = SearchStats::default();
+        let (warm_score, warm_move) = warm.search(
+            &mut board,
+            &mut caches,
+            side,
+            1.0,
+            -INF,
+            INF,
+            12,
+            &mut warm_stats,
+            SearchOptions {
+                opo: 1,
+                root: true,
+                ..SearchOptions::default()
+            },
+        );
+        assert!(
+            warm_stats.nodes > 1,
+            "1T 0.25-ply search must store depth 0 and never cut off depth 1.0"
+        );
+        assert_eq!(warm_move, cold_move);
+        assert_eq!(warm_score, cold_score);
+    }
+
+    #[test]
+    fn multithread_overlap_vct_alphabeta_does_not_allocate_secondary_tt_plane() {
+        let mut board = Board::new();
+        // Create a board with a VCT trigger (an open three for Black) so
+        // `search_vct_and_alphabeta_overlap` is entered.
+        for (x, y) in [(7, 7), (7, 6), (8, 7), (8, 6), (9, 7), (6, 5)] {
+            let m = xy_to_move(x, y).unwrap();
+            board.play_for_rule(m, None, RuleSet::Freestyle).unwrap();
+        }
+        let mut cfg = load_default_config();
+        cfg.rule_set = RuleSet::Freestyle;
+        cfg.runtime.threads = 4;
+        cfg.runtime.overlap_vct_alphabeta = true;
+        cfg.runtime.root_vct_depth = 1;
+
+        let tt = TranspositionTable::new(16);
+        let mut searcher = crate::search::RootSearcher::with_tt(cfg, tt);
+        assert!(searcher.tt.is_subply());
+        assert!(!searcher.tt.has_secondary_buckets());
+
+        let _ = searcher.search(
+            &mut board,
+            Some(crate::search::SearchLimits {
+                max_depth: 2,
+                root_width: 6,
+                node_limit: None,
+                time_limit_ms: None,
+            }),
+        );
+        assert!(searcher.tt.is_subply());
+        assert!(
+            !searcher.tt.has_secondary_buckets(),
+            "overlap search must sync subply mode before fork_snapshot and never allocate secondary TT plane"
+        );
     }
 }

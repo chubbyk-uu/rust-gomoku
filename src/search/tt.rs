@@ -348,6 +348,14 @@ impl TranspositionTable {
         self.subply
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_secondary_buckets(&self) -> bool {
+        self.storage
+            .secondary_buckets
+            .get()
+            .is_some_and(Option::is_some)
+    }
+
     pub fn fork_snapshot(&self) -> Self {
         let snapshot = Self {
             bucket_mask: self.bucket_mask,

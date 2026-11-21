@@ -936,16 +936,24 @@ from that unsound cutoff. Four reproduced bugs, all fixed with regressions:
    (`set_subply`), while `TTStorage` binds the first mode used to its primary bucket
    array (zero extra memory in single-mode runs) and lazily routes the other mode to
    an isolated secondary bucket array (with per-entry mode-bit tagging inside
-   `RawEntry::data` as an OOM fallback). Sequential (`4→1`, `1→4`) and concurrent
-   `1T + 4T` searchers sharing the same `TranspositionTable` are completely isolated
-   down to exact node counts (`concurrent_and_interleaved_1t_and_mt_searches_on_shared_tt_stay_isolated`).
+   `RawEntry::data` as an OOM fallback). `RootSearcher::with_tt`,
+   `AlphaBetaSearcher::new`/`with_tt`, and `search_vct_and_alphabeta_overlap`
+   synchronize `subply` before `fork_snapshot`, avoiding any extra TT plane
+   allocation during overlapped VCT + Alpha-Beta search
+   (`multithread_overlap_vct_alphabeta_does_not_allocate_secondary_tt_plane`).
+   Sequential (`4→1`, `1→4`) and concurrent `1T + 4T` searchers sharing the same
+   `TranspositionTable` are completely isolated down to exact node counts
+   (`concurrent_and_interleaved_1t_and_mt_searches_on_shared_tt_stay_isolated`).
 4. **Sub-ply TT floor/floor cutoff & d13+ / d51+ depth-cap saturation.** Now strictly
    sound for arbitrary depths:
    - Widened TT `depth` to 12 bits (`0..=4095`), kept `priority` at full 16 bits
      (`0..=65535`), tagged `subply` in 1 bit, and set `generation` to 9 bits
      (`0..=511`) inside the 64-bit `RawEntry::data` word.
-   - Multi-threaded TT uses 1/64-ply `store = floor(depth * 64.0)` and
-     `probe = ceil(depth * 64.0)` with `SUBPLY_TT_DEPTH_CAP = 3200` (50 plies,
+   - Multi-threaded TT uses 1/64-ply `store = floor(depth * 64.0)` (clamped from `0`)
+     and `probe = ceil(depth * 64.0)` (clamped from `1` for `depth > 0.0`, while 1T
+     keeps `store = floor(depth)` clamped from `0` so `0 < depth < 1` stores `0` and
+     never cuts off `depth = 1.0`; `single_thread_sub_one_depth_stores_zero_and_never_cuts_off_depth_one`)
+     with `SUBPLY_TT_DEPTH_CAP = 3200` (50 plies,
      well above `timed_max_depth = 25`; `+640` win/loss bonus = `3840 <= 4095`),
      floor-quantized `base_depthdown = floor(raw_depthdown * 64.0) / 64.0`, and full
      sub-ply replacement priority `priority_base * 256 + hash_depth`.

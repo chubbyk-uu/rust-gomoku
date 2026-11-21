@@ -412,7 +412,8 @@ impl RootSearcher {
         Self::with_tt(config, tt)
     }
 
-    pub fn with_tt(config: EngineConfig, tt: TranspositionTable) -> Self {
+    pub fn with_tt(config: EngineConfig, mut tt: TranspositionTable) -> Self {
+        tt.set_subply(config.runtime.threads > 1);
         let alphabeta = AlphaBetaSearcher::with_tt(config.clone(), tt.clone());
         Self {
             config,
@@ -910,6 +911,9 @@ impl RootSearcher {
         let worker_cancel = Some(worker_cancel_flag.clone());
         let mut worker_board = board.clone();
         let worker_config = self.config.clone();
+        let subply = self.config.runtime.threads > 1;
+        self.tt.set_subply(subply);
+        self.alphabeta.tt.set_subply(subply);
         let tt_snapshot_start = Instant::now();
         let worker_tt = self.tt.fork_snapshot();
         trace.tt_snapshot_ms = Some(elapsed_ms(tt_snapshot_start));
