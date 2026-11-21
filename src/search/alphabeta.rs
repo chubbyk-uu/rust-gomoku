@@ -1454,9 +1454,20 @@ mod tests {
     #[test]
     fn multithread_overlap_vct_alphabeta_does_not_allocate_secondary_tt_plane() {
         let mut board = Board::new();
-        // Create a board with a VCT trigger (an open three for Black) so
-        // `search_vct_and_alphabeta_overlap` is entered.
-        for (x, y) in [(7, 7), (7, 6), (8, 7), (8, 6), (9, 7), (6, 5)] {
+        // Create a board where Black has a double-three VCT trigger at (7,7)
+        // (`(5,7)-(6,7)` and `(7,5)-(7,6)`), while White's stones are scattered
+        // so VCF cannot solve the position and VCT at depth 1 also misses (forcing
+        // overlap search to run both VCT and the overlapped Alpha-Beta worker).
+        for (x, y) in [
+            (5, 7),
+            (0, 0),
+            (6, 7),
+            (0, 1),
+            (7, 5),
+            (14, 14),
+            (7, 6),
+            (14, 13),
+        ] {
             let m = xy_to_move(x, y).unwrap();
             board.play_for_rule(m, None, RuleSet::Freestyle).unwrap();
         }
@@ -1467,23 +1478,85 @@ mod tests {
         cfg.runtime.root_vct_depth = 1;
 
         let tt = TranspositionTable::new(16);
+        let initial_tt = tt.clone();
         let mut searcher = crate::search::RootSearcher::with_tt(cfg, tt);
         assert!(searcher.tt.is_subply());
+        assert!(!initial_tt.has_secondary_buckets());
         assert!(!searcher.tt.has_secondary_buckets());
 
         let _ = searcher.search(
             &mut board,
             Some(crate::search::SearchLimits {
-                max_depth: 2,
+                max_depth: 5,
                 root_width: 6,
                 node_limit: None,
                 time_limit_ms: None,
             }),
         );
+        let trace = searcher.last_trace.as_ref().expect("trace recorded");
+        assert!(
+            trace.overlap_used,
+            "expected search_vct_and_alphabeta_overlap to run, trace={trace:?}"
+        );
         assert!(searcher.tt.is_subply());
         assert!(
-            !searcher.tt.has_secondary_buckets(),
-            "overlap search must sync subply mode before fork_snapshot and never allocate secondary TT plane"
+            !initial_tt.has_secondary_buckets(),
+            "original TT must not allocate secondary TT plane during overlap snapshot"
         );
+        assert!(
+            !searcher.tt.has_secondary_buckets(),
+            "adopted worker TT must not allocate secondary TT plane during overlap search"
+        );
+    }
+
+    #[test]
+    fn same_mode_concurrent_first_use_shares_primary_plane_without_allocating_secondary() {
+        for subply in [false, true] {
+            let mut tt = TranspositionTable::new(12);
+            tt.set_subply(subply);
+            let barrier = std::sync::Barrier::new(2);
+            let k1 = 0x1111_2222_3333_0001_u64;
+            let k2 = 0x4444_5555_6666_0002_u64;
+
+            std::thread::scope(|s| {
+                let tt1 = tt.clone();
+                let tt2 = tt.clone();
+                let b1 = &barrier;
+                let b2 = &barrier;
+                s.spawn(move || {
+                    b1.wait();
+                    tt1.store(TTEntry {
+                        key: k1,
+                        value: 17,
+                        flag: HASHF_EXACT,
+                        depth: 64,
+                        priority: 100,
+                        best_move: Some(10),
+                        generation: 1,
+                    });
+                });
+                s.spawn(move || {
+                    b2.wait();
+                    tt2.store(TTEntry {
+                        key: k2,
+                        value: 29,
+                        flag: HASHF_EXACT,
+                        depth: 64,
+                        priority: 100,
+                        best_move: Some(20),
+                        generation: 1,
+                    });
+                });
+            });
+
+            assert!(
+                !tt.has_secondary_buckets(),
+                "concurrent first use in the same mode (subply={subply}) must not allocate secondary plane"
+            );
+            let p1 = tt.probe(k1, 64, -INF, INF);
+            let p2 = tt.probe(k2, 64, -INF, INF);
+            assert!(p1.hit && p1.value == Some(17));
+            assert!(p2.hit && p2.value == Some(29));
+        }
     }
 }

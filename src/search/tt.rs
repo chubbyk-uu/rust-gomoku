@@ -118,16 +118,19 @@ impl TTStorage {
     #[inline]
     fn buckets_for_mode(&self, subply: bool) -> &[[RawEntry; 2]] {
         let wanted = if subply { 2_u8 } else { 1_u8 };
-        let current = self.primary_mode.load(Ordering::Acquire);
+        let current = match self.primary_mode.load(Ordering::Acquire) {
+            0 => match self.primary_mode.compare_exchange(
+                0,
+                wanted,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => wanted,
+                Err(actual) => actual,
+            },
+            actual => actual,
+        };
         if current == wanted {
-            return &self.buckets;
-        }
-        if current == 0
-            && self
-                .primary_mode
-                .compare_exchange(0, wanted, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        {
             return &self.buckets;
         }
         if let Some(sec) = self
