@@ -1102,6 +1102,6 @@ Decision:
 
 - Reverted all 5 experimental paths to keep `master` (`7a30f07`) clean.
 - Next focus for **guaranteed dual-mode (untimed `d8/w40` + timed `1s/move`) gains**:
-  1. `M2.2a`: behavior-equivalent (or strictly faster) Stage 0 `TT Move` fast-path skipping full movegen on TT beta-cutoffs.
-  2. `M2.3`: `df-pn` VCT solver with bounded node budget (deep narrow forcing lines without wide-branch explosion).
+  1. `M2.2a` (tested & reverted): Stage 0 `TT Move` zero-movegen fast path gated on `!has_high_threat_bucket() && covered_empty >= wide + 10` scored `48-50-2` (`49.0%`, `WW=7, LL=7`, TT nodes `34.38M` vs `34.34M`, avg `524.1ms` vs `526.3ms`) on `center_50_prefixes.jsonl` `1s/move`. Because midgame boards almost always contain at least one `L4`/`L5` cell somewhere on the 15x15 grid, `!has_high_threat_bucket()` blocked Stage 0 on ~90% of real midgame nodes (confirmed by `vct_dense_ply78` changing only `0.3%`). Reverted.
+  2. `M2.3`: `df-pn` VCT solver with bounded node budget (deep narrow forcing lines 10–20 plies without wide-branch explosion — genuine tactical strength gain in both untimed `d8/w40` and timed `1s/move`).
   3. `M3.1`: stronger classical evaluation (4-direction + attack/defense cross terms + per-rule integer weights + SPSA/Texel tuning) to break the fixed-depth strength ceiling.
