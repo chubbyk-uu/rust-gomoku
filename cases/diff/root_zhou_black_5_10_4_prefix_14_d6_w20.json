@@ -27,5 +27,9 @@
     "root_vct_depth": 4,
     "static_board": true
   },
-  "checks": ["root"]
+  "checks": ["root"],
+  "expected_differences": {
+    "root.move": {"rust": [10, 3], "reference": [9, 5]},
+    "root.trace.vct_move": {"rust": [10, 3], "reference": [9, 5]}
+  }
 }

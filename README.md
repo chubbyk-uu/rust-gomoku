@@ -74,7 +74,8 @@ The main defaults live in `src/config.rs`.
 | `vct_verify_opponent_vcf_depth` | `4` |
 | `vcf_multi_reply` | `true` |
 | `root_vct_depth` | `6` |
-| `vct_strict_and_memo_key` | `true` |
+| `vct_use_dfpn` | `true` (`df-pn` VCT up to `(root_vct_depth * 3).clamp(2, 22)` plies; set `0` for legacy IDDFS VCT) |
+| `vct_strict_and_memo_key` | `true` (legacy IDDFS VCT only) |
 | TT bucket bits | `20` (32 MiB) for 1–3 threads or depth `< 5`; `21` (64 MiB) for 4+ threads at depth `>= 5` |
 | `threads` | `1` (lib/Gomocup); `4` on 4+ cores or `min(2, cores)` on `< 4` cores (GUI & Android; override with `--threads N` / `set_threads`) |
 | `compute_vcf` / `compute_vct` | enabled |
@@ -184,6 +185,7 @@ Common `INFO` commands:
 - `INFO vcf_multi_reply 0|1`
 - `INFO compute_vct 0|1`
 - `INFO root_vct_depth N`
+- `INFO vct_use_dfpn 0|1`
 - `INFO vct_strict_and_memo_key 0|1`
 - `INFO nonroot_vcf 0|1`
 - `INFO overlap_vct_alphabeta 0|1`

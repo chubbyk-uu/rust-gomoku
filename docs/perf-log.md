@@ -1127,4 +1127,33 @@ Verification & A/B benchmarks (release build vs `master` `7a30f07`):
 
 Decision:
 
-- `M2.3` (`df-pn` VCT) strictly dominates IDDFS VCT6 across timed strength (`+17.4 Elo`, zero lost pairs), untimed stability (`50.0%`, zero lost pairs), and VCT speed (`2.3x–2.9x` faster on dense Renju cases). Ready for merge to `master` upon user approval; next milestone is `M3.1` (stronger integer classical evaluation + SPSA/Texel tuning).
+- `M2.3` (`df-pn` VCT) strictly dominates IDDFS VCT6 across timed strength (`+17.4 Elo`, zero lost pairs), untimed stability (`50.0%`, zero lost pairs), and VCT speed (`2.3x–2.9x` faster on dense Renju cases). Merged to `master` (`7c7e447`).
+
+### 2026-11-22 (5): `M2.3` post-review hardening (`df-pn` termination, local child cache, fallback switch, diff & Freestyle validation)
+
+Context (caught by adversarial code review of `7fafe74..7c7e447`):
+
+- Fixed two termination bugs in `src/threats/dfpn.rs`:
+  1. `ply >= max_ply` previously stored finite `(DFPN_DEPTH_CAP_PN = 50_000, 1)`, allowing `mid_and` (`ply = max_ply - 1`) to spin until `node_limit` when `th_pn > 50_000 && th_dn >= 2`. Because Gomoku has no captures/passes, every board state uniquely determines `ply`, so `ply >= max_ply` now stores `(DFPN_INF, 0)` and sets `hit_depth_cap = true` (`solved = dn == 0 && !aborted && !hit_depth_cap`), guaranteeing monotonic termination with zero shallower-ply pollution.
+  2. `mid_or` / `mid_and` previously discarded child return values and re-read all children from the 2-way TT every iteration, which could ping-pong if two unsolved siblings collided in a bucket whose slot 0 held a solved entry. Both loops now cache `child_pn` / `child_dn` locally (initialized once from TT) and update `best_idx` directly from recursive return values.
+- Additional hardening:
+  - `view.board.force_side_to_move(side)` at `DfpnSearcher::search_for_rule` entry to guarantee Zobrist alignment even when `board.side_to_move() != side`; terminal winner early-returns now write to TT; manual `Clone` drops the 3 MiB TT on clone.
+  - Added `RuntimeOptions::vct_use_dfpn` (`DEFAULT_VCT_USE_DFPN = true`, `INFO vct_use_dfpn 0|1`) in `src/config.rs`, `src/protocol/gomocup.rs`, and `src/search/root.rs` to preserve a 1-flag fallback to legacy `VCTSearcher`; removed the hard `12`-ply lower clamp (`(root_vct_depth * 3).clamp(2, 22)`); populated `VCTStats` (`depth_limit`, `depth_completed`, `memo_exact_hits`).
+  - `rebuild_global_eval_state` (`src/eval/local.rs`) now always refreshes `packed_lines` under `preserve_snapshot` so direct `board_shadow` edits in tests stay self-healing.
+  - Added 6 targeted `dfpn` unit tests (`max_ply` termination, `MoveBudget` node limit, Renju Black 3-3 attack exclusion, Renju White win via Black forbidden block, mismatched `side_to_move` + clone/multi-call reuse).
+
+Verification & A/B benchmarks (release build vs `master` `7a30f07`):
+
+- Correctness: `cargo fmt --check`, `git diff --check`, full `cargo test` (`dfpn` 9/9, `root_alignment` 33/33, zero warnings), `android/rust_bridge` 6/6, and `scripts/run_diff.py --profile all --check-baselines --jobs 8` (**13/13 passed**; pinned `root_zhou_black_5_10_4_prefix_14_d6_w20` where `df-pn` finds faster mate-in-3 `[10, 3]` vs legacy `[9, 5]`).
+- VCT case probes (`Renju`, `d6/w40`, `4T`):
+  - `cases/renju/vct_dense_ply78.json`: VCT `165.1 ms -> 49.8 ms` (**`3.31x` faster** vs IDDFS VCT6, `-13.5%` vs pre-fix `df-pn`).
+  - `cases/renju/vct_counter_win_scan_ply75.json`: VCT `336.8 ms -> 128.3 ms` (**`2.63x` faster** vs IDDFS VCT6, `-12.6%` vs pre-fix `df-pn`).
+  - `cases/renju/vct6_false_positive_case17_after_ply40.json`: proves `(9,9)` in **`7.69 ms`** (zero false positives).
+- 300-game center-opening verification (`center_50_prefixes.jsonl`, `--jobs 16 --reuse-engine-state`, vs `master_7a30f07`, `0` errors / `0` timeouts across all 300 games):
+  - **Renju timed `1s/move` (100 games)**: **`52-47-1` (`52.5%`, `+17.39 Elo`, `WW=6, WD=1, WL/DD=39, LD=0, LL=4`)**; `df-pn` avg `516.9 ms` / med `1000.1 ms` / p95 `1009.2 ms` / max `1024.2 ms` vs `master` avg `517.9 ms` / med `1000.1 ms` / p95 `1009.5 ms` / max `1026.6 ms`.
+  - **Freestyle timed `1s/move` (100 games)**: **`50-48-2` (`51.0%`, `+6.95 Elo`, `WW=3, WD=1, WL/DD=43, LD=1, LL=2`)**; `df-pn` avg `476.2 ms` / **med `46.1 ms` (`3.16x` faster)** / p95 `1000.6 ms` / max `1035.3 ms` vs `master` avg `483.6 ms` / med `145.8 ms` / p95 `1000.4 ms` / max `1025.8 ms`.
+  - **Renju untimed `d8/w40` (100 games)**: **`48-48-4` (`50.0%`, `0.0 Elo`, `WW=0, WD=0, WL/DD=50, LD=0, LL=0`)**; `df-pn` avg `1450.4 ms` (`-1.6%`) / med `682.1 ms` (`-1.1%`) / p95 `5511.5 ms` (`-3.6%`) / max `29304.8 ms` vs `master` avg `1474.2 ms` / med `689.4 ms` / p95 `5715.7 ms` / max `29223.6 ms`.
+
+Decision:
+
+- `M2.3` (`df-pn` VCT) is hardened and verified on `master` across both rulesets and both time modes; next milestone is `M3.1` (stronger integer classical evaluation + SPSA/Texel tuning).

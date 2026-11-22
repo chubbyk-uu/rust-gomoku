@@ -629,6 +629,7 @@ fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
             let cell = grid[y][x];
             if preserve_snapshot {
                 caches.set_board_shadow(x, y, cell);
+                update_packed_lines_cell(&mut caches.packed_lines, x, y, cell);
             } else {
                 caches.board_shadow[x][y] = cell;
                 if cell != EMPTY {

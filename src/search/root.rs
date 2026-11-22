@@ -21,7 +21,8 @@ use crate::search::{
     AlphaBetaSearcher, RootCandidateProfile, SearchOptions, SearchStats, TranspositionTable,
 };
 use crate::threats::{
-    has_vct_trigger_for_rule, DfpnSearcher, ThreatBoardView, VCFSearcher, VCTSearcher, VCTStats,
+    has_vct_trigger_for_rule, DfpnSearcher, ThreatBoardView, VCFSearcher, VCTResult, VCTSearcher,
+    VCTStats,
 };
 use crate::types::{Move, Side};
 
@@ -901,6 +902,56 @@ impl RootSearcher {
         }
     }
 
+    fn run_root_vct(
+        &mut self,
+        board: &Board,
+        side: Side,
+        sub_budget: Option<MoveBudget>,
+    ) -> (VCTResult, VCTStats) {
+        if self.config.runtime.vct_use_dfpn {
+            let parent_budget = sub_budget
+                .as_ref()
+                .map(|sub| std::mem::replace(&mut self.dfpn.budget, sub.clone()));
+            let dfpn_max_ply = (self.config.runtime.root_vct_depth * 3).clamp(2, 22);
+            let result = self
+                .dfpn
+                .search_for_rule(board, side, dfpn_max_ply, self.config.rule_set);
+            if let (Some(sub), Some(parent)) = (sub_budget, parent_budget) {
+                self.dfpn.budget = parent;
+                self.vcf.budget.add_nodes(sub.nodes().unwrap_or(0));
+            }
+            let mut stats = VCTStats::default();
+            stats.depth_limit = dfpn_max_ply;
+            stats.depth_completed = if self.dfpn.stats.aborted {
+                0
+            } else {
+                dfpn_max_ply
+            };
+            stats.or_nodes = self.dfpn.stats.or_nodes;
+            stats.and_nodes = self.dfpn.stats.and_nodes;
+            stats.memo_exact_hits = self.dfpn.stats.tt_hits;
+            stats.elapsed_us = (self.dfpn.stats.elapsed_ms * 1000.0) as u128;
+            (result, stats)
+        } else {
+            self.vct.memo_diagnostics_enabled = self.config.runtime.root_profile;
+            self.vct.strict_and_memo_key = self.config.runtime.vct_strict_and_memo_key;
+            let parent_budget = sub_budget
+                .as_ref()
+                .map(|sub| std::mem::replace(&mut self.vct.budget, sub.clone()));
+            let result = self.vct.search_for_rule(
+                board,
+                side,
+                self.config.runtime.root_vct_depth,
+                self.config.rule_set,
+            );
+            if let (Some(sub), Some(parent)) = (sub_budget, parent_budget) {
+                self.vct.budget = parent;
+                self.vcf.budget.add_nodes(sub.nodes().unwrap_or(0));
+            }
+            (result, self.vct.stats.clone())
+        }
+    }
+
     fn search_vct_and_alphabeta_overlap(
         &mut self,
         board: &Board,
@@ -946,15 +997,8 @@ impl RootSearcher {
         });
 
         let vct_start = Instant::now();
-        let dfpn_max_ply = (self.config.runtime.root_vct_depth * 3).clamp(12, 22);
-        let vct_result = self
-            .dfpn
-            .search_for_rule(board, side, dfpn_max_ply, self.config.rule_set);
+        let (vct_result, vct_stats) = self.run_root_vct(board, side, None);
         trace.vct_ms = Some(elapsed_ms(vct_start));
-        let mut vct_stats = VCTStats::default();
-        vct_stats.or_nodes = self.dfpn.stats.or_nodes;
-        vct_stats.and_nodes = self.dfpn.stats.and_nodes;
-        vct_stats.elapsed_us = (self.dfpn.stats.elapsed_ms * 1000.0) as u128;
         trace.vct_stats = Some(vct_stats);
         trace.vct_found = vct_result.found;
         trace.vct_move = vct_result.move_;
@@ -1089,22 +1133,8 @@ impl RootSearcher {
                 // a depth-0 static fallback.
                 const TIMED_VCT_BUDGET_FRACTION: f64 = 0.30;
                 let vct_sub_budget = self.vcf.budget.timed_sub_budget(TIMED_VCT_BUDGET_FRACTION);
-                let parent_dfpn_budget = vct_sub_budget
-                    .as_ref()
-                    .map(|sub| std::mem::replace(&mut self.dfpn.budget, sub.clone()));
-                let dfpn_max_ply = (self.config.runtime.root_vct_depth * 3).clamp(12, 22);
-                let vct_result =
-                    self.dfpn
-                        .search_for_rule(board, side, dfpn_max_ply, self.config.rule_set);
-                if let (Some(sub), Some(parent)) = (vct_sub_budget, parent_dfpn_budget) {
-                    self.dfpn.budget = parent;
-                    self.vcf.budget.add_nodes(sub.nodes().unwrap_or(0));
-                }
+                let (vct_result, vct_stats) = self.run_root_vct(board, side, vct_sub_budget);
                 trace.vct_ms = Some(elapsed_ms(vct_start));
-                let mut vct_stats = VCTStats::default();
-                vct_stats.or_nodes = self.dfpn.stats.or_nodes;
-                vct_stats.and_nodes = self.dfpn.stats.and_nodes;
-                vct_stats.elapsed_us = (self.dfpn.stats.elapsed_ms * 1000.0) as u128;
                 trace.vct_stats = Some(vct_stats);
                 trace.vct_found = vct_result.found;
                 trace.vct_move = vct_result.move_;

@@ -368,6 +368,12 @@ impl GomocupProtocol {
                     self.searcher = None;
                 }
             }
+            "vct_use_dfpn" => {
+                if let Some(parsed) = parse_one::<i32>(value) {
+                    self.config.runtime.vct_use_dfpn = parsed != 0;
+                    self.searcher = None;
+                }
+            }
             "vct_strict_and_memo_key" => {
                 if let Some(parsed) = parse_one::<i32>(value) {
                     self.config.runtime.vct_strict_and_memo_key = parsed != 0;

@@ -20,7 +20,6 @@ use crate::threats::vct::{attack_signature, MoveSet225, VCTResult, VCTSearcher};
 use crate::types::{Move, Side};
 
 pub const DFPN_INF: u32 = 100_000_000;
-const DFPN_DEPTH_CAP_PN: u32 = 50_000;
 const DFPN_NO_MOVE: Move = u16::MAX;
 
 const DFPN_TT_BITS: usize = 16;
@@ -42,6 +41,7 @@ pub struct DfpnStats {
     pub tt_hits: usize,
     pub elapsed_ms: f64,
     pub aborted: bool,
+    pub hit_depth_cap: bool,
 }
 
 pub type DfpnResult = VCTResult;
@@ -61,7 +61,7 @@ struct DfpnTtBucket {
     entries: [DfpnTtEntry; 2],
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct DfpnSearcher {
     pub(crate) budget: MoveBudget,
     pub max_ply: i32,
@@ -71,6 +71,25 @@ pub struct DfpnSearcher {
     tt_generation: u32,
     legality_cache: Option<Box<LegalityCache>>,
     aborted: bool,
+    hit_depth_cap: bool,
+}
+
+impl Clone for DfpnSearcher {
+    fn clone(&self) -> Self {
+        // Drop the 3 MiB TT and legality cache on clone: each search starts a
+        // fresh generation anyway, so lazily allocating avoids heavy copies.
+        Self {
+            budget: self.budget.clone(),
+            max_ply: self.max_ply,
+            node_limit: self.node_limit,
+            stats: self.stats,
+            tt: None,
+            tt_generation: 0,
+            legality_cache: None,
+            aborted: false,
+            hit_depth_cap: false,
+        }
+    }
 }
 
 impl Default for DfpnSearcher {
@@ -84,6 +103,7 @@ impl Default for DfpnSearcher {
             tt_generation: 0,
             legality_cache: None,
             aborted: false,
+            hit_depth_cap: false,
         }
     }
 }
@@ -230,6 +250,7 @@ impl DfpnSearcher {
     ) -> DfpnResult {
         self.stats = DfpnStats::default();
         self.aborted = false;
+        self.hit_depth_cap = false;
         if max_ply <= 0 {
             return VCTResult::default();
         }
@@ -247,11 +268,15 @@ impl DfpnSearcher {
             .then(|| self.legality_cache.take())
             .flatten();
         let mut view = ThreatBoardView::from_board_with_rule_and_cache(board.clone(), rule, cache);
+        view.board
+            .force_side_to_move(side)
+            .expect("df-pn attacker side stays valid");
 
         let start = Instant::now();
         let (pn, dn, best_move) = self.mid_or(&mut view, side, 0, DFPN_INF, DFPN_INF);
         self.stats.elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         self.stats.aborted = self.aborted;
+        self.stats.hit_depth_cap = self.hit_depth_cap;
 
         if let Some(cache) = view.take_legality_cache() {
             self.legality_cache = Some(cache);
@@ -267,7 +292,7 @@ impl DfpnSearcher {
             VCTResult {
                 move_: None,
                 found: false,
-                solved: dn == 0 && !self.aborted,
+                solved: dn == 0 && !self.aborted && !self.hit_depth_cap,
             }
         }
     }
@@ -285,22 +310,26 @@ impl DfpnSearcher {
         }
         self.stats.or_nodes += 1;
 
+        let key = or_key(&view.board, attacker);
         if view.board.winner() == attacker {
+            self.tt_store(key, 0, DFPN_INF, None);
             return (0, DFPN_INF, None);
         }
         if view.board.winner() == -attacker {
+            self.tt_store(key, DFPN_INF, 0, None);
             return (DFPN_INF, 0, None);
         }
 
-        let key = or_key(&view.board, attacker);
         let (cached_pn, cached_dn, cached_move) = self.tt_lookup(key, 1, 1);
         if cached_pn == 0 || cached_dn == 0 || cached_pn >= th_pn || cached_dn >= th_dn {
             return (cached_pn, cached_dn, cached_move);
         }
 
-        // Ply cap: check O(1) instant win (WIN5 or unblocked A4); otherwise
-        // store a large finite proof number (not dn=0!) so depth truncation is
-        // never mis-cached as a mathematical disproof, yet stops re-expansion.
+        // Ply cap: check O(1) instant win (WIN5 or unblocked A4). Otherwise
+        // mark this branch disproved within `max_ply`: because Gomoku has no
+        // captures or passes, every board position uniquely determines `ply`,
+        // so caching `(DFPN_INF, 0)` cannot pollute shallower plies and keeps
+        // df-pn thresholds strictly monotonic (zero spin loops).
         if ply >= self.max_ply {
             for idx in view.pat4.win5_bits(attacker).iter_indices() {
                 let mv = crate::threats::pattern4::idx_to_move(idx);
@@ -318,8 +347,9 @@ impl DfpnSearcher {
                     }
                 }
             }
-            self.tt_store(key, DFPN_DEPTH_CAP_PN, 1, None);
-            return (DFPN_DEPTH_CAP_PN, 1, None);
+            self.hit_depth_cap = true;
+            self.tt_store(key, DFPN_INF, 0, None);
+            return (DFPN_INF, 0, None);
         }
 
         let attacks = view.collect_attack_moves(attacker);
@@ -337,23 +367,22 @@ impl DfpnSearcher {
             }
         }
 
-        // Precompute child AND keys once per OR expansion.
-        let mut child_keys = Vec::with_capacity(attacks.len());
-        let mut child_init_pn = Vec::with_capacity(attacks.len());
-        let mut child_init_dn = Vec::with_capacity(attacks.len());
+        // Initialize per-child (pn, dn) once from TT and update the expanded
+        // child directly from `mid_and`'s return value so TT bucket collisions
+        // between unsolved siblings can never cause ping-pong re-expansions.
+        let mut child_pn = Vec::with_capacity(attacks.len());
+        let mut child_dn = Vec::with_capacity(attacks.len());
         for attack in &attacks {
             let ckey = view.board.zobrist_key_after(attack.move_, attacker)
                 ^ AND_SALT
                 ^ side_salt(attacker)
                 ^ attack_signature(attack);
-            child_keys.push(ckey);
             // Bias initial proof numbers toward narrow B4 attacks and lethal
             // Double-A3 forks (pn=1), while scaling single-A3 attacks with ply
-            // (4 + ply) so Double-A3's 4 defenses are verified in a single pass
-            // and shallow wins are proved before diving into deep A3 trees.
-            if attack.level >= ThreatLevel::B4 {
-                child_init_pn.push(1);
-                child_init_dn.push(2);
+            // (9 + ply) so Double-A3's up-to-8 defenses are verified in a
+            // single pass and shallow wins are proved before deep A3 trees.
+            let (init_pn, init_dn) = if attack.level >= ThreatLevel::B4 {
+                (1, 2)
             } else {
                 let (ax, ay) = crate::board::move_to_xy(attack.move_).expect("attack stays valid");
                 let aidx = col_major_idx(ax, ay);
@@ -364,14 +393,14 @@ impl DfpnSearcher {
                     }
                 }
                 if a3_dirs >= 2 {
-                    child_init_pn.push(1);
-                    child_init_dn.push(4);
+                    (1, 4)
                 } else {
-                    let a3_pn = 9 + (ply as u32);
-                    child_init_pn.push(a3_pn);
-                    child_init_dn.push(1);
+                    (9 + (ply as u32), 1)
                 }
-            }
+            };
+            let (pn, dn, _) = self.tt_lookup(ckey, init_pn, init_dn);
+            child_pn.push(pn);
+            child_dn.push(dn);
         }
 
         loop {
@@ -382,8 +411,8 @@ impl DfpnSearcher {
             let mut best_dn = 0_u32;
 
             for i in 0..attacks.len() {
-                let (c_pn, c_dn, _) =
-                    self.tt_lookup(child_keys[i], child_init_pn[i], child_init_dn[i]);
+                let c_pn = child_pn[i];
+                let c_dn = child_dn[i];
                 sum_dn = add_pn(sum_dn, c_dn);
                 if c_pn < min_pn {
                     second_pn = min_pn;
@@ -410,12 +439,15 @@ impl DfpnSearcher {
 
             let attack = &attacks[best_idx];
             view.play(attack.move_, attacker);
-            let _ = self.mid_and(view, attacker, ply + 1, attack, child_th_pn, child_th_dn);
+            let (next_pn, next_dn) =
+                self.mid_and(view, attacker, ply + 1, attack, child_th_pn, child_th_dn);
             view.undo();
 
             if self.aborted {
                 return (min_pn, sum_dn, None);
             }
+            child_pn[best_idx] = next_pn;
+            child_dn[best_idx] = next_dn;
         }
     }
 
@@ -491,11 +523,14 @@ impl DfpnSearcher {
             return (0, DFPN_INF);
         }
 
-        let mut child_keys = Vec::with_capacity(defenses.len());
+        let mut child_pn = Vec::with_capacity(defenses.len());
+        let mut child_dn = Vec::with_capacity(defenses.len());
         for &d_move in &defenses {
             let ckey =
                 view.board.zobrist_key_after(d_move, defender) ^ OR_SALT ^ side_salt(attacker);
-            child_keys.push(ckey);
+            let (pn, dn, _) = self.tt_lookup(ckey, 1, 1);
+            child_pn.push(pn);
+            child_dn.push(dn);
         }
 
         loop {
@@ -506,7 +541,8 @@ impl DfpnSearcher {
             let mut best_pn = 0_u32;
 
             for i in 0..defenses.len() {
-                let (c_pn, c_dn, _) = self.tt_lookup(child_keys[i], 1, 1);
+                let c_pn = child_pn[i];
+                let c_dn = child_dn[i];
                 sum_pn = add_pn(sum_pn, c_pn);
                 if c_dn < min_dn {
                     second_dn = min_dn;
@@ -536,12 +572,15 @@ impl DfpnSearcher {
 
             let d_move = defenses[best_idx];
             view.play(d_move, defender);
-            let _ = self.mid_or(view, attacker, ply + 1, child_th_pn, child_th_dn);
+            let (next_pn, next_dn, _) =
+                self.mid_or(view, attacker, ply + 1, child_th_pn, child_th_dn);
             view.undo();
 
             if self.aborted {
                 return (sum_pn, min_dn);
             }
+            child_pn[best_idx] = next_pn;
+            child_dn[best_idx] = next_dn;
         }
     }
 }
@@ -622,5 +661,161 @@ mod tests {
             result.move_.and_then(|m| crate::board::move_to_xy(m).ok()),
             Some((7, 7))
         );
+    }
+
+    #[test]
+    fn dfpn_terminates_cleanly_at_max_ply_without_spinning() {
+        // Dense Renju midgame position with many threats; at max_ply=4 there is
+        // no forced win and df-pn must finish cleanly (not spin to 120K nodes).
+        let raw = include_str!("../../cases/renju/vct_dense_ply78.json");
+        #[derive(serde::Deserialize)]
+        struct Case {
+            moves: Vec<[usize; 2]>,
+        }
+        let case: Case = serde_json::from_str(raw).unwrap();
+        let mut board = Board::new();
+        for [x, y] in case.moves {
+            board
+                .play_for_rule(xy_to_move(x, y).unwrap(), None, RuleSet::Renju)
+                .unwrap();
+        }
+        let side = board.side_to_move();
+        let mut dfpn = DfpnSearcher::default();
+        let res = dfpn.search_for_rule(&board, side, 4, RuleSet::Renju);
+        assert!(!res.found);
+        assert!(
+            !res.solved,
+            "depth-capped search must not report mathematical disproof"
+        );
+        assert!(
+            !dfpn.stats.aborted,
+            "max_ply=4 should terminate cleanly without hitting 120K node cap; stats={:?}",
+            dfpn.stats
+        );
+        assert!(dfpn.stats.hit_depth_cap);
+        assert!(
+            dfpn.stats.or_nodes + dfpn.stats.and_nodes < 10_000,
+            "expected small node count at max_ply=4, got {:?}",
+            dfpn.stats
+        );
+    }
+
+    #[test]
+    fn dfpn_respects_move_budget_node_limit() {
+        let raw = include_str!("../../cases/renju/vct_dense_ply78.json");
+        #[derive(serde::Deserialize)]
+        struct Case {
+            moves: Vec<[usize; 2]>,
+        }
+        let case: Case = serde_json::from_str(raw).unwrap();
+        let mut board = Board::new();
+        for [x, y] in case.moves {
+            board
+                .play_for_rule(xy_to_move(x, y).unwrap(), None, RuleSet::Renju)
+                .unwrap();
+        }
+        let side = board.side_to_move();
+        let mut dfpn = DfpnSearcher::default();
+        dfpn.budget = MoveBudget::new(crate::search::SearchLimits {
+            max_depth: 6,
+            root_width: 40,
+            node_limit: Some(50),
+            time_limit_ms: None,
+        });
+        let res = dfpn.search_for_rule(&board, side, 18, RuleSet::Renju);
+        assert!(!res.found);
+        assert!(!res.solved);
+        assert!(dfpn.stats.aborted);
+        assert!(dfpn.stats.or_nodes + dfpn.stats.and_nodes <= 55);
+    }
+
+    #[test]
+    fn dfpn_renju_black_forbids_double_three_diamond_center() {
+        let mut board = Board::new();
+        for (x, y, side) in [
+            (6, 7, BLACK),
+            (0, 0, WHITE),
+            (8, 7, BLACK),
+            (1, 3, WHITE),
+            (7, 6, BLACK),
+            (3, 1, WHITE),
+            (7, 8, BLACK),
+            (14, 14, WHITE),
+        ] {
+            board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
+        }
+        let mut dfpn = DfpnSearcher::default();
+        let res = dfpn.search_for_rule(&board, BLACK, 10, RuleSet::Renju);
+        assert_ne!(
+            res.move_,
+            Some(xy_to_move(7, 7).unwrap()),
+            "Renju Black must never play forbidden 3-3 center (7,7)"
+        );
+    }
+
+    #[test]
+    fn dfpn_renju_white_wins_when_black_defense_is_forbidden() {
+        // White has a 4-3 at (6, 7) whose only block (7, 7) is a Renju Black
+        // double-four forbidden point.
+        let mut board = Board::new();
+        for (x, y, side) in [
+            (2, 7, BLACK),
+            (3, 7, WHITE),
+            (4, 7, WHITE),
+            (5, 7, WHITE),
+            (6, 5, WHITE),
+            (6, 6, WHITE),
+            (7, 4, BLACK),
+            (7, 5, BLACK),
+            (7, 6, BLACK),
+            (8, 8, BLACK),
+            (9, 9, BLACK),
+            (10, 10, BLACK),
+        ] {
+            board.grid_rows_mut()[y][x] = side;
+        }
+        let mut dfpn = DfpnSearcher::default();
+        let res = dfpn.search_for_rule(&board, WHITE, 6, RuleSet::Renju);
+        assert!(
+            res.found,
+            "Renju White must win when Black's block (7,7) is forbidden; stats={:?}",
+            dfpn.stats
+        );
+        assert_eq!(
+            res.move_.and_then(|m| crate::board::move_to_xy(m).ok()),
+            Some((6, 7))
+        );
+    }
+
+    #[test]
+    fn dfpn_handles_mismatched_board_side_to_move_and_clone_reuse() {
+        let mut board = Board::new();
+        for (x, y, side) in [
+            (6, 7, BLACK),
+            (0, 0, WHITE),
+            (8, 7, BLACK),
+            (1, 3, WHITE),
+            (7, 6, BLACK),
+            (3, 1, WHITE),
+            (7, 8, BLACK),
+        ] {
+            board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
+        }
+        // board.side_to_move() is WHITE, but we query df-pn for BLACK.
+        assert_eq!(board.side_to_move(), WHITE);
+        let mut dfpn = DfpnSearcher::default();
+        let res1 = dfpn.search_for_rule(&board, BLACK, 10, RuleSet::Freestyle);
+        assert!(res1.found);
+        assert_eq!(
+            res1.move_.and_then(|m| crate::board::move_to_xy(m).ok()),
+            Some((7, 7))
+        );
+        // Second call reuses TT via generation bump, and clone drops TT cleanly.
+        let res2 = dfpn.search_for_rule(&board, BLACK, 10, RuleSet::Freestyle);
+        assert_eq!(res2, res1);
+        let mut cloned = dfpn.clone();
+        assert!(cloned.tt.is_none());
+        let res3 = cloned.search_for_rule(&board, BLACK, 10, RuleSet::Freestyle);
+        assert_eq!(res3, res1);
     }
 }
