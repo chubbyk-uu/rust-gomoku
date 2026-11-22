@@ -3,10 +3,12 @@
 use crate::board::Board;
 use crate::config::EngineConfig;
 use crate::constants::{BLACK, BOARD_SIZE, DSHAPE_SIZE, EMPTY, WHITE};
-use crate::eval::caches::{dgn_contribution, EvalCaches};
+use crate::eval::caches::{dgn_contribution, update_packed_lines_cell, EvalCaches};
 use crate::eval::global_eval::{blocked_neighbor_count, NEIGHBOR_CHECKS};
 use crate::patterns::buckets::bucket_for_lines;
-use crate::patterns::line::{shape_raw_from_board_point_hypothetical, PackedLine};
+use crate::patterns::line::{
+    shape_raw_from_board_point_hypothetical, PackedLine, PACKED_LINE_COUNT,
+};
 use crate::patterns::shapes::{ShapeLabel, DIAGONAL_DOWN, DIAGONAL_UP, HORIZONTAL, VERTICAL};
 use crate::rules::{classify_forbidden_move, RuleSet};
 use crate::types::Move;
@@ -290,11 +292,6 @@ pub fn value_wide_compute_for_rule(
     caches.rule_set = rule;
 
     let (cx, cy) = changed;
-    let grid = board.grid_rows();
-    let horizontal = PackedLine::through(grid, cx, cy, 0, 1);
-    let vertical = PackedLine::through(grid, cx, cy, 1, 0);
-    let diagonal_down = PackedLine::through(grid, cx, cy, -1, 1);
-    let diagonal_up = PackedLine::through(grid, cx, cy, -1, -1);
     let renju = rule == RuleSet::Renju;
     let radius = if renju { 5 } else { 4 };
     let mut black_refreshed = [0_u64; 4];
@@ -302,6 +299,18 @@ pub fn value_wide_compute_for_rule(
     let old_cell = caches.board_shadow[cx][cy];
     let new_cell = board.grid_rows()[cy][cx];
     let center_changed = old_cell != new_cell;
+    if center_changed {
+        update_packed_lines_cell(&mut caches.packed_lines, cx, cy, new_cell);
+    }
+    let [horizontal, vertical, diagonal_down, diagonal_up] = caches.packed_lines_through(cx, cy);
+    #[cfg(debug_assertions)]
+    {
+        let grid = board.grid_rows();
+        debug_assert_eq!(horizontal, PackedLine::through(grid, cx, cy, 0, 1));
+        debug_assert_eq!(vertical, PackedLine::through(grid, cx, cy, 1, 0));
+        debug_assert_eq!(diagonal_down, PackedLine::through(grid, cx, cy, -1, 1));
+        debug_assert_eq!(diagonal_up, PackedLine::through(grid, cx, cy, -1, -1));
+    }
     let mut old_center_zero = [[false; 4]; 2];
     if center_changed {
         for (player, row) in old_center_zero.iter_mut().enumerate() {
@@ -407,7 +416,8 @@ pub fn value_wide_compute_for_rule(
                 cx,
                 y,
                 HORIZONTAL,
-                horizontal.hypothetical_shapes(y, renju),
+                horizontal,
+                y,
                 rule,
                 renju,
                 skip_stone,
@@ -425,7 +435,8 @@ pub fn value_wide_compute_for_rule(
                 x,
                 cy,
                 VERTICAL,
-                vertical.hypothetical_shapes(x, renju),
+                vertical,
+                x,
                 rule,
                 renju,
                 skip_stone,
@@ -444,7 +455,8 @@ pub fn value_wide_compute_for_rule(
                 x,
                 y,
                 DIAGONAL_DOWN,
-                diagonal_down.hypothetical_shapes(y, renju),
+                diagonal_down,
+                y,
                 rule,
                 renju,
                 skip_stone,
@@ -463,7 +475,8 @@ pub fn value_wide_compute_for_rule(
                 x,
                 y,
                 DIAGONAL_UP,
-                diagonal_up.hypothetical_shapes(BOARD_SIZE - 1 - y, renju),
+                diagonal_up,
+                BOARD_SIZE - 1 - y,
                 rule,
                 renju,
                 skip_stone,
@@ -509,7 +522,8 @@ fn update_line_neighbor_point(
     x: usize,
     y: usize,
     direction: i32,
-    shapes: [i32; 2],
+    line: PackedLine,
+    line_pos: usize,
     rule: RuleSet,
     renju: bool,
     skip_stone: Option<(usize, usize)>,
@@ -521,6 +535,7 @@ fn update_line_neighbor_point(
         if !was_empty {
             remove_empty_bucket_contribution(caches, x, y);
         }
+        let shapes = line.hypothetical_shapes(line_pos, renju);
         let changed_player =
             update_direction_cache(board, caches, x, y, direction, shapes, true, skip_stone);
         for (player, changed) in changed_player.into_iter().enumerate() {
@@ -604,6 +619,7 @@ fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
         caches.dgn_cc = [[0; BOARD_SIZE]; BOARD_SIZE];
         caches.dgn_cc_log.clear();
         caches.shadow_log.clear();
+        caches.packed_lines = [[0; 2]; PACKED_LINE_COUNT];
     }
 
     let size = board.size();
@@ -615,6 +631,9 @@ fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
                 caches.set_board_shadow(x, y, cell);
             } else {
                 caches.board_shadow[x][y] = cell;
+                if cell != EMPTY {
+                    update_packed_lines_cell(&mut caches.packed_lines, x, y, cell);
+                }
             }
             if cell == EMPTY {
                 if preserve_snapshot {

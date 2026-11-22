@@ -234,10 +234,6 @@ fn push_legal_line_replies(
 #[derive(Clone, Debug)]
 pub struct ThreatBoardView {
     pub board: Board,
-    pub x1: Vec<Vec<i32>>,
-    pub x2: Vec<Vec<i32>>,
-    pub x3: Vec<Vec<i32>>,
-    pub x4: Vec<Vec<i32>>,
     rule_set: RuleSet,
     previous_sides: Vec<Side>,
     /// Memoizes the expensive Renju-black forbidden-move verdict, keyed by
@@ -267,38 +263,9 @@ impl ThreatBoardView {
         rule_set: RuleSet,
         legality_cache: Option<Box<LegalityCache>>,
     ) -> Self {
-        let size = board.size();
-        let grid = board.grid_rows();
-        let x1 = (0..size)
-            .map(|x| (0..size).map(|y| i32::from(grid[y][x])).collect())
-            .collect();
-        let x2 = (0..size)
-            .map(|y| (0..size).map(|x| i32::from(grid[y][x])).collect())
-            .collect();
-        let width = 2 * size - 1;
-        let mut x3 = vec![vec![1024; size]; width];
-        let mut x4 = vec![vec![1024; size]; width];
-        for p in 0..width {
-            if p < size {
-                for i in 0..=p {
-                    x3[p][i] = i32::from(grid[i][p - i]);
-                    x4[p][i] = i32::from(grid[size - 1 - i][p - i]);
-                }
-            } else {
-                let start = p - size + 1;
-                for i in start..size {
-                    x3[p][i] = i32::from(grid[i][p - i]);
-                    x4[p][i] = i32::from(grid[size - 1 - i][p - i]);
-                }
-            }
-        }
         let pat4 = Pattern4State::from_board(&board, rule_set);
         Self {
             board,
-            x1,
-            x2,
-            x3,
-            x4,
             rule_set,
             previous_sides: Vec::new(),
             legality_cache: RefCell::new(legality_cache),
@@ -324,23 +291,43 @@ impl ThreatBoardView {
         usize,
         usize,
     ) {
+        let grid = self.board.grid_rows();
+        let mut l1 = [0_i32; BOARD_SIZE];
+        let mut l2 = [0_i32; BOARD_SIZE];
+        for i in 0..BOARD_SIZE {
+            l1[i] = i32::from(grid[i][x]);
+            l2[i] = i32::from(grid[y][i]);
+        }
+        let mut l3 = [1024_i32; BOARD_SIZE];
+        let p3 = x + y;
+        let (s3, e3) = if p3 < BOARD_SIZE {
+            (0, p3 + 1)
+        } else {
+            (p3 - BOARD_SIZE + 1, BOARD_SIZE)
+        };
+        for (i, slot) in l3.iter_mut().enumerate().take(e3).skip(s3) {
+            *slot = i32::from(grid[i][p3 - i]);
+        }
+        let mut l4 = [1024_i32; BOARD_SIZE];
+        let p4 = BOARD_SIZE - 1 - y + x;
+        let (s4, e4) = if p4 < BOARD_SIZE {
+            (0, p4 + 1)
+        } else {
+            (p4 - BOARD_SIZE + 1, BOARD_SIZE)
+        };
+        for (i, slot) in l4.iter_mut().enumerate().take(e4).skip(s4) {
+            *slot = i32::from(grid[BOARD_SIZE - 1 - i][p4 - i]);
+        }
         (
-            ThreatLine::from_values(&self.x1[x]),
-            ThreatLine::from_values(&self.x2[y]),
-            ThreatLine::from_values(&self.x3[x + y]),
-            ThreatLine::from_values(&self.x4[BOARD_SIZE - 1 - y + x]),
+            ThreatLine::from_values(&l1),
+            ThreatLine::from_values(&l2),
+            ThreatLine::from_values(&l3),
+            ThreatLine::from_values(&l4),
             y,
             x,
             y,
             BOARD_SIZE - 1 - y,
         )
-    }
-
-    fn set_point(&mut self, x: usize, y: usize, value: Side) {
-        self.x1[x][y] = i32::from(value);
-        self.x2[y][x] = i32::from(value);
-        self.x3[x + y][y] = i32::from(value);
-        self.x4[BOARD_SIZE - 1 - y + x][BOARD_SIZE - 1 - y] = i32::from(value);
     }
 
     pub fn play(&mut self, move_: Move, side: Side) {
@@ -352,8 +339,6 @@ impl ThreatBoardView {
         self.board
             .play_assuming_rule_legal(move_, Some(side), self.rule_set)
             .expect("threat board play should stay legal");
-        let (x, y) = move_to_xy(move_).expect("move stays in range");
-        self.set_point(x, y, side);
         self.pat4.play(move_, side);
     }
 
@@ -366,8 +351,6 @@ impl ThreatBoardView {
         self.board
             .force_side_to_move(previous_side)
             .expect("tracked previous side remains valid");
-        let (x, y) = move_to_xy(played.move_).expect("move stays in range");
-        self.set_point(x, y, EMPTY);
         self.pat4.undo(played.move_);
     }
 

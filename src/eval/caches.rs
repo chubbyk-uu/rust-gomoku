@@ -1,6 +1,7 @@
 //! Incremental evaluation caches.
 
-use crate::constants::{BOARD_SIZE, DSHAPE_SIZE};
+use crate::constants::{BLACK, BOARD_SIZE, DSHAPE_SIZE, WHITE};
+use crate::patterns::line::{PackedLine, PACKED_LINE_COUNT};
 use crate::rules::RuleSet;
 use crate::types::Move;
 
@@ -14,10 +15,53 @@ pub type ShapeCache = [[[[i32; 4]; BOARD_SIZE]; BOARD_SIZE]; 2];
 pub type EmptyBucketCounts = [[u16; DSHAPE_SIZE]; 2];
 pub type NonZeroBucketMask = [[u64; 3]; 2];
 pub type DgnBlockedCounts = [[u8; BOARD_SIZE]; BOARD_SIZE];
+pub(crate) type PackedLineStones = [[u32; 2]; PACKED_LINE_COUNT];
 /// Membership flags for empty points that are black "apparent double-threes"
 /// (`exact_fives == 0 && open_threes >= 2`). Maintained incrementally so the
 /// Renju refresh only re-evaluates these points instead of scanning the board.
 pub type Dt3Present = [[bool; BOARD_SIZE]; BOARD_SIZE];
+
+#[inline(always)]
+pub(crate) fn update_packed_lines_cell(lines: &mut PackedLineStones, x: usize, y: usize, cell: i8) {
+    let h_idx = x;
+    let v_idx = BOARD_SIZE + y;
+    let dd_idx = 30 + x + y;
+    let inv_y = BOARD_SIZE - 1 - y;
+    let du_idx = 59 + x + inv_y;
+
+    let y_bit = 1_u32 << (y + 5);
+    let x_bit = 1_u32 << (x + 5);
+    let inv_y_bit = 1_u32 << (inv_y + 5);
+
+    if cell == BLACK {
+        lines[h_idx][0] |= y_bit;
+        lines[h_idx][1] &= !y_bit;
+        lines[v_idx][0] |= x_bit;
+        lines[v_idx][1] &= !x_bit;
+        lines[dd_idx][0] |= y_bit;
+        lines[dd_idx][1] &= !y_bit;
+        lines[du_idx][0] |= inv_y_bit;
+        lines[du_idx][1] &= !inv_y_bit;
+    } else if cell == WHITE {
+        lines[h_idx][0] &= !y_bit;
+        lines[h_idx][1] |= y_bit;
+        lines[v_idx][0] &= !x_bit;
+        lines[v_idx][1] |= x_bit;
+        lines[dd_idx][0] &= !y_bit;
+        lines[dd_idx][1] |= y_bit;
+        lines[du_idx][0] &= !inv_y_bit;
+        lines[du_idx][1] |= inv_y_bit;
+    } else {
+        lines[h_idx][0] &= !y_bit;
+        lines[h_idx][1] &= !y_bit;
+        lines[v_idx][0] &= !x_bit;
+        lines[v_idx][1] &= !x_bit;
+        lines[dd_idx][0] &= !y_bit;
+        lines[dd_idx][1] &= !y_bit;
+        lines[du_idx][0] &= !inv_y_bit;
+        lines[du_idx][1] &= !inv_y_bit;
+    }
+}
 
 #[inline(always)]
 pub(crate) fn dgn_contribution(cc: u8) -> i32 {
@@ -55,6 +99,7 @@ pub struct EvalCaches {
     pub attack_cache: ValueCache,
     pub empty_bucket_counts: EmptyBucketCounts,
     pub(crate) nonzero_bucket_mask: NonZeroBucketMask,
+    pub(crate) packed_lines: PackedLineStones,
     pub(crate) dgn_cc: DgnBlockedCounts,
     pub(crate) dgn_sum: [i32; 2],
     pub(crate) shadow_log: Vec<(u8, u8, i8)>,
@@ -90,6 +135,7 @@ impl EvalCaches {
             attack_cache: new_value_cache(),
             empty_bucket_counts: new_empty_bucket_counts(),
             nonzero_bucket_mask: [[0; 3]; 2],
+            packed_lines: [[0; 2]; PACKED_LINE_COUNT],
             dgn_cc: [[0; BOARD_SIZE]; BOARD_SIZE],
             dgn_sum: [0; 2],
             shadow_log: Vec::with_capacity(32),
@@ -113,6 +159,21 @@ impl EvalCaches {
             self.shadow_log.push((x as u8, y as u8, old_cell));
         }
         self.board_shadow[x][y] = new_cell;
+        update_packed_lines_cell(&mut self.packed_lines, x, y, new_cell);
+    }
+
+    #[inline(always)]
+    pub(crate) fn packed_lines_through(&self, x: usize, y: usize) -> [PackedLine; 4] {
+        let h_idx = x;
+        let v_idx = BOARD_SIZE + y;
+        let dd_idx = 30 + x + y;
+        let du_idx = 59 + x + (BOARD_SIZE - 1 - y);
+        [
+            PackedLine::from_stones(self.packed_lines[h_idx], h_idx),
+            PackedLine::from_stones(self.packed_lines[v_idx], v_idx),
+            PackedLine::from_stones(self.packed_lines[dd_idx], dd_idx),
+            PackedLine::from_stones(self.packed_lines[du_idx], du_idx),
+        ]
     }
 
     #[inline(always)]
@@ -252,7 +313,10 @@ impl EvalCaches {
 
         while self.shadow_log.len() > snapshot.shadow_log_len {
             let (x, y, old_cell) = self.shadow_log.pop().expect("shadow log length tracked");
-            self.board_shadow[x as usize][y as usize] = old_cell;
+            let ux = x as usize;
+            let uy = y as usize;
+            self.board_shadow[ux][uy] = old_cell;
+            update_packed_lines_cell(&mut self.packed_lines, ux, uy, old_cell);
         }
         while self.dgn_cc_log.len() > snapshot.dgn_cc_log_len {
             let (x, y, old_cc) = self.dgn_cc_log.pop().expect("dgn cc log length tracked");
@@ -304,6 +368,7 @@ impl EvalCaches {
         self.attack_cache = other.attack_cache;
         self.empty_bucket_counts = other.empty_bucket_counts;
         self.nonzero_bucket_mask = other.nonzero_bucket_mask;
+        self.packed_lines = other.packed_lines;
         self.dgn_cc = other.dgn_cc;
         self.dgn_sum = other.dgn_sum;
         self.shadow_log.clear();

@@ -468,10 +468,6 @@ fn nested_a3r_count_restores_threat_board_view_state() {
 
     let mut view = ThreatBoardView::from_board(board);
     let before_board = view.board.clone();
-    let before_x1 = view.x1.clone();
-    let before_x2 = view.x2.clone();
-    let before_x3 = view.x3.clone();
-    let before_x4 = view.x4.clone();
 
     let move_ = xy_to_move(7, 7).unwrap();
     view.play(move_, 1);
@@ -480,10 +476,6 @@ fn nested_a3r_count_restores_threat_board_view_state() {
     view.undo();
 
     assert_eq!(view.board, before_board);
-    assert_eq!(view.x1, before_x1);
-    assert_eq!(view.x2, before_x2);
-    assert_eq!(view.x3, before_x3);
-    assert_eq!(view.x4, before_x4);
 }
 
 #[test]

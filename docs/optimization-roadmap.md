@@ -269,7 +269,7 @@ flowchart TD
   - [x] `M0.2` 消除 TT 热路径 `Acquire` load（`TTTableView`）+ 增加 x86_64 TT `prefetch`（`probe()` 语义修正留入 `M2.1` 以守住 13/13 严格等价）
   - [x] `M0.3` `Arc<EngineConfig>` 与持久化 `WorkerLocal` 复用 `EvalCaches` / `AlphaBetaSearcher`，消除多线程每层克隆
 - [ ] **P1 — 底层统一、战术与时间管理**
-  - [ ] `M1.1` 88 线 2-bit 位板统一 `Eval` / `Threat` / `Forbidden`（`base` 等价）
+  - [x] `M1.1` 88 线常驻 `PackedLine` 位板 + 跳过非空邻域格 `SHAPE_TABLE` 查表 + 清理 `ThreatBoardView` 遗留 `x1..x4` 堆数组（`base` 等价）
   - [ ] `M1.2` 解锁 VCF `VCFM=5` 截断 + 定长 Zobrist TT + 证明集对手 VCF 过滤（实验分支）
   - [ ] `M1.3` 自适应时间管理 `timectl`（局时切分、软/硬时限、稳定性早停、动态 VCT 配额）（实验分支）
 - [ ] **P2 — 搜索与并行现代化（实验分支）**

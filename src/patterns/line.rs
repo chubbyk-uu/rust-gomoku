@@ -287,14 +287,54 @@ fn shape_raw_from_masks(
     ((trt & 0xF0) << 12) | (trt & 0xF)
 }
 
+pub(crate) const PACKED_LINE_COUNT: usize = 88;
+
+const fn build_packed_on_board_masks() -> [u32; PACKED_LINE_COUNT] {
+    let mut masks = [0_u32; PACKED_LINE_COUNT];
+    let full = ((1_u32 << BOARD_SIZE) - 1) << 5;
+    let mut i = 0;
+    while i < BOARD_SIZE {
+        masks[i] = full;
+        masks[BOARD_SIZE + i] = full;
+        i += 1;
+    }
+    let mut d = 0;
+    while d < BOARD_SIZE * 2 - 1 {
+        let lo = if d >= BOARD_SIZE {
+            d + 1 - BOARD_SIZE
+        } else {
+            0
+        };
+        let hi = if d < BOARD_SIZE { d } else { BOARD_SIZE - 1 };
+        let len = hi - lo + 1;
+        let mask = ((1_u32 << len) - 1) << (lo + 5);
+        masks[30 + d] = mask;
+        masks[59 + d] = mask;
+        d += 1;
+    }
+    masks
+}
+
+pub(crate) const PACKED_ON_BOARD_MASKS: [u32; PACKED_LINE_COUNT] = build_packed_on_board_masks();
+
 /// Masks for one of the four lines intersecting a changed cell. Five padding
 /// bits on each end let a shift extract any cell's complete radius-five window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PackedLine {
     stones: [u32; 2],
     on_board: u32,
 }
 
 impl PackedLine {
+    #[inline(always)]
+    pub(crate) fn from_stones(stones: [u32; 2], line_idx: usize) -> Self {
+        Self {
+            stones,
+            on_board: PACKED_ON_BOARD_MASKS[line_idx],
+        }
+    }
+
+    #[cfg(debug_assertions)]
     #[inline(always)]
     pub(crate) fn through(
         grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],

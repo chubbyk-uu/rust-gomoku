@@ -1033,3 +1033,43 @@ Verification & A/B timing (release build, clean CPU):
   - `4T`: `alphabeta_ms` `1,794.2 ms -> 1,726.1 ms` (**`-3.8%`**)
 - `renju_search_bench` (`d8/w40`, 6 positions): Freestyle `1654 -> 1644 ns/node`
   (`-0.6%`), Renju `1967 -> 1961 ns/node` (`-0.3%`).
+
+### 2026-11-22 (2): `M1.1` — Persistent 88-line `PackedLine` bitboards in `EvalCaches`, skip occupied neighbor `SHAPE_TABLE` lookups, drop legacy `ThreatBoardView::x1..x4`
+
+Hotspot evidence & target:
+
+- `value_wide_compute_for_rule` rebuilt 4 `PackedLine`s by scanning 60 board
+  cells on every move, and eagerly called `hypothetical_shapes()` (2×
+  `SHAPE_TABLE` lookups) for every neighbor cell along the 4 lines — even
+  already-occupied cells that `update_line_neighbor_point` immediately
+  discarded.
+- `ThreatBoardView` still heap-allocated 88 `Vec<i32>` (`x1..x4`) on every
+  construction and updated 4 2D vectors on every `play/undo` even though
+  `Pattern4State` had replaced all hot-path reads.
+
+Modification scope (100% behavior-equivalent):
+
+- `src/patterns/line.rs`, `src/eval/caches.rs`, `src/eval/local.rs`:
+  added persistent `packed_lines: [[u32; 2]; 88]` + compile-time
+  `PACKED_ON_BOARD_MASKS` inside `EvalCaches` (incrementally updated via
+  `set_board_shadow` / `shadow_log` with zero `EvalSnapshot` copy overhead and
+  verified bit-identical to `PackedLine::through` under `debug_assert_eq!`),
+  and moved `line.hypothetical_shapes()` inside the `cell == EMPTY` branch of
+  `update_line_neighbor_point`.
+- `src/threats/threat_board.rs`: removed `x1..x4` `Vec<Vec<i32>>` fields and
+  per-play/undo writes; `lines_for` fallback builds stack `[i32; 15]` arrays
+  from `board.grid_rows()`.
+
+Verification & A/B timing (release build, clean CPU, cumulative vs `master` `7fafe74`):
+
+- Correctness: `cargo fmt --check`, `cargo test` (with `debug_assert_eq!`
+  bit-identity check), `android/rust_bridge` tests, and `scripts/run_diff.py
+  --profile all --check-baselines --jobs 8` (**13/13 passed**, zero move/score/node
+  changes).
+- `cases/renju/vct_dense_ply78.json` (`d7/w40`, Renju, `15,324,461` nodes):
+  - `1T`: `alphabeta_ms` `13,833.1 ms -> 12,602.1 ms` (**`-8.9%`** cumulative, `903 -> 822 ns/node`)
+  - `4T`: `alphabeta_ms` `1,794.2 ms -> 1,659.0 ms` (**`-7.5%`** cumulative)
+  - `VCT6`: `173.5 ms -> 165.1 ms` (**`-4.8%`**), `vct_counter_win_scan_ply75` `368.1 ms -> 336.8 ms` (**`-8.5%`**), exact OR/AND nodes unchanged.
+- `renju_search_bench` (`d8/w40`, 6 positions):
+  - Freestyle: `1252.2 ms (1654 ns/node) -> 1172.5 ms (1549 ns/node)` (**`-6.4%`**)
+  - Renju: `2100.4 ms (1967 ns/node) -> 2010.2 ms (1882 ns/node)` (**`-4.3%`**)
