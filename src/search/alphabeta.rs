@@ -19,6 +19,7 @@ use crate::search::ordering::{
     order_candidates_owned, order_candidates_primary_owned, order_candidates_primary_slice,
     resolve_candidate_tie_group,
 };
+use crate::search::tt::TTTableView;
 use crate::search::{order_candidates_root_classic, TTEntry, TranspositionTable};
 use crate::threats::VCFSearcher;
 use crate::types::{Move, Side};
@@ -250,6 +251,22 @@ impl AlphaBetaSearcher {
         self.tt_generation = generation;
     }
 
+    pub(crate) fn sync_worker_state(
+        &mut self,
+        config: &EngineConfig,
+        tt: &TranspositionTable,
+        tt_generation: u16,
+    ) {
+        if self.config != *config {
+            self.config = config.clone();
+        }
+        if !self.tt.is_shared_with(tt) || self.tt.is_subply() != tt.is_subply() {
+            self.tt = tt.clone();
+        }
+        self.tt.set_subply(self.config.runtime.threads > 1);
+        self.tt_generation = tt_generation;
+    }
+
     pub fn nonroot_vcf_depth(depth: f64, root_depth: f64) -> i32 {
         (depth + 6.0 - 2.0 * root_depth) as i32
     }
@@ -287,6 +304,8 @@ impl AlphaBetaSearcher {
         abdada: Option<&AbdadaContext>,
     ) -> (i32, Option<Move>) {
         self.tt.set_subply(self.config.runtime.threads > 1);
+        let tt = self.tt.clone();
+        let tt_view = tt.view();
         let mut coverage = CoverageTracker::from_board(board);
         self.search_with_coverage(
             board,
@@ -301,6 +320,7 @@ impl AlphaBetaSearcher {
             &mut coverage,
             None,
             abdada,
+            tt_view,
         )
     }
 
@@ -319,10 +339,11 @@ impl AlphaBetaSearcher {
         coverage: &mut CoverageTracker,
         pending_cache: Option<((usize, usize), &mut Option<EvalSnapshot>)>,
         abdada: Option<&AbdadaContext>,
+        tt_view: TTTableView<'_>,
     ) -> (i32, Option<Move>) {
         let root_depth = options.root_depth.unwrap_or(depth);
         let priority_base = options.priority_base.unwrap_or(board.move_count() as i32);
-        let subply_tt = self.tt.is_subply();
+        let subply_tt = tt_view.is_subply();
         let max_encodable_depth = if subply_tt {
             SUBPLY_TT_DEPTH_CAP
         } else {
@@ -414,7 +435,7 @@ impl AlphaBetaSearcher {
 
         // Stored depths round down. Round the requirement up so a leaf never
         // cuts off a positive-depth search, even after fractional reductions.
-        let probe = self.tt.probe(
+        let probe = tt_view.probe(
             board.zobrist_key(),
             probe_depth,
             score_to_tt(alpha, options.ply),
@@ -455,7 +476,7 @@ impl AlphaBetaSearcher {
             } else if score <= -WIN {
                 score = -INF + options.ply;
             }
-            self.tt.store(TTEntry {
+            tt_view.store(TTEntry {
                 key: board.zobrist_key(),
                 value: score_to_tt(score, options.ply),
                 flag: HASHF_EXACT,
@@ -751,6 +772,7 @@ impl AlphaBetaSearcher {
                 board
                     .play_assuming_rule_legal(candidate.move_, Some(side), self.config.rule_set)
                     .expect("ordered candidate stays legal");
+                tt_view.prefetch(board.zobrist_key());
                 coverage.add_move(candidate.move_);
 
                 let mut atdown = 0_i32;
@@ -796,6 +818,7 @@ impl AlphaBetaSearcher {
                             coverage,
                             Some(((mx, my), &mut candidate_snapshot)),
                             abdada,
+                            tt_view,
                         );
                         if let Some(start) = narrow_start {
                             profile_zero_window_nodes +=
@@ -823,6 +846,7 @@ impl AlphaBetaSearcher {
                                 coverage,
                                 Some(((mx, my), &mut candidate_snapshot)),
                                 abdada,
+                                tt_view,
                             );
                             if let Some(start) = full_start {
                                 profile_full_window_nodes +=
@@ -852,6 +876,7 @@ impl AlphaBetaSearcher {
                             coverage,
                             Some(((mx, my), &mut candidate_snapshot)),
                             abdada,
+                            tt_view,
                         );
                         if let Some(start) = full_start {
                             profile_full_window_nodes +=
@@ -1002,7 +1027,7 @@ impl AlphaBetaSearcher {
                 hash_flag = HASHF_EXACT;
                 store_depth += if subply_tt { SUBPLY_TT_WIN_BONUS } else { 10 };
             }
-            self.tt.store(TTEntry {
+            tt_view.store(TTEntry {
                 key: board.zobrist_key(),
                 value: score_to_tt(current, options.ply),
                 flag: hash_flag,

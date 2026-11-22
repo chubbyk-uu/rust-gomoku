@@ -379,8 +379,68 @@ impl TranspositionTable {
         snapshot
     }
 
+    pub(crate) fn view(&self) -> TTTableView<'_> {
+        TTTableView {
+            buckets: self.storage.buckets_for_mode(self.subply),
+            bucket_mask: self.bucket_mask,
+            subply: self.subply,
+        }
+    }
+
     pub fn store(&self, entry: TTEntry) {
-        let bucket = &self.storage.buckets_for_mode(self.subply)[self.bucket_index(entry.key)];
+        self.view().store(entry);
+    }
+
+    pub fn probe(&self, key: u64, depth: i32, alpha: i32, beta: i32) -> ProbeResult {
+        self.view().probe(key, depth, alpha, beta)
+    }
+
+    fn bucket_index(&self, key: u64) -> usize {
+        (key & self.bucket_mask) as usize
+    }
+}
+
+/// Borrowed view of the active TT bucket plane for a single search invocation.
+/// Resolves the 1T/MT mode partition once at search entry so hot-path probes,
+/// stores, and prefetches avoid per-node atomic mode checks.
+#[derive(Clone, Copy)]
+pub(crate) struct TTTableView<'a> {
+    buckets: &'a [[RawEntry; 2]],
+    bucket_mask: u64,
+    subply: bool,
+}
+
+impl<'a> TTTableView<'a> {
+    #[inline(always)]
+    fn bucket_index(&self, key: u64) -> usize {
+        (key & self.bucket_mask) as usize
+    }
+
+    #[inline(always)]
+    pub(crate) fn is_subply(&self) -> bool {
+        self.subply
+    }
+
+    #[inline(always)]
+    pub(crate) fn prefetch(&self, key: u64) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let ptr = self.buckets.as_ptr().wrapping_add(self.bucket_index(key)) as *const i8;
+            // SAFETY: `bucket_index(key)` is masked within `self.buckets.len()`,
+            // and `_mm_prefetch` is a non-faulting hint instruction.
+            unsafe {
+                std::arch::x86_64::_mm_prefetch(ptr, std::arch::x86_64::_MM_HINT_T0);
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = key;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn store(&self, entry: TTEntry) {
+        let bucket = &self.buckets[self.bucket_index(entry.key)];
         let (first, first_subply) = bucket[0].load_raw_with_mode();
         let mut slot = 0_usize;
         if first.flag != HASHF_EMPTY
@@ -391,10 +451,13 @@ impl TranspositionTable {
         bucket[slot].store(entry, self.subply);
     }
 
-    pub fn probe(&self, key: u64, depth: i32, alpha: i32, beta: i32) -> ProbeResult {
+    #[inline]
+    pub(crate) fn probe(&self, key: u64, depth: i32, alpha: i32, beta: i32) -> ProbeResult {
         let mut fallback_best_move = None;
         let mut fallback_best_move_hint = None;
-        for entry in self.bucket(key) {
+        let raw_bucket = &self.buckets[self.bucket_index(key)];
+        for raw_entry in raw_bucket {
+            let entry = raw_entry.load_for_key(key, self.subply);
             if entry.key != key {
                 continue;
             }
@@ -460,10 +523,6 @@ impl TranspositionTable {
             hit: false,
             ..ProbeResult::default()
         }
-    }
-
-    fn bucket_index(&self, key: u64) -> usize {
-        (key & self.bucket_mask) as usize
     }
 }
 

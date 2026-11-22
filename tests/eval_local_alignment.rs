@@ -149,7 +149,6 @@ fn value_wide_compute_matches_full_recompute_after_multiple_steps() {
 
 fn assert_global_eval_cache_invariants(board: &Board, caches: &EvalCaches) {
     let mut expected_counts = [[0_u16; DSHAPE_SIZE]; 2];
-    let mut expected_occupied = Vec::new();
 
     for x in 0..board.size() {
         for y in 0..board.size() {
@@ -159,19 +158,12 @@ fn assert_global_eval_cache_invariants(board: &Board, caches: &EvalCaches) {
                     let bucket = caches.value_cache[player][x][y] as usize;
                     counts[bucket] += 1;
                 }
-            } else {
-                expected_occupied.push(xy_to_move(x, y).unwrap());
             }
             assert_eq!(caches.board_shadow[x][y], cell);
         }
     }
 
-    let mut actual_occupied = caches.occupied_moves[..caches.occupied_len].to_vec();
-    expected_occupied.sort_unstable();
-    actual_occupied.sort_unstable();
-
     assert_eq!(caches.empty_bucket_counts, expected_counts);
-    assert_eq!(actual_occupied, expected_occupied);
 }
 
 fn pick_legal_move(board: &Board, seed: &mut u64) -> rust_gomoku::Move {

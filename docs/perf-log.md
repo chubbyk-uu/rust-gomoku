@@ -996,3 +996,40 @@ to the Route B commit:
 - Timing: 4T avg **`463.1 ms`** / median **`217.3 ms`** / p95 **`1,721.5 ms`** /
   max **`11,102.6 ms`** vs 1T avg `1,410.9 ms` / `586.5 ms` / `5,709.0 ms` /
   `26,465.7 ms` (**`3.05x` / `2.70x` / `3.32x` / `2.38x`** faster).
+
+### 2026-11-22: P0 (`M0.1`–`M0.3`) — Lean `EvalSnapshot`, `TTTableView` + prefetch, and persistent `WorkerLocal`
+
+Hotspot evidence & target:
+
+- `EvalSnapshot` copied `~1.16 KiB` per snapshot/restore including a dead 450B
+  `occupied_moves` array (only read in `#[cfg(debug_assertions)]`) and 225B
+  `board_shadow` (only 1 cell changes per move), while undo logs stored wide
+  `usize` coordinates (`24B–40B` per entry).
+- `TranspositionTable::probe/store` executed an `Acquire` atomic load on
+  `primary_mode` per node and issued no software prefetch.
+- `SearchWorkerPool` cloned `EngineConfig` (4 `Vec<f64>`s), `EvalCaches`, and
+  constructed a fresh `AlphaBetaSearcher` on every `depth >= 5` per worker.
+
+Modification scope (100% behavior-equivalent):
+
+- `src/eval/caches.rs`, `src/eval/local.rs`, `src/eval/global_eval.rs`:
+  removed `occupied_moves`/`occupied_len`, journaled `board_shadow` via
+  `shadow_log`, and compacted undo log entries to `u8`/`i16`/`i8` tuples
+  (`3B–8B` each), shrinking `EvalSnapshot` by ~59%.
+- `src/search/tt.rs`, `src/search/alphabeta.rs`: added `TTTableView<'a>` to
+  resolve the 1T/MT bucket plane once per root search (eliminating per-node
+  `Acquire` loads) and issued x86_64 `_mm_prefetch` after `board.play`.
+- `src/search/abdada.rs`, `src/search/root.rs`: wrapped `DepthJob.config` in
+  `Arc<EngineConfig>` and kept persistent `WorkerLocal` (`EvalCaches` +
+  `AlphaBetaSearcher`) per worker thread across depths.
+
+Verification & A/B timing (release build, clean CPU):
+
+- Correctness: `cargo fmt --check`, `cargo test`, `android/rust_bridge` tests,
+  and `scripts/run_diff.py --profile all --check-baselines --jobs 8` (**13/13
+  passed**, exact move/score/node parity).
+- `cases/renju/vct_dense_ply78.json` (`d7/w40`, Renju, `15,324,461` nodes):
+  - `1T`: `alphabeta_ms` `13,833.1 ms -> 13,236.6 ms` (**`-4.3%`**, `903 -> 864 ns/node`)
+  - `4T`: `alphabeta_ms` `1,794.2 ms -> 1,726.1 ms` (**`-3.8%`**)
+- `renju_search_bench` (`d8/w40`, 6 positions): Freestyle `1654 -> 1644 ns/node`
+  (`-0.6%`), Renju `1967 -> 1961 ns/node` (`-0.3%`).

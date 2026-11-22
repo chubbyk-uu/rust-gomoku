@@ -36,10 +36,10 @@ fn eval_caches_reset_restores_zero_state() {
 fn eval_caches_snapshot_restore_roundtrip() {
     let mut caches = EvalCaches::new();
     caches.initialized = true;
-    caches.board_shadow[0][0] = 1;
+    caches.set_board_shadow(0, 0, 1);
     caches.set_shape_value(0, 1, 1, 2, 99);
     let snapshot = caches.snapshot();
-    caches.board_shadow[0][0] = 0;
+    caches.set_board_shadow(0, 0, 0);
     caches.set_shape_value(0, 1, 1, 2, 0);
     caches.restore_snapshot(&snapshot);
     assert!(caches.initialized);

@@ -715,14 +715,14 @@ impl RootSearcher {
             let (mut score, mut move_, mut stats) = if let Some((abdada_table, abdada_salt)) =
                 parallel_setup
             {
-                let config_clone = self.config.clone();
+                let config_arc = Arc::new(self.config.clone());
                 let tt_clone = self.tt.clone();
                 let tt_gen = self.alphabeta.tt_generation();
                 let deadline = self.vcf.budget.deadline();
                 let depth_done = Arc::new(AtomicBool::new(false));
                 let root_best = Arc::new(SharedRootBest::new());
                 let job = Arc::new(DepthJob {
-                    config: config_clone,
+                    config: config_arc,
                     tt: tt_clone,
                     tt_generation: tt_gen,
                     board: board.clone(),

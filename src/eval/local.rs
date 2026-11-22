@@ -2,7 +2,7 @@
 
 use crate::board::Board;
 use crate::config::EngineConfig;
-use crate::constants::{BLACK, BOARD_AREA, BOARD_SIZE, DSHAPE_SIZE, EMPTY, WHITE};
+use crate::constants::{BLACK, BOARD_SIZE, DSHAPE_SIZE, EMPTY, WHITE};
 use crate::eval::caches::{dgn_contribution, EvalCaches};
 use crate::eval::global_eval::{blocked_neighbor_count, NEIGHBOR_CHECKS};
 use crate::patterns::buckets::bucket_for_lines;
@@ -191,9 +191,7 @@ pub fn recompute_point_caches_for_rule(
                 let old_bucket = caches.value_cache[player][x][y];
                 let old_attack = caches.attack_cache[player][x][y];
                 if old_bucket != 0 || old_attack != 0 {
-                    caches
-                        .value_log
-                        .push((player, x, y, old_bucket, old_attack));
+                    caches.push_value_log(player, x, y, old_bucket, old_attack);
                 }
             }
 
@@ -204,7 +202,7 @@ pub fn recompute_point_caches_for_rule(
                 let old = caches.shape_cache[player][x][y][direction];
                 if old != 0 {
                     if caches.active_snapshot_count > 0 {
-                        caches.shape_log.push((player, x, y, direction, old));
+                        caches.push_shape_log(player, x, y, direction, old);
                     }
                     caches.shape_cache[player][x][y][direction] = 0;
                 }
@@ -221,7 +219,7 @@ pub fn recompute_point_caches_for_rule(
             let old = caches.shape_cache[player][x][y][direction_index];
             if old != shape {
                 if caches.active_snapshot_count > 0 {
-                    caches.shape_log.push((player, x, y, direction_index, old));
+                    caches.push_shape_log(player, x, y, direction_index, old);
                 }
                 caches.shape_cache[player][x][y][direction_index] = shape;
             }
@@ -239,9 +237,7 @@ pub fn recompute_point_caches_for_rule(
         let old_bucket = caches.value_cache[player][x][y];
         let old_attack = caches.attack_cache[player][x][y];
         if caches.active_snapshot_count > 0 && (old_bucket != bucket || old_attack != attack) {
-            caches
-                .value_log
-                .push((player, x, y, old_bucket, old_attack));
+            caches.push_value_log(player, x, y, old_bucket, old_attack);
         }
         caches.value_cache[player][x][y] = bucket;
         caches.attack_cache[player][x][y] = attack;
@@ -320,7 +316,6 @@ pub fn value_wide_compute_for_rule(
             caches.set_dgn_cc(cx, cy, 0);
         }
     }
-    update_occupied_transition(caches, cx, cy, old_cell, new_cell);
 
     let skip_stone = center_changed.then_some((cx, cy));
     // Process center cell (cx, cy) directly (the sole intersection of all 4 lines).
@@ -399,7 +394,7 @@ pub fn value_wide_compute_for_rule(
         update_center_neighbor_dgn(board, caches, cx, cy, old_cell, new_cell, &old_center_zero);
     }
     add_empty_bucket_contribution(board, caches, cx, cy);
-    caches.board_shadow[cx][cy] = new_cell;
+    caches.set_board_shadow(cx, cy, new_cell);
 
     // Non-center dirty points lie on strictly one of the 4 lines through (cx, cy).
     let (h_fwd, h_bwd) = horizontal.neighbor_counts(cy, radius);
@@ -547,7 +542,7 @@ fn update_line_neighbor_point(
         }
         if !was_empty {
             add_empty_bucket_contribution(board, caches, x, y);
-            caches.board_shadow[x][y] = EMPTY;
+            caches.set_board_shadow(x, y, EMPTY);
         }
     } else if caches.board_shadow[x][y] != cell {
         remove_empty_bucket_contribution(caches, x, y);
@@ -555,7 +550,7 @@ fn update_line_neighbor_point(
         if renju {
             caches.set_dt3_present(x, y, false);
         }
-        caches.board_shadow[x][y] = cell;
+        caches.set_board_shadow(x, y, cell);
     }
 }
 
@@ -603,13 +598,12 @@ fn side_index(side: i8) -> usize {
 fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
     caches.empty_bucket_counts = [[0; DSHAPE_SIZE]; 2];
     caches.nonzero_bucket_mask = [[0; 3]; 2];
-    caches.occupied_moves = [0; BOARD_AREA];
-    caches.occupied_len = 0;
     caches.dgn_sum = [0; 2];
     let preserve_snapshot = caches.active_snapshot_count > 0;
     if !preserve_snapshot {
         caches.dgn_cc = [[0; BOARD_SIZE]; BOARD_SIZE];
         caches.dgn_cc_log.clear();
+        caches.shadow_log.clear();
     }
 
     let size = board.size();
@@ -617,7 +611,11 @@ fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
     for x in 0..size {
         for y in 0..size {
             let cell = grid[y][x];
-            caches.board_shadow[x][y] = cell;
+            if preserve_snapshot {
+                caches.set_board_shadow(x, y, cell);
+            } else {
+                caches.board_shadow[x][y] = cell;
+            }
             if cell == EMPTY {
                 if preserve_snapshot {
                     caches.set_dgn_cc(x, y, 0);
@@ -627,9 +625,6 @@ fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
                     caches.inc_empty_bucket(player, bucket);
                 }
             } else {
-                let move_ = (y * BOARD_SIZE + x) as Move;
-                caches.occupied_moves[caches.occupied_len] = move_;
-                caches.occupied_len += 1;
                 let player = side_index(cell);
                 let cc =
                     blocked_neighbor_count(grid, &caches.shape_cache[player], x, y, size) as u8;
@@ -662,48 +657,6 @@ fn add_empty_bucket_contribution(board: &Board, caches: &mut EvalCaches, x: usiz
         let bucket = caches.value_cache[player][x][y] as usize;
         caches.inc_empty_bucket(player, bucket);
     }
-}
-
-fn update_occupied_transition(
-    caches: &mut EvalCaches,
-    x: usize,
-    y: usize,
-    old_cell: i8,
-    new_cell: i8,
-) {
-    if old_cell == EMPTY && new_cell != EMPTY {
-        add_occupied_move(caches, (y * BOARD_SIZE + x) as Move);
-    } else if old_cell != EMPTY && new_cell == EMPTY {
-        remove_occupied_move(caches, (y * BOARD_SIZE + x) as Move);
-    }
-}
-
-fn add_occupied_move(caches: &mut EvalCaches, move_: Move) {
-    debug_assert!(caches.occupied_len < BOARD_AREA);
-    debug_assert!(!caches.occupied_moves[..caches.occupied_len].contains(&move_));
-    caches.occupied_moves[caches.occupied_len] = move_;
-    caches.occupied_len += 1;
-}
-
-fn remove_occupied_move(caches: &mut EvalCaches, move_: Move) {
-    if caches.occupied_len == 0 {
-        debug_assert!(false, "occupied move list underflow");
-        return;
-    }
-    let last_index = caches.occupied_len - 1;
-    if caches.occupied_moves[last_index] == move_ {
-        caches.occupied_len -= 1;
-        return;
-    }
-    let Some(index) = caches.occupied_moves[..last_index]
-        .iter()
-        .position(|&candidate| candidate == move_)
-    else {
-        debug_assert!(false, "occupied move missing from list");
-        return;
-    };
-    caches.occupied_moves[index] = caches.occupied_moves[last_index];
-    caches.occupied_len -= 1;
 }
 
 fn merge_changed_player(accumulator: &mut [bool; 2], changed: [bool; 2]) {
@@ -765,7 +718,7 @@ fn update_direction_cache(
         let old = caches.shape_cache[player][x][y][direction_index];
         if old != new_shape {
             if caches.active_snapshot_count > 0 {
-                caches.shape_log.push((player, x, y, direction_index, old));
+                caches.push_shape_log(player, x, y, direction_index, old);
             }
             caches.shape_cache[player][x][y][direction_index] = new_shape;
             changed[player] = true;
@@ -843,9 +796,7 @@ fn set_bucket_attack(
         return;
     }
     if caches.active_snapshot_count > 0 {
-        caches
-            .value_log
-            .push((player, x, y, old_bucket, old_attack));
+        caches.push_value_log(player, x, y, old_bucket, old_attack);
     }
     caches.value_cache[player][x][y] = bucket;
     caches.attack_cache[player][x][y] = attack;
@@ -916,9 +867,7 @@ fn clear_occupied_point(caches: &mut EvalCaches, x: usize, y: usize) {
         let old_bucket = caches.value_cache[player][x][y];
         let old_attack = caches.attack_cache[player][x][y];
         if caches.active_snapshot_count > 0 && (old_bucket != 0 || old_attack != 0) {
-            caches
-                .value_log
-                .push((player, x, y, old_bucket, old_attack));
+            caches.push_value_log(player, x, y, old_bucket, old_attack);
         }
         caches.value_cache[player][x][y] = 0;
         caches.attack_cache[player][x][y] = 0;
@@ -927,7 +876,7 @@ fn clear_occupied_point(caches: &mut EvalCaches, x: usize, y: usize) {
             let old = caches.shape_cache[player][x][y][direction];
             if old != 0 {
                 if caches.active_snapshot_count > 0 {
-                    caches.shape_log.push((player, x, y, direction, old));
+                    caches.push_shape_log(player, x, y, direction, old);
                 }
                 caches.shape_cache[player][x][y][direction] = 0;
             }

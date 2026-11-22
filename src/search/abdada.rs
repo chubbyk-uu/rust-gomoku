@@ -145,7 +145,7 @@ impl AbdadaContext {
 }
 
 pub(crate) struct DepthJob {
-    pub config: EngineConfig,
+    pub config: Arc<EngineConfig>,
     pub tt: TranspositionTable,
     pub tt_generation: u16,
     pub board: Board,
@@ -346,11 +346,34 @@ impl Drop for SearchWorkerPool {
     }
 }
 
-fn run_depth_job(job: &DepthJob, worker_id: usize) {
+struct WorkerLocal {
+    caches: EvalCaches,
+    searcher: Option<AlphaBetaSearcher>,
+}
+
+impl WorkerLocal {
+    fn new() -> Self {
+        Self {
+            caches: EvalCaches::new(),
+            searcher: None,
+        }
+    }
+}
+
+fn run_depth_job(job: &DepthJob, worker_id: usize, local: &mut WorkerLocal) {
     let mut board = job.board.clone();
-    let mut caches = job.caches.clone();
-    let mut searcher = AlphaBetaSearcher::with_tt(job.config.clone(), job.tt.clone());
-    searcher.set_tt_generation(job.tt_generation);
+    local.caches.restore_from(&job.caches);
+    let searcher = match local.searcher.as_mut() {
+        Some(existing) => {
+            existing.sync_worker_state(&job.config, &job.tt, job.tt_generation);
+            existing
+        }
+        None => {
+            let mut created = AlphaBetaSearcher::with_tt((*job.config).clone(), job.tt.clone());
+            created.set_tt_generation(job.tt_generation);
+            local.searcher.insert(created)
+        }
+    };
     let mut stats = SearchStats {
         deadline: job.deadline,
         cancel: job.cancel.clone(),
@@ -365,7 +388,7 @@ fn run_depth_job(job: &DepthJob, worker_id: usize) {
     };
     let (score, move_) = searcher.search_with_abdada(
         &mut board,
-        &mut caches,
+        &mut local.caches,
         job.side,
         f64::from(job.depth),
         -INF,
@@ -400,6 +423,7 @@ fn run_depth_job(job: &DepthJob, worker_id: usize) {
 
 fn worker_loop(shared: Arc<PoolShared>, worker_id: usize) {
     let mut seen_generation = 0_u64;
+    let mut local = WorkerLocal::new();
     loop {
         let job = {
             let mut state = lock_pool_state(&shared);
@@ -421,7 +445,7 @@ fn worker_loop(shared: Arc<PoolShared>, worker_id: usize) {
         };
         if let Some(job) = job {
             let _ = catch_unwind(AssertUnwindSafe(|| {
-                run_depth_job(&job, worker_id);
+                run_depth_job(&job, worker_id, &mut local);
             }));
         }
     }

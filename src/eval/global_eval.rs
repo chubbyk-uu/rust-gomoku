@@ -183,25 +183,26 @@ fn evaluate_dgn_from_occupied(board: &Board, caches: &EvalCaches, side: i8) -> i
     let size = board.size();
     let mut dgn = 0_i32;
 
-    for &move_ in &caches.occupied_moves[..caches.occupied_len] {
-        let index = move_ as usize;
-        let x = index % BOARD_SIZE;
-        let y = index / BOARD_SIZE;
-        let stone = grid[y][x];
-        debug_assert_ne!(stone, EMPTY);
-        if stone == side {
-            let cc = blocked_neighbor_count(grid, shape_cache_player, x, y, size);
-            if cc <= 1 {
-                dgn -= 5;
-            } else if cc - 1 >= 5 {
-                dgn -= cc - 1 - 3;
+    for y in 0..size {
+        for x in 0..size {
+            let stone = grid[y][x];
+            if stone == EMPTY {
+                continue;
             }
-        } else if stone == opponent_side {
-            let cc = blocked_neighbor_count(grid, shape_cache_opponent, x, y, size);
-            if cc <= 1 {
-                dgn += 5;
-            } else if cc - 1 >= 5 {
-                dgn += cc - 1 - 3;
+            if stone == side {
+                let cc = blocked_neighbor_count(grid, shape_cache_player, x, y, size);
+                if cc <= 1 {
+                    dgn -= 5;
+                } else if cc - 1 >= 5 {
+                    dgn -= cc - 1 - 3;
+                }
+            } else if stone == opponent_side {
+                let cc = blocked_neighbor_count(grid, shape_cache_opponent, x, y, size);
+                if cc <= 1 {
+                    dgn += 5;
+                } else if cc - 1 >= 5 {
+                    dgn += cc - 1 - 3;
+                }
             }
         }
     }

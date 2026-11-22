@@ -1,6 +1,6 @@
 //! Incremental evaluation caches.
 
-use crate::constants::{BOARD_AREA, BOARD_SIZE, DSHAPE_SIZE};
+use crate::constants::{BOARD_SIZE, DSHAPE_SIZE};
 use crate::rules::RuleSet;
 use crate::types::Move;
 
@@ -13,7 +13,6 @@ pub type ValueCache = [[[i32; BOARD_SIZE]; BOARD_SIZE]; 2];
 pub type ShapeCache = [[[[i32; 4]; BOARD_SIZE]; BOARD_SIZE]; 2];
 pub type EmptyBucketCounts = [[u16; DSHAPE_SIZE]; 2];
 pub type NonZeroBucketMask = [[u64; 3]; 2];
-pub type OccupiedMoves = [Move; BOARD_AREA];
 pub type DgnBlockedCounts = [[u8; BOARD_SIZE]; BOARD_SIZE];
 /// Membership flags for empty points that are black "apparent double-threes"
 /// (`exact_fives == 0 && open_threes >= 2`). Maintained incrementally so the
@@ -35,12 +34,10 @@ pub(crate) fn dgn_contribution(cc: u8) -> i32 {
 pub struct EvalSnapshot {
     pub initialized: bool,
     pub rule_set: RuleSet,
-    pub board_shadow: BoardShadow,
     pub empty_bucket_counts: EmptyBucketCounts,
     pub nonzero_bucket_mask: NonZeroBucketMask,
-    pub occupied_moves: OccupiedMoves,
-    pub occupied_len: usize,
     pub dgn_sum: [i32; 2],
+    pub shadow_log_len: usize,
     pub dgn_cc_log_len: usize,
     pub shape_log_len: usize,
     pub value_log_len: usize,
@@ -58,13 +55,12 @@ pub struct EvalCaches {
     pub attack_cache: ValueCache,
     pub empty_bucket_counts: EmptyBucketCounts,
     pub(crate) nonzero_bucket_mask: NonZeroBucketMask,
-    pub occupied_moves: OccupiedMoves,
-    pub occupied_len: usize,
     pub(crate) dgn_cc: DgnBlockedCounts,
     pub(crate) dgn_sum: [i32; 2],
-    pub(crate) dgn_cc_log: Vec<(usize, usize, u8)>,
-    pub(crate) shape_log: Vec<(usize, usize, usize, usize, i32)>,
-    pub(crate) value_log: Vec<(usize, usize, usize, i32, i32)>,
+    pub(crate) shadow_log: Vec<(u8, u8, i8)>,
+    pub(crate) dgn_cc_log: Vec<(u8, u8, u8)>,
+    pub(crate) shape_log: Vec<(u8, u8, u8, u8, i32)>,
+    pub(crate) value_log: Vec<(u8, u8, u8, i16, i8)>,
     pub(crate) active_snapshot_count: usize,
     // Incremental black apparent-double-three set. `dt3_present` is the
     // authoritative per-point membership; `dt3_members` is an append-only list
@@ -74,7 +70,7 @@ pub struct EvalCaches {
     // with zero cost when no transitions occur (e.g. Freestyle never touches it).
     pub(crate) dt3_present: Dt3Present,
     pub(crate) dt3_members: Vec<Move>,
-    pub(crate) dt3_present_log: Vec<(usize, usize, bool)>,
+    pub(crate) dt3_present_log: Vec<(u8, u8, bool)>,
 }
 
 impl Default for EvalCaches {
@@ -94,10 +90,9 @@ impl EvalCaches {
             attack_cache: new_value_cache(),
             empty_bucket_counts: new_empty_bucket_counts(),
             nonzero_bucket_mask: [[0; 3]; 2],
-            occupied_moves: new_occupied_moves(),
-            occupied_len: 0,
             dgn_cc: [[0; BOARD_SIZE]; BOARD_SIZE],
             dgn_sum: [0; 2],
+            shadow_log: Vec::with_capacity(32),
             dgn_cc_log: Vec::with_capacity(64),
             shape_log: Vec::with_capacity(512),
             value_log: Vec::with_capacity(256),
@@ -106,6 +101,49 @@ impl EvalCaches {
             dt3_members: Vec::with_capacity(64),
             dt3_present_log: Vec::with_capacity(64),
         }
+    }
+
+    #[inline(always)]
+    pub fn set_board_shadow(&mut self, x: usize, y: usize, new_cell: i8) {
+        let old_cell = self.board_shadow[x][y];
+        if old_cell == new_cell {
+            return;
+        }
+        if self.active_snapshot_count > 0 {
+            self.shadow_log.push((x as u8, y as u8, old_cell));
+        }
+        self.board_shadow[x][y] = new_cell;
+    }
+
+    #[inline(always)]
+    pub(crate) fn push_shape_log(
+        &mut self,
+        player: usize,
+        x: usize,
+        y: usize,
+        direction: usize,
+        old_value: i32,
+    ) {
+        self.shape_log
+            .push((player as u8, x as u8, y as u8, direction as u8, old_value));
+    }
+
+    #[inline(always)]
+    pub(crate) fn push_value_log(
+        &mut self,
+        player: usize,
+        x: usize,
+        y: usize,
+        old_bucket: i32,
+        old_attack: i32,
+    ) {
+        self.value_log.push((
+            player as u8,
+            x as u8,
+            y as u8,
+            old_bucket as i16,
+            old_attack as i8,
+        ));
     }
 
     #[inline(always)]
@@ -136,7 +174,7 @@ impl EvalCaches {
             return;
         }
         if self.active_snapshot_count > 0 {
-            self.dgn_cc_log.push((x, y, old_cc));
+            self.dgn_cc_log.push((x as u8, y as u8, old_cc));
         }
         self.dgn_cc[x][y] = new_cc;
     }
@@ -146,7 +184,7 @@ impl EvalCaches {
         let old_cc = self.dgn_cc[x][y];
         let new_cc = (old_cc as i16 + i16::from(delta)) as u8;
         if self.active_snapshot_count > 0 {
-            self.dgn_cc_log.push((x, y, old_cc));
+            self.dgn_cc_log.push((x as u8, y as u8, old_cc));
         }
         self.dgn_cc[x][y] = new_cc;
         self.dgn_sum[player] += dgn_contribution(new_cc) - dgn_contribution(old_cc);
@@ -155,14 +193,14 @@ impl EvalCaches {
     /// Set the apparent-double-three membership of an empty point. Members are
     /// appended to `dt3_members` on a false->true transition; losing membership
     /// only clears `dt3_present` and leaves a stale list entry (filtered on
-    /// iteration). No journaling is needed: snapshot captures `dt3_present` by
-    /// value and `dt3_members` by length.
+    /// iteration).
     pub(crate) fn set_dt3_present(&mut self, x: usize, y: usize, value: bool) {
         if self.dt3_present[x][y] == value {
             return;
         }
         if self.active_snapshot_count > 0 {
-            self.dt3_present_log.push((x, y, self.dt3_present[x][y]));
+            self.dt3_present_log
+                .push((x as u8, y as u8, self.dt3_present[x][y]));
         }
         self.dt3_present[x][y] = value;
         if value {
@@ -183,7 +221,7 @@ impl EvalCaches {
             return;
         }
         if self.active_snapshot_count > 0 {
-            self.shape_log.push((player, x, y, direction, old_value));
+            self.push_shape_log(player, x, y, direction, old_value);
         }
         self.shape_cache[player][x][y][direction] = value;
     }
@@ -193,12 +231,10 @@ impl EvalCaches {
         EvalSnapshot {
             initialized: self.initialized,
             rule_set: self.rule_set,
-            board_shadow: self.board_shadow,
             empty_bucket_counts: self.empty_bucket_counts,
             nonzero_bucket_mask: self.nonzero_bucket_mask,
-            occupied_moves: self.occupied_moves,
-            occupied_len: self.occupied_len,
             dgn_sum: self.dgn_sum,
+            shadow_log_len: self.shadow_log.len(),
             dgn_cc_log_len: self.dgn_cc_log.len(),
             shape_log_len: self.shape_log.len(),
             value_log_len: self.value_log.len(),
@@ -210,34 +246,36 @@ impl EvalCaches {
     pub fn restore_snapshot(&mut self, snapshot: &EvalSnapshot) {
         self.initialized = snapshot.initialized;
         self.rule_set = snapshot.rule_set;
-        self.board_shadow = snapshot.board_shadow;
         self.empty_bucket_counts = snapshot.empty_bucket_counts;
         self.nonzero_bucket_mask = snapshot.nonzero_bucket_mask;
-        self.occupied_moves = snapshot.occupied_moves;
-        self.occupied_len = snapshot.occupied_len;
         self.dgn_sum = snapshot.dgn_sum;
 
+        while self.shadow_log.len() > snapshot.shadow_log_len {
+            let (x, y, old_cell) = self.shadow_log.pop().expect("shadow log length tracked");
+            self.board_shadow[x as usize][y as usize] = old_cell;
+        }
         while self.dgn_cc_log.len() > snapshot.dgn_cc_log_len {
             let (x, y, old_cc) = self.dgn_cc_log.pop().expect("dgn cc log length tracked");
-            self.dgn_cc[x][y] = old_cc;
+            self.dgn_cc[x as usize][y as usize] = old_cc;
         }
         while self.shape_log.len() > snapshot.shape_log_len {
             let (player, x, y, direction, old_value) =
                 self.shape_log.pop().expect("shape log length tracked");
-            self.shape_cache[player][x][y][direction] = old_value;
+            self.shape_cache[player as usize][x as usize][y as usize][direction as usize] =
+                old_value;
         }
         while self.value_log.len() > snapshot.value_log_len {
             let (player, x, y, old_bucket, old_attack) =
                 self.value_log.pop().expect("value log length tracked");
-            self.value_cache[player][x][y] = old_bucket;
-            self.attack_cache[player][x][y] = old_attack;
+            self.value_cache[player as usize][x as usize][y as usize] = i32::from(old_bucket);
+            self.attack_cache[player as usize][x as usize][y as usize] = i32::from(old_attack);
         }
         while self.dt3_present_log.len() > snapshot.dt3_present_log_len {
             let (x, y, old_value) = self
                 .dt3_present_log
                 .pop()
                 .expect("dt3 present log length tracked");
-            self.dt3_present[x][y] = old_value;
+            self.dt3_present[x as usize][y as usize] = old_value;
         }
         self.dt3_members.truncate(snapshot.dt3_members_len);
         if self.active_snapshot_count > 0 {
@@ -266,10 +304,9 @@ impl EvalCaches {
         self.attack_cache = other.attack_cache;
         self.empty_bucket_counts = other.empty_bucket_counts;
         self.nonzero_bucket_mask = other.nonzero_bucket_mask;
-        self.occupied_moves = other.occupied_moves;
-        self.occupied_len = other.occupied_len;
         self.dgn_cc = other.dgn_cc;
         self.dgn_sum = other.dgn_sum;
+        self.shadow_log.clear();
         self.dgn_cc_log.clear();
         self.dt3_present = other.dt3_present;
         self.dt3_members.clear();
@@ -308,10 +345,6 @@ fn new_value_cache() -> ValueCache {
 
 fn new_empty_bucket_counts() -> EmptyBucketCounts {
     [[0; DSHAPE_SIZE]; 2]
-}
-
-fn new_occupied_moves() -> OccupiedMoves {
-    [0; BOARD_AREA]
 }
 
 fn new_dt3_present() -> Dt3Present {
