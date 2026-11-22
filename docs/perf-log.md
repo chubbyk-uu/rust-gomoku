@@ -1105,3 +1105,26 @@ Decision:
   1. `M2.2a` (tested & reverted): Stage 0 `TT Move` zero-movegen fast path gated on `!has_high_threat_bucket() && covered_empty >= wide + 10` scored `48-50-2` (`49.0%`, `WW=7, LL=7`, TT nodes `34.38M` vs `34.34M`, avg `524.1ms` vs `526.3ms`) on `center_50_prefixes.jsonl` `1s/move`. Because midgame boards almost always contain at least one `L4`/`L5` cell somewhere on the 15x15 grid, `!has_high_threat_bucket()` blocked Stage 0 on ~90% of real midgame nodes (confirmed by `vct_dense_ply78` changing only `0.3%`). Reverted.
   2. `M2.3`: `df-pn` VCT solver with bounded node budget (deep narrow forcing lines 10–20 plies without wide-branch explosion — genuine tactical strength gain in both untimed `d8/w40` and timed `1s/move`).
   3. `M3.1`: stronger classical evaluation (4-direction + attack/defense cross terms + per-rule integer weights + SPSA/Texel tuning) to break the fixed-depth strength ceiling.
+
+### 2026-11-22 (4): `M2.3` `df-pn` VCT solver (`exp/m23-dfpn-vct`)
+
+Context & modification scope:
+
+- Added `src/threats/dfpn.rs` (`DfpnSearcher`): Depth-First Proof-Number (df-pn) VCT solver backed by `Pattern4State` / `ThreatBoardView` (preserving all verified Renju-safe attack/defense semantics) and a 65,536-bucket 2-way Zobrist TT (`131,072` entries, ~3 MiB, generation-salted, always-replace slot 1 when slot 0 holds a solved entry so progress is never dropped on hash collisions).
+- Initial proof-number biasing: `B4` (`pn=1, dn=2`), `Double-A3` (`pn=1, dn=4`), single-`A3` (`pn=9+ply, dn=1`) so narrow `B4` chains and lethal `Double-A3` forks are proved immediately while wide `A3` trees scale shallow-first; depth cap (`max_ply = (root_vct_depth * 3).clamp(12, 22)`, default `18` plies) stores finite `DFPN_DEPTH_CAP_PN = 50_000` (never `dn=0`) so depth truncation is never mis-cached as a mathematical disproof; `DEFAULT_DFPN_NODE_LIMIT = 120_000`.
+- Wired `DfpnSearcher` into `RootSearcher` (`src/search/root.rs`), keeping `verify_root_vct_move` and timed 30% sub-budget intact.
+
+Verification & A/B benchmarks (release build vs `master` `7a30f07`):
+
+- Unit/integration tests: `cargo fmt --check`, full `cargo test` (`root_alignment` 33/33, `dfpn` 3/3 including Renju `case17` false-positive check and `dual_a3_diamond`), and `android/rust_bridge` 6/6 all passed with zero warnings.
+- VCT case probes (`Renju`, `d6/w40`, `4T`):
+  - `cases/renju/vct_dense_ply78.json`: VCT `165.1 ms -> 57.6 ms` (**`2.87x` faster** while searching up to 18 ply).
+  - `cases/renju/vct_counter_win_scan_ply75.json`: VCT `336.8 ms -> 146.8 ms` (**`2.29x` faster**).
+  - `cases/renju/vct6_false_positive_case17_after_ply40.json`: rejected `(8,8)` false positive AND proved the real winning VCT `(9,9)` in **`7.78 ms`** (previously missed by IDDFS VCT6, requiring `44 ms` alpha-beta).
+- 100-game Renju center-opening matches (`center_50_prefixes.jsonl`, `--jobs 16 --reuse-engine-state`, vs `master_7a30f07`, `0` errors / `0` timeouts in both modes):
+  - **Timed `1s/move`**: **`52-47-1` (`52.5%`, `+17.39 Elo`, `WW=2, WD=1, WL/DD=47, LD=0, LL=0` — zero lost pairs)**; avg `520.6 ms` vs `525.0 ms`.
+  - **Untimed `d8/w40`**: **`48-48-4` (`50.0%`, `0.0 Elo`, `WW=0, WD=0, WL/DD=50, LD=0, LL=0` — zero lost pairs)**; avg `1669.6 ms` vs `1692.9 ms` (`-1.4%`), median `799.9 ms` vs `817.2 ms` (`-2.1%`), p95 `6351.1 ms` vs `6522.9 ms` (`-2.6%`).
+
+Decision:
+
+- `M2.3` (`df-pn` VCT) strictly dominates IDDFS VCT6 across timed strength (`+17.4 Elo`, zero lost pairs), untimed stability (`50.0%`, zero lost pairs), and VCT speed (`2.3x–2.9x` faster on dense Renju cases). Ready for merge to `master` upon user approval; next milestone is `M3.1` (stronger integer classical evaluation + SPSA/Texel tuning).

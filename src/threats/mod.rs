@@ -1,10 +1,13 @@
 //! Threat-search helpers aligned with the classic reference.
 
+pub mod dfpn;
 pub(crate) mod pattern4;
 pub mod threat_board;
 pub mod types;
 pub mod vcf;
 pub mod vct;
+
+pub use dfpn::{DfpnResult, DfpnSearcher, DfpnStats};
 
 pub use threat_board::{
     broken_four_reply, forcing_threat_moves, forcing_threat_moves_for_rule, has_open_four,

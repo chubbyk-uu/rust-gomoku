@@ -21,7 +21,7 @@ use crate::search::{
     AlphaBetaSearcher, RootCandidateProfile, SearchOptions, SearchStats, TranspositionTable,
 };
 use crate::threats::{
-    has_vct_trigger_for_rule, ThreatBoardView, VCFSearcher, VCTSearcher, VCTStats,
+    has_vct_trigger_for_rule, DfpnSearcher, ThreatBoardView, VCFSearcher, VCTSearcher, VCTStats,
 };
 use crate::types::{Move, Side};
 
@@ -333,6 +333,7 @@ pub struct RootSearcher {
     pub alphabeta: AlphaBetaSearcher,
     pub vcf: VCFSearcher,
     pub vct: VCTSearcher,
+    pub dfpn: DfpnSearcher,
     pub fallback_rng: ClassicFallbackRng,
     pub last_trace: Option<RootTrace>,
     worker_pool: Option<SearchWorkerPool>,
@@ -346,6 +347,7 @@ impl Clone for RootSearcher {
             alphabeta: self.alphabeta.clone(),
             vcf: self.vcf.clone(),
             vct: self.vct.clone(),
+            dfpn: self.dfpn.clone(),
             fallback_rng: self.fallback_rng.clone(),
             last_trace: self.last_trace.clone(),
             worker_pool: None,
@@ -421,6 +423,7 @@ impl RootSearcher {
             alphabeta,
             vcf: VCFSearcher::default(),
             vct: VCTSearcher::default(),
+            dfpn: DfpnSearcher::default(),
             fallback_rng: new_classic_fallback_rng(),
             last_trace: None,
             worker_pool: None,
@@ -943,16 +946,16 @@ impl RootSearcher {
         });
 
         let vct_start = Instant::now();
-        self.vct.memo_diagnostics_enabled = self.config.runtime.root_profile;
-        self.vct.strict_and_memo_key = self.config.runtime.vct_strict_and_memo_key;
-        let vct_result = self.vct.search_for_rule(
-            board,
-            side,
-            self.config.runtime.root_vct_depth,
-            self.config.rule_set,
-        );
+        let dfpn_max_ply = (self.config.runtime.root_vct_depth * 3).clamp(12, 22);
+        let vct_result = self
+            .dfpn
+            .search_for_rule(board, side, dfpn_max_ply, self.config.rule_set);
         trace.vct_ms = Some(elapsed_ms(vct_start));
-        trace.vct_stats = Some(self.vct.stats.clone());
+        let mut vct_stats = VCTStats::default();
+        vct_stats.or_nodes = self.dfpn.stats.or_nodes;
+        vct_stats.and_nodes = self.dfpn.stats.and_nodes;
+        vct_stats.elapsed_us = (self.dfpn.stats.elapsed_ms * 1000.0) as u128;
+        trace.vct_stats = Some(vct_stats);
         trace.vct_found = vct_result.found;
         trace.vct_move = vct_result.move_;
         if let Some(move_) = vct_result.move_.filter(|_| vct_result.found) {
@@ -1014,12 +1017,14 @@ impl RootSearcher {
         let budget = MoveBudget::new(limits);
         self.vcf.budget = budget.clone();
         self.vct.budget = budget.clone();
+        self.dfpn.budget = budget.clone();
         self.alphabeta.vcf.budget = budget.clone();
         let mut result = self.search_move(board, limits);
         if let Some(nodes) = budget.nodes() {
             result.nodes = nodes;
             self.vcf.budget = MoveBudget::default();
             self.vct.budget = MoveBudget::default();
+            self.dfpn.budget = MoveBudget::default();
             self.alphabeta.vcf.budget = MoveBudget::default();
         }
         result
@@ -1079,28 +1084,28 @@ impl RootSearcher {
                 }
 
                 let vct_start = Instant::now();
-                self.vct.memo_diagnostics_enabled = self.config.runtime.root_profile;
-                self.vct.strict_and_memo_key = self.config.runtime.vct_strict_and_memo_key;
                 // Under a timed move limit, cap root VCT to 30% of the remaining
                 // move time so a slow tactical tree cannot starve alpha-beta into
                 // a depth-0 static fallback.
                 const TIMED_VCT_BUDGET_FRACTION: f64 = 0.30;
                 let vct_sub_budget = self.vcf.budget.timed_sub_budget(TIMED_VCT_BUDGET_FRACTION);
-                let parent_vct_budget = vct_sub_budget
+                let parent_dfpn_budget = vct_sub_budget
                     .as_ref()
-                    .map(|sub| std::mem::replace(&mut self.vct.budget, sub.clone()));
-                let vct_result = self.vct.search_for_rule(
-                    board,
-                    side,
-                    self.config.runtime.root_vct_depth,
-                    self.config.rule_set,
-                );
-                if let (Some(sub), Some(parent)) = (vct_sub_budget, parent_vct_budget) {
-                    self.vct.budget = parent;
+                    .map(|sub| std::mem::replace(&mut self.dfpn.budget, sub.clone()));
+                let dfpn_max_ply = (self.config.runtime.root_vct_depth * 3).clamp(12, 22);
+                let vct_result =
+                    self.dfpn
+                        .search_for_rule(board, side, dfpn_max_ply, self.config.rule_set);
+                if let (Some(sub), Some(parent)) = (vct_sub_budget, parent_dfpn_budget) {
+                    self.dfpn.budget = parent;
                     self.vcf.budget.add_nodes(sub.nodes().unwrap_or(0));
                 }
                 trace.vct_ms = Some(elapsed_ms(vct_start));
-                trace.vct_stats = Some(self.vct.stats.clone());
+                let mut vct_stats = VCTStats::default();
+                vct_stats.or_nodes = self.dfpn.stats.or_nodes;
+                vct_stats.and_nodes = self.dfpn.stats.and_nodes;
+                vct_stats.elapsed_us = (self.dfpn.stats.elapsed_ms * 1000.0) as u128;
+                trace.vct_stats = Some(vct_stats);
                 trace.vct_found = vct_result.found;
                 trace.vct_move = vct_result.move_;
                 if let Some(move_) = vct_result.move_.filter(|_| vct_result.found) {

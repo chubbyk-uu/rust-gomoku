@@ -273,13 +273,11 @@ flowchart TD
   - [x] `M0.3` `Arc<EngineConfig>` 与持久化 `WorkerLocal` 复用 `EvalCaches` / `AlphaBetaSearcher`，消除多线程每层克隆
 - [x] **`M1.1` — 底层位板统一 (`base`，已合入 `master` `7a30f07`)**
   - [x] 88 线常驻 `PackedLine` 位板 + 跳过非空邻域格 `SHAPE_TABLE` 查表 + 清理 `ThreatBoardView` 遗留 `x1..x4` 堆数组
-- [ ] **阶段 1（当前推进）：`M2.2a` Stage 0 `TT Move` 零 movegen 快速通道（纯 NPS 提速，不损固定 `d8` 棋力，限时稳赢）**
-  - [ ] 非根、无迫着坍缩节点先直接搜 `tt_best_move`，beta 截断则跳过全盘 movegen 与排序
-  - [ ] 后续叠加栈上分阶段 `MovePicker` + Killer / Countermove / History
-- [ ] **阶段 2（紧接 `M2.2a` 之后）：`M2.3` `df-pn` VCT 求解器（含定长 Zobrist VCT TT 与受控节点预算）**
-  - [ ] 替代朴素 IDDFS VCT，在窄长强制链上看清 12–20 步杀棋，同时不爆宽分支节点、保持 Renju 零误判
-  - [ ] 配合无副作用的 `M1.2`（定长 Zobrist VCF TT + 复用 `ThreatBoardView` 对手过滤，不盲目抬高默认 `opponent_vcf_depth`）与 `M1.3`（仅局时赛软早停）
-- [ ] **阶段 3：`M3.1` 增强经典评估 + 自对弈调参（打破固定 `d8` 与限时双模式棋力天花板）**
+- [x] **阶段 1（已评估并回退）：`M2.2a` Stage 0 `TT Move` 零 movegen 快速通道**
+  - [x] 已在 `center_50_prefixes` 100 局 `1s/move` 实测（`48-50-2`, `49.0%`）；因中盘几乎总存在至少一个 `L4`/`L5` 格导致 `!has_high_threat_bucket()` 拦截 ~90% 节点，无净收益已回退；待 `M2.4` + 栈上分阶段 `MovePicker` 阶段再重做
+- [x] **阶段 2（已完成，待合入 `master`）：`M2.3` `df-pn` VCT 求解器（`exp/m23-dfpn-vct`）**
+  - [x] 实现 2-way 3 MiB Zobrist TT + 深度加权 proof-number 的 `df-pn` 求解器，替代根部 IDDFS VCT6；`vct_dense_ply78` 提速 `2.87x`（`165ms -> 57.6ms`），`case17` `7.78ms` 证出真胜手且零误判；100 局中心开局 Renju **限时 `1s/move` 赢 `52-47-1` (`52.5%`, `+17.4 Elo`, `LD=0, LL=0`)**、**不限时 `d8/w40` `48-48-4` (`50.0%`, `LD=0, LL=0`, avg `-1.4%`, p95 `-2.6%`)**
+- [ ] **阶段 3（下一步）：`M3.1` 增强经典评估 + 自对弈调参（打破固定 `d8` 与限时双模式棋力天花板）**
   - [ ] 评估全面 `i32` 整数化 + 全 4 方向组合 + 同点攻防急所交叉项 + Freestyle / Renju 分规则独立权重 + Texel/SPSA 自动调参
 - [ ] **阶段 4：`M2.4` + `M2.1` + `M2.5` 现代搜索协同升级（在高质量评估 + `qsearch` 就绪后统一重测）**
   - [ ] 轻量 `qsearch` + 匹配宽树的无状态 LMR / LMP + 64B 4-way TT + 多线程异步错峰并行

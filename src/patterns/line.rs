@@ -334,7 +334,7 @@ impl PackedLine {
         }
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, test))]
     #[inline(always)]
     pub(crate) fn through(
         grid: &[[i8; BOARD_SIZE]; BOARD_SIZE],

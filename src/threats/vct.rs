@@ -428,9 +428,8 @@ impl VCTSearcher {
     /// block) completes first. Attacker moves never create defender fours, so
     /// this also covers the "defender had no four" case. When a counter-five
     /// survives, the attack must go through the AND node instead.
-    fn a4_attack_wins_immediately(
-        &mut self,
-        view: &mut ThreatBoardView,
+    pub(crate) fn a4_attack_wins_immediately_on_view(
+        view: &ThreatBoardView,
         attacker: Side,
         attack: &AttackMove,
     ) -> bool {
@@ -447,6 +446,15 @@ impl VCTSearcher {
             return defender_wins.contains(aidx);
         }
         false
+    }
+
+    fn a4_attack_wins_immediately(
+        &mut self,
+        view: &mut ThreatBoardView,
+        attacker: Side,
+        attack: &AttackMove,
+    ) -> bool {
+        Self::a4_attack_wins_immediately_on_view(view, attacker, attack)
     }
 
     fn observe_and_memo_context(
@@ -544,7 +552,8 @@ impl VCTSearcher {
         solved &= forced_stage.solved;
 
         if attack.level < ThreatLevel::B4 {
-            let counter_forcing = self.collect_counter_forcing_defenses(view, attacker, &seen);
+            let counter_forcing =
+                Self::collect_counter_forcing_defenses_on_view(view, attacker, &seen);
             let counter_stage = self.search_defense_stage(
                 view,
                 attacker,
@@ -642,8 +651,17 @@ impl VCTSearcher {
         }
     }
 
+    #[allow(dead_code)]
     fn collect_counter_forcing_defenses(
         &mut self,
+        view: &mut ThreatBoardView,
+        attacker: Side,
+        seen: &MoveSet225,
+    ) -> Vec<Move> {
+        Self::collect_counter_forcing_defenses_on_view(view, attacker, seen)
+    }
+
+    pub(crate) fn collect_counter_forcing_defenses_on_view(
         view: &mut ThreatBoardView,
         attacker: Side,
         seen: &MoveSet225,
@@ -725,14 +743,14 @@ impl VCTSearcher {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct MoveSet225 {
+pub(crate) struct MoveSet225 {
     bits: crate::threats::pattern4::BitBoard225,
     len: usize,
 }
 
 impl MoveSet225 {
     #[inline]
-    fn insert(&mut self, m: Move) -> bool {
+    pub(crate) fn insert(&mut self, m: Move) -> bool {
         let idx = m as usize;
         if self.bits.contains(idx) {
             return false;
@@ -743,17 +761,17 @@ impl MoveSet225 {
     }
 
     #[inline]
-    fn contains(&self, m: Move) -> bool {
+    pub(crate) fn contains(&self, m: Move) -> bool {
         self.bits.contains(m as usize)
     }
 
     #[inline]
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.len
     }
 }
 
-fn attack_signature(attack: &AttackMove) -> u64 {
+pub(crate) fn attack_signature(attack: &AttackMove) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     mix_signature(&mut hash, u64::from(attack.move_));
     mix_signature(&mut hash, u64::from(attack.level as u8));
