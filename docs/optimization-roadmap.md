@@ -259,25 +259,28 @@ flowchart TD
 4. **破坏懒排序的 Eager History 排序**：旧 `fast_history_ordering` 因每节点全量 `getmi` + 全排序变慢 `+29.5%`；新 History 必须依附分阶段 `MovePicker`。
 5. **非重点微优化**：`recompute_all` 复用、VCF memo key 微调（非热点）、`ThreatBoardView` 在 `play()` 上做全量额外 bitset 维护、旧式 root YBWC / root full-window split / 无保护 Aspiration Window。
 6. **在 `1T` 与 `MT` 共享 TT 或 `subply` 量化上破坏 soundness**：严守 `store = floor`、`probe = ceil`、超上限深搜退化为仅 move-hint、1T/MT 模式隔离等全部回归测试。
+7. **纯单步限时禁用软早停与过大 overhead 扣减**（2026-11-22 实测教训）：在无局时结余的纯 `timeout_turn` 模式下，提前早停省下的时间无法结转，反而损失 TT 预热（`1s/move` 掉至 `44.0%`）；软早停仅限局时赛（`timeout_match` / 紧张 `time_left`）。
+8. **严禁在 `running_downf` 跨层余数未消除前单独对 1T 开高命中率 `subply_tt` 期待固定 `d8` 涨分**（2026-11-22 实测教训）：`M2.1 v2` 在限时 `1s/move` 下大赢（`54.5%`, `+31.4 Elo`, 中位快 `4.46x`），但在固定 `d8/w40` 下因跨路径 `downf` 污染 TT 仅得 `44.5%`；且同 key TT 更新绝不允许 `depth = 0` 叶节点或浅条目覆写更深条目。
+9. **宽树 (`wide = 40`) 下 LMR 强度不得弱于原 `running_downf`，且 VCT 叶节点不得嵌套递归 VCF、不得用单活三弱触发吃掉限时预算**（2026-11-22 实测教训）：过温和对数 LMR 令节点暴涨 `5.1x`（`39.5%`）；VCT 叶节点嵌 6 步 VCF 令密盘 VCT6 从 `166ms` 暴涨至 `>120s`；单活三弱触发令 `1s/move` 掉至 `46.5%`。
 
 ---
 
-## 6. 执行追踪清单
+## 6. 执行追踪清单（按限时不限时双赢优先级排序）
 
-- [x] **P0 — 零风险速赢 (`base`)**
+- [x] **P0 — 零风险速赢 (`base`，已合入 `master` `7a30f07`)**
   - [x] `M0.1` 瘦身 `EvalSnapshot`（去除 release 死字段 `occupied_moves`，`board_shadow` 改增量日志，紧凑化 undo log）
-  - [x] `M0.2` 消除 TT 热路径 `Acquire` load（`TTTableView`）+ 增加 x86_64 TT `prefetch`（`probe()` 语义修正留入 `M2.1` 以守住 13/13 严格等价）
+  - [x] `M0.2` 消除 TT 热路径 `Acquire` load（`TTTableView`）+ 增加 x86_64 TT `prefetch`
   - [x] `M0.3` `Arc<EngineConfig>` 与持久化 `WorkerLocal` 复用 `EvalCaches` / `AlphaBetaSearcher`，消除多线程每层克隆
-- [ ] **P1 — 底层统一、战术与时间管理**
-  - [x] `M1.1` 88 线常驻 `PackedLine` 位板 + 跳过非空邻域格 `SHAPE_TABLE` 查表 + 清理 `ThreatBoardView` 遗留 `x1..x4` 堆数组（`base` 等价）
-  - [ ] `M1.2` 解锁 VCF `VCFM=5` 截断 + 定长 Zobrist TT + 证明集对手 VCF 过滤（实验分支）
-  - [ ] `M1.3` 自适应时间管理 `timectl`（局时切分、软/硬时限、稳定性早停、动态 VCT 配额）（实验分支）
-- [ ] **P2 — 搜索与并行现代化（实验分支）**
-  - [ ] `M2.1` 64B 对齐 4-way TT + `generation` 替换 + 停写叶节点 + 1T `subply` / 整数深度 + 确定性 Zobrist
-  - [ ] `M2.2` 栈上分阶段 `MovePicker`（TT 零 movegen）+ Killer / Countermove / History + 修复多活三/`single_forcing`
-  - [ ] `M2.3` `df-pn` VCT + B4 免费延伸 + 叶接 VCF + 单活三触发修复
-  - [ ] `M2.4` 轻量 `qsearch` + 对数 LMR / LMP / IIR / 有上限延伸（逐项消融验证）
-  - [ ] `M2.5` 多线程异步错峰并行 + 无整表拷贝 `overlap_vct_alphabeta` / 并行 `df-pn`
-- [ ] **P3 — 评估代际升级（实验分支）**
-  - [ ] `M3.1` 4 方向 + 攻防交叉 + 分规则 `i32` 经典评估 + Texel/SPSA 调参
-  - [ ] `M3.2` Rapfi 风格增量 NNUE（Mix6/Mix7 + AVX2/NEON SIMD）+ Policy 排序
+- [x] **`M1.1` — 底层位板统一 (`base`，已合入 `master` `7a30f07`)**
+  - [x] 88 线常驻 `PackedLine` 位板 + 跳过非空邻域格 `SHAPE_TABLE` 查表 + 清理 `ThreatBoardView` 遗留 `x1..x4` 堆数组
+- [ ] **阶段 1（当前推进）：`M2.2a` Stage 0 `TT Move` 零 movegen 快速通道（纯 NPS 提速，不损固定 `d8` 棋力，限时稳赢）**
+  - [ ] 非根、无迫着坍缩节点先直接搜 `tt_best_move`，beta 截断则跳过全盘 movegen 与排序
+  - [ ] 后续叠加栈上分阶段 `MovePicker` + Killer / Countermove / History
+- [ ] **阶段 2（紧接 `M2.2a` 之后）：`M2.3` `df-pn` VCT 求解器（含定长 Zobrist VCT TT 与受控节点预算）**
+  - [ ] 替代朴素 IDDFS VCT，在窄长强制链上看清 12–20 步杀棋，同时不爆宽分支节点、保持 Renju 零误判
+  - [ ] 配合无副作用的 `M1.2`（定长 Zobrist VCF TT + 复用 `ThreatBoardView` 对手过滤，不盲目抬高默认 `opponent_vcf_depth`）与 `M1.3`（仅局时赛软早停）
+- [ ] **阶段 3：`M3.1` 增强经典评估 + 自对弈调参（打破固定 `d8` 与限时双模式棋力天花板）**
+  - [ ] 评估全面 `i32` 整数化 + 全 4 方向组合 + 同点攻防急所交叉项 + Freestyle / Renju 分规则独立权重 + Texel/SPSA 自动调参
+- [ ] **阶段 4：`M2.4` + `M2.1` + `M2.5` 现代搜索协同升级（在高质量评估 + `qsearch` 就绪后统一重测）**
+  - [ ] 轻量 `qsearch` + 匹配宽树的无状态 LMR / LMP + 64B 4-way TT + 多线程异步错峰并行
+- [ ] **阶段 5（终极目标）：`M3.2` Rapfi 风格增量 NNUE（Mix6/Mix7 + AVX2/NEON SIMD）+ Policy 排序**

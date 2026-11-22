@@ -1073,3 +1073,35 @@ Verification & A/B timing (release build, clean CPU, cumulative vs `master` `7fa
 - `renju_search_bench` (`d8/w40`, 6 positions):
   - Freestyle: `1252.2 ms (1654 ns/node) -> 1172.5 ms (1549 ns/node)` (**`-6.4%`**)
   - Renju: `2100.4 ms (1967 ns/node) -> 2010.2 ms (1882 ns/node)` (**`-4.3%`**)
+
+### 2026-11-22 (3): Reverted experimental rounds (`M1.2` deep VCF, `M1.3` per-turn soft early-stop/overhead, `M2.1` 4-way + 1T `subply_tt`, `M2.4a` mild LMR, `M2.3a` leaf-VCF/single-A3 trigger)
+
+All experiments below were evaluated against `master` (`7a30f07`) on 100-game Renju matches (`--reuse-engine-state`, 0 errors / 0 timeouts) and **reverted** because they failed the strict dual-mode `> 50%` gate (must win or hold in both untimed `d8/w40` and timed `1s/move`):
+
+1. **`M1.3` per-turn soft-limit early stop (`strength_100_prefixes.jsonl`, 100 games, `1s/move`)**:
+   - Result: `44-56-0` (`44.0%`, `-41.9 Elo`), avg `313.4ms` vs `418.3ms`.
+   - Root cause: in pure per-turn timed games (`timeout_turn` without match-clock carryover), unused turn time is forfeited and stopping early sacrifices TT warming for the next move.
+   - Rule: soft-limit early stop must ONLY be enabled when remaining time carries over across moves (match-clock mode), never in pure per-turn games.
+2. **`M1.2` raising default `opponent_vcf_depth` (`4 -> 12`) + `root_vcf_depth` (`5 -> 16`) (`center_50_prefixes.jsonl`, 100 games, untimed `d8/w40`)**:
+   - Result: `46-51-3` (`47.5%`, `-17.4 Elo`, `WW=0, WL/DD=47, LD=1, LL=2`), avg `1389ms` vs `1369ms`, max `20.8s` vs `29.2s`.
+   - Root cause: cold-TT moves on all 3 diverging cases were identical; the 3 pair flips came from extra root VCF filtering altering warm-TT state without delivering net tactical wins over existing `VCT6 + d8` (`extend_ratio=0.9`).
+3. **`M2.1` 64B 4-way TT + unified 1T `1/64`-ply `subply_tt` (`center_50_prefixes.jsonl`, 100 games vs `master` `7a30f07`)**:
+   - v1 had a same-key overwrite bug (`entry.flag == HASHF_EXACT` allowed depth-0 leaves to overwrite deep internal entries): untimed `d8/w40` scored `43-50-7` (`46.5%`, avg `1125ms` vs `1696ms`).
+   - v2 fixed same-key overwrite protection (never let shallower/leaf entries overwrite deeper ones):
+     - **Timed `1s/move`**: **`54-45-1` (`54.5%`, `+31.35 Elo`, `WW=9, WD=1, LL=5`)**, median **`96.7ms` vs `431.0ms` (`4.46x` faster)**, max `994ms` vs `1020ms`.
+     - **Untimed `d8/w40`**: `44-55-1` (`44.5%`, `-38.4 Elo`, `WW=5, WD=1, LL=11`), avg **`936ms` vs `1234ms` (`1.32x`)**, p95 **`3162ms` vs `4535ms` (`1.43x`)**, max **`20.3s` vs `32.3s` (`1.59x`)**, TT nodes `45.0M` vs `122.6M` (`2.72x` fewer).
+   - Root cause of fixed-depth dip: `running_downf` carries path-dependent remainder `0..14` across plies without encoding it in the Zobrist key. Higher 1T TT hit rates amplify cross-path `downf` cutoffs at fixed `d8`, whereas equal-time play easily profits from the `1.3x–2.4x` speedup.
+4. **`M2.4a` stateless mild logarithmic LMR replacing `running_downf` (`center_50_prefixes.jsonl`, 100 games, `1s/move`)**:
+   - Result: `39-60-1` (`39.5%`, `-74.1 Elo`), `vct_dense_ply78` d7 nodes exploded `5.1x` (`4.49M -> 22.90M`, `5.3s -> 26.9s`).
+   - Root cause: reducing `r` on `self_attack >= 3 || opp_attack >= 4 || hostile_threat` made late-move reductions far weaker than `running_downf` at `wide=40`, costing 1–2 plies in timed play.
+5. **`M2.3a` VCT leaf-VCF + single-A3 trigger + 25ms turn overhead**:
+   - Nesting a 6-ply recursive VCF at every `depth == 0` VCT OR-leaf (`>100K` leaves on dense boards) blew up `vct_dense_ply78` VCT6 from `166ms` to `>120s` (killed).
+   - Replacing it with an `O(1)` leaf `win5/a4` bitboard check kept VCT6 fast (`166ms` / `309ms`), but adding `legal_a3_count >= 2` weak trigger + 25ms per-turn overhead scored `46-53-1` (`46.5%`, `-24.4 Elo`) on `center_50_prefixes.jsonl` `1s/move` (weak VCT triggers consumed timed AB budget + 25ms overhead cut 2.5% per-turn search time).
+
+Decision:
+
+- Reverted all 5 experimental paths to keep `master` (`7a30f07`) clean.
+- Next focus for **guaranteed dual-mode (untimed `d8/w40` + timed `1s/move`) gains**:
+  1. `M2.2a`: behavior-equivalent (or strictly faster) Stage 0 `TT Move` fast-path skipping full movegen on TT beta-cutoffs.
+  2. `M2.3`: `df-pn` VCT solver with bounded node budget (deep narrow forcing lines without wide-branch explosion).
+  3. `M3.1`: stronger classical evaluation (4-direction + attack/defense cross terms + per-rule integer weights + SPSA/Texel tuning) to break the fixed-depth strength ceiling.
