@@ -218,8 +218,22 @@ fn load_nnue_for_config(config: &EngineConfig) -> Option<Mix9svqEvaluator> {
     if !config.runtime.use_nnue {
         return None;
     }
-    let dir = config.runtime.nnue_dir.as_deref()?;
-    load_mix9svq_evaluator_for_rule(std::path::Path::new(dir), config.rule_set).ok()
+    let Some(dir) = config.runtime.nnue_dir.as_deref() else {
+        eprintln!(
+            "warning: use_nnue is enabled without nnue_dir; falling back to classical evaluation"
+        );
+        return None;
+    };
+    match load_mix9svq_evaluator_for_rule(std::path::Path::new(dir), config.rule_set) {
+        Ok(evaluator) => Some(evaluator),
+        Err(err) => {
+            eprintln!(
+                "warning: failed to load Mix9svq NNUE from {:?} for {:?}: {err}; falling back to classical evaluation",
+                dir, config.rule_set
+            );
+            None
+        }
+    }
 }
 
 impl AlphaBetaSearcher {
@@ -265,12 +279,11 @@ impl AlphaBetaSearcher {
         self.tt_generation = generation;
     }
 
-    pub(crate) fn sync_worker_state(
-        &mut self,
-        config: &EngineConfig,
-        tt: &TranspositionTable,
-        tt_generation: u16,
-    ) {
+    pub fn has_nnue(&self) -> bool {
+        self.nnue.is_some()
+    }
+
+    pub(crate) fn sync_config(&mut self, config: &EngineConfig) {
         let nnue_changed = self.config.runtime.use_nnue != config.runtime.use_nnue
             || self.config.runtime.nnue_dir != config.runtime.nnue_dir
             || self.config.rule_set != config.rule_set;
@@ -280,6 +293,15 @@ impl AlphaBetaSearcher {
         if nnue_changed {
             self.nnue = load_nnue_for_config(&self.config);
         }
+    }
+
+    pub(crate) fn sync_worker_state(
+        &mut self,
+        config: &EngineConfig,
+        tt: &TranspositionTable,
+        tt_generation: u16,
+    ) {
+        self.sync_config(config);
         if !self.tt.is_shared_with(tt) || self.tt.is_subply() != tt.is_subply() {
             self.tt = tt.clone();
         }
@@ -538,6 +560,7 @@ impl AlphaBetaSearcher {
         let single_forcing = generated.single_forcing;
         let lazy_tie_ordering = !options.root && !self.config.runtime.nonroot_vcf;
         let mut rest_primary_sorted = true;
+        let mut policy_rest_sorted = true;
         let use_nnue_policy = self.nnue.is_some()
             && !win_priority
             && !single_forcing
@@ -545,25 +568,33 @@ impl AlphaBetaSearcher {
             && (options.root || depth >= 2.0);
         let mut ordered = if use_nnue_policy {
             let mut candidates = generated.candidates;
-            let n = candidates.len();
-            let mut move_buf = [0_u16; BOARD_AREA];
-            let mut score_buf = [0.0_f32; BOARD_AREA];
-            for (i, c) in candidates.iter().enumerate() {
-                move_buf[i] = c.move_;
+            if let Some(pos) = tt_best_move.and_then(|tt_mv| {
+                candidates
+                    .iter()
+                    .position(|candidate| candidate.move_ == tt_mv)
+            }) {
+                // Keep exact relative scan order for `candidates[1..]` while
+                // deferring NNUE Policy evaluation until `index == 1` (only
+                // when `tt_best_move` fails to cause an immediate cutoff).
+                candidates[..=pos].rotate_right(1);
+                policy_rest_sorted = false;
+                candidates
+            } else {
+                let n = candidates.len();
+                let mut move_buf = [0_u16; BOARD_AREA];
+                let mut score_buf = [0.0_f32; BOARD_AREA];
+                for (i, c) in candidates.iter().enumerate() {
+                    move_buf[i] = c.move_;
+                }
+                if let Some(nnue) = self.nnue.as_mut() {
+                    nnue.evaluate_policy_moves(side, &move_buf[..n], &mut score_buf[..n]);
+                }
+                for (i, c) in candidates.iter_mut().enumerate() {
+                    c.order_score = f64::from(score_buf[i]);
+                }
+                candidates.sort_by(|a, b| b.order_score.total_cmp(&a.order_score));
+                candidates
             }
-            if let Some(nnue) = self.nnue.as_mut() {
-                nnue.evaluate_policy_moves(side, &move_buf[..n], &mut score_buf[..n]);
-            }
-            for (i, c) in candidates.iter_mut().enumerate() {
-                c.order_score = f64::from(score_buf[i]);
-            }
-            candidates.sort_by(|a, b| {
-                let a_tt = Some(a.move_) == tt_best_move;
-                let b_tt = Some(b.move_) == tt_best_move;
-                b_tt.cmp(&a_tt)
-                    .then_with(|| b.order_score.total_cmp(&a.order_score))
-            });
-            candidates
         } else if options.root {
             order_candidates_root_classic(board, &generated.candidates, side)
         } else if lazy_tie_ordering {
@@ -645,7 +676,7 @@ impl AlphaBetaSearcher {
             stats.stop = true;
             return (0, None);
         }
-        if !lazy_tie_ordering && !win_priority && !single_forcing {
+        if !lazy_tie_ordering && !use_nnue_policy && !win_priority && !single_forcing {
             ordered.truncate(wide);
         }
         let search_limit = if !win_priority && !single_forcing {
@@ -722,6 +753,23 @@ impl AlphaBetaSearcher {
             for step in 0..pass_len {
                 let (index, candidate, local_downf, depthdown, mut net) = if pass == 0 {
                     let index = step;
+                    if !policy_rest_sorted && index == 1 {
+                        let rest = &mut ordered[1..];
+                        let n = rest.len();
+                        let mut move_buf = [0_u16; BOARD_AREA];
+                        let mut score_buf = [0.0_f32; BOARD_AREA];
+                        for (i, c) in rest.iter().enumerate() {
+                            move_buf[i] = c.move_;
+                        }
+                        if let Some(nnue) = self.nnue.as_mut() {
+                            nnue.evaluate_policy_moves(side, &move_buf[..n], &mut score_buf[..n]);
+                        }
+                        for (i, c) in rest.iter_mut().enumerate() {
+                            c.order_score = f64::from(score_buf[i]);
+                        }
+                        rest.sort_by(|a, b| b.order_score.total_cmp(&a.order_score));
+                        policy_rest_sorted = true;
+                    }
                     if !rest_primary_sorted && index == 1 {
                         order_candidates_primary_slice(&mut ordered[1..]);
                         rest_primary_sorted = true;

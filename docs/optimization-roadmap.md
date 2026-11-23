@@ -277,14 +277,73 @@ flowchart TD
   - [x] 已在 `center_50_prefixes` 100 局 `1s/move` 实测（`48-50-2`, `49.0%`）；因中盘几乎总存在至少一个 `L4`/`L5` 格导致 `!has_high_threat_bucket()` 拦截 ~90% 节点，无净收益已回退；待 `M2.4` + 栈上分阶段 `MovePicker` 阶段再重做
 - [x] **阶段 2（已合入 `master` 并完成审阅加固）：`M2.3` `df-pn` VCT 求解器**
   - [x] 实现 2-way 3 MiB Zobrist TT + 深度加权 proof-number + 本地子节点 `(pn, dn)` 缓存的 `df-pn` 求解器，支持 `vct_use_dfpn` 回退开关；`vct_dense_ply78` 提速 `3.31x`（`165.1ms -> 49.8ms`），`vct_counter_win_scan_ply75` 提速 `2.63x`（`336.8ms -> 128.3ms`），`case17` `7.69ms` 证出真胜手且零误判；`run_diff.py` 13/13 全通过；300 局中心开局验证 **Renju 限时 `1s/move` `52-47-1` (`52.5%`, `+17.4 Elo`)**、**Freestyle 限时 `1s/move` `50-48-2` (`51.0%`, `+7.0 Elo`, med `3.16x` 提速)**、**Renju 不限时 `d8/w40` `48-48-4` (`50.0%`, `LD=0, LL=0`, avg `-1.6%`, p95 `-3.6%`)**，全 300 局 0 错误 / 0 超时
-- [x] **阶段 3（已完成，待合入 `master`）：`M3.2` `Mix9svq` 增量 NNUE（Value + Policy + AVX2 SIMD，`exp/m32-nnue-mix9svq`）**
-  - [x] 详细设计与可行性预审见 [docs/nnue-mix9svq-plan.md](nnue-mix9svq-plan.md)
+- [x] **阶段 3（已完成主体开发与 300 局验收，暂缓合入 `master`）：`M3.2` `Mix9svq` 增量 NNUE（Value + Policy + AVX2 SIMD，`exp/m32-nnue-mix9svq`）**
+  - [x] 详细设计与当前缺陷审计见 [docs/nnue-mix9svq-plan.md](nnue-mix9svq-plan.md)
   - [x] 阶段 3.1：纯 Rust LZ4 Frame 解压 + `Mix9svq` 版本栈累加器 + 8 路展开 AVX2 SIMD（`eval_only = 2.83 µs`）+ Rapfi C++ 比特级对齐单测（Freestyle `994` / Renju `80, 225` 完全一致）
-  - [x] 阶段 3.2 + 3.3a：接入 `Mix9svq` Value + Policy 排序（保留 `VCF / df-pn VCT / ±WIN` 必杀层 + 默认关闭古典回退开关，`run_diff.py` 13/13 全绿）；300 局 `center_50` 验收 **全 300 局零负对（`LD=0, LL=0`）**：
-    - Renju 限时 `1s/move`：**`79-21-0` (`79.0%`, `+230.2 Elo`, `WW=29, LL=0`)**
-    - Freestyle 限时 `1s/move`：**`71-28-1` (`71.5%`, `+159.8 Elo`, `WW=21, WD=1, LL=0`)**
-    - Renju 不限时 `d8/w40`：**`79-18-0` (`80.85%`, `+250.2 Elo`, `WW=29, LL=0`, 节点少 `1.97x`)**
-- [ ] **阶段 4（下一步）：在 `Mix9svq` 之上释放现代搜索红利 + ARM64 NEON**
-  - [ ] Policy 引导 LMR / 4-way TT / 窗口门控，将 `d8/w40` 单手耗时压到反超旧古典 `master` 并再推高限时胜率
-  - [ ] 补齐 `aarch64` NEON SIMD（供 Android 端极速运行）+ 可选 RTX 5080 `pytorch-nnue-trainer` 自训权重闭环
-- [ ] **备选保留：`M3.1` 增强经典评估（仅用于无 NNUE 权重的纯轻量 fallback 模式，当前降级为低优先级）**
+  - [x] 阶段 3.2 + 3.3a：接入 `Mix9svq` Value + Policy 排序（保留 `VCF / df-pn VCT / ±WIN` 必杀层 + 默认关闭古典回退开关，`run_diff.py` 13/13 全绿）；300 局 `center_50` 验收 **全 300 局零负对（`LD=0, LL=0`）、0 错误、0 超时**：
+    - Renju 限时 `1s/move`：**`79-21-0` (`79.0%`, `+230.2 Elo`, `WW=29, WL=21, LL=0`)**
+    - Freestyle 限时 `1s/move`：**`71-28-1` (`71.5%`, `+159.8 Elo`, `WW=21, WD=1, WL=28, LL=0`)**
+    - Renju 不限时 `d8/w40`：**`79-18-3` (`80.5%`, `+246.6 Elo`, `WW=29, WD=3, WL=18, LL=0`)**（其中 3 局 225 手满盘和棋 3 线重跑完赛，`nnue` 均耗 `4.21s` vs `master` `5.41s`，但双方单手长尾仍高达 `66–68s`）
+
+---
+
+## 7. 当前全局缺陷与优化优先级清单（2026-11-23 代码级审计 + 防返工复审）
+
+> 在将 `exp/m32-nnue-mix9svq` 合入 `master` 之前，结合 300 局验收、`case22_ply109/114` 单手剖析（`case22_ply114` 单手 9,455 万节点 / 58s）、全仓逐模块审计以及对 `opponent/rapfi/Rapfi/search/ab/search.cpp` 的对照复审，已校正依赖顺序并剔除高返工项，按紧要程度与正确依赖排定 **P0 → P3**：
+
+### 防返工关键前置结论（复审修正）
+1. **先 TT（含 `static_eval` 缓存）再 RFP/LMP/Policy-LMR**：Rapfi 实测最大两项剪枝收益为 **RFP（`~121 Elo`）** 与 **LMP（`~107 Elo`）**；但 RFP 必须在内部节点读取 `static_eval`，若 TT 未缓存 `static_eval: i16`，每节点重算 NNUE（`2.83 µs`）会把算力吃掉一半。因此必须把 **4-way 64B TT（含 `static_eval` + `tt_pv`）** 排在 **RFP/LMP/Policy-LMR** 之前一次成型。
+2. **不要过早大手术剥离 `EvalCaches`（已从 P1 降级到 P3）**：代码核查 `src/search/movegen.rs` 表明 `EvalCaches` 同时支撑 `attack_level`、Renju 95% 禁手快筛与 `depth < 2` 排序，且叶节点 `evaluate_board_main_cached` 仅耗 `~0.1 µs`（远低于 NNUE `2.83 µs`）；硬拆改动极大、收益仅 ~10%，远不如 3×–10× 剪枝与 `AVX-VNNI` 划算。
+3. **提级 `AVX-VNNI` 到 P0 收尾 / P1 前置**：已实测本机 `rustc 1.96.0` 稳定版原生支持 `#[target_feature(enable = "avxvnni")]` + `_mm256_dpbusd_epi32`（运行时检测 `true`），约 100 行代码、100% 标量比特级对齐、零搜索风险，直接给所有后续剪枝实验提速 ~25%–40%。
+4. **Policy-LMR / Policy-Pruning 必须用归一化概率（softmax / 相对最大 logit 差）**：`Mix9svq` 原始 policy logit 具平移不变性，绝不能直接拿裸 logit 与常量阈值比较。
+5. **双基线消融验收门禁**：所有 P1 搜索剪枝必须逐项消融，且**同时对照 `master`（`8563005`）和 `M3.2`（`9f6b899`）**：先跑 5 秒 `case_probe` 确认 `case22_ply109/114` 节点与耗时大幅下降 → 再跑 40 局 `1s/move` smoke（对 `M3.2` 必须 `> 50%`）→ 最后跑 100 局 `1s/move` + `d8/w40`；且古典 `use_nnue=false` 路径保持 `run_diff.py` 13/13 零回归。
+
+### P0（合入 `master` 前必修 — 正确性/接口缺陷 + 零风险白捡提速，**第一批已完成**）
+- [x] **`P0-1` 修复 `RootSearcher` 热更新 `config` 时 NNUE 不重载与静默吞错**
+  - 位置：`src/search/root.rs:646`、`src/search/alphabeta.rs:217-223`
+  - 修复：统一通过 `AlphaBetaSearcher::sync_config` 检测 `(use_nnue, nnue_dir, rule_set)` 变更并重载；对显式配置的 NNUE 加载失败输出 `eprintln!` 明确告警并补齐热切换单测。
+- [x] **`P0-2` 修复 Gomocup `INFO nnue_dir` 带空格路径截断**
+  - 位置：`src/protocol/gomocup.rs:122, 288-313`
+  - 修复：对 `nnue_dir` 从原始行提取键名后的完整剩余路径（支持去首尾单/双引号与空值清空），并补齐单测。
+- [x] **`P0-3` NNUE Policy 懒加载（推迟到 `index == 1`）+ 增量 `sync_with_board`（消除每层全盘重放）**
+  - 位置：`src/search/alphabeta.rs:561-590, 754-771`、`src/nnue/mix9svq.rs:1088-1200, 1517, 1697-1790`
+  - 修复：
+    1. `tt_best_move` 在候选列表内时用 `rotate_right(1)` 置顶并保持剩余候选原扫描序，延迟至 `index == 1` 未截断时再对 `ordered[1..]` 调 `evaluate_policy_moves()`（与旧树 100% 搜索等价）；
+    2. 为 `Mix9svqEvaluator` 维护 `synced_history` + `pending_balance` 最长公共前缀（LCP）增量同步，补齐 4 场景比特级对齐单测；
+    3. 补齐标量 `evaluate_policy_moves` 仅算候选子集与 `evaluate_policy_avx2` 末层 `policy_dot16_avx2`。
+- [x] **`P0-4` 为 `case_probe` 补齐 `--nnue-dir` / `--no-nnue` / `RUST_GOMOKU_NNUE_DIR` 支持**
+  - 位置：`src/bin/case_probe.rs`
+  - 结果：显式 `--nnue-dir` 加载失败即报错退出，并在 `trace` 输出 `nnue_active`；已实测 `case22_ply109`（`19.96M` 节点 / `47.9s` / `417 kNPS`）与 `case22_ply114`（`43.48M` 节点 / `87.0s` / `500 kNPS`）作为第二批 P1 剪枝基线。
+- [x] **`P0-5` x86_64 `AVX-VNNI` 内核加速（VEX `_mm256_dpbusd_avx_epi32` + 预计算 `signed_bias`）**
+  - 位置：`src/nnue/simd.rs`、`src/nnue/mix9svq.rs`
+  - 结果：运行时检测 `avxvnni`，拦截并避开 EVEX `_mm256_dpbusd_epi32` 的 `SIGILL` 陷阱，验证 `AVX-VNNI == AVX2 == Scalar` 100% 比特级一致；Release 微基准单叶评估从 **`2.84 µs → 1.93 µs`（提速 `1.47×` / `-32%`）**，`move+eval` 从 `2.86 µs → 1.96 µs`。
+
+### P1（最高收益性能与棋力突破 — 根治百手密盘 50–68s 长尾 & 对 `M3.2` 再涨 +100~200 Elo）
+- [ ] **`P1-1`（前置）4-way 64B 对齐 NNUE TT（含 `static_eval: i16` + `tt_pv`）+ 同 key 去重 + 世代替换 + 停写纯叶节点 + 修复 `probe()` 瑕疵**
+  - 位置：`src/search/tt.rs`、`src/search/alphabeta.rs`
+  - 设计要点：采用 `#[repr(C, align(64))]` 4×16B 桶；高 32 位 key 校验标签 + 96 位载荷（含 `value: i16`、`static_eval: i16`、`depth`、`flag`、`tt_pv`、`best_move`、`generation`）保留无锁 XOR 抗撕裂；古典 `base` 保持兼容确保 `run_diff.py` 13/13 零回归。
+- [ ] **`P1-2` 现代 NNUE 剪枝三件套（严格逐项消融，受第 5 节禁区约束）**
+  - 位置：`src/search/alphabeta.rs`
+  - 消融顺序（每项单独过 `case_probe` 5 秒检验 + 40 局 `1s/move` vs `M3.2`）：
+    1. **安全 Move Count Pruning（LMP，Rapfi `~107 Elo`）**：`!root && !single_forcing && !hostile_threat && best_value > -WIN` 时按深度限制安静着展开数，直接斩断 `d8/w40` 百手密盘 9,455 万节点爆炸；
+    2. **NNUE 浅层 RFP（Reverse Futility Pruning，Rapfi `~121 Elo`）**：利用 `P1-1` 缓存的 `static_eval`，在 `!pv && !single_forcing && !hostile_threat && depth <= 4` 且 `eval - margin(depth, improving) >= beta` 时直接截断（配合 `Mix9svq` 懒 `MoveCache`，截断同时省去 `play_move` 与 `evaluate_value`）；
+    3. **归一化 Policy-LMR（Rapfi `~59 Elo`）+ 去掉跨层 `running_downf` 余数 + `extend_ratio` 延伸上限**：用 softmax / 相对 logit 概率与对数深度表驱动 LMR（fail-high 全深重搜），彻底消除 `running_downf` 跨路径 TT 污染，并解锁 1T 统一深度 TT 命中率；
+    4. **按需增量消融**：浅层 Razoring / Fail-High Reduction / Singular Extension（仅在验证对 `M3.2` 稳定净胜时保留）。
+
+### P2（实战与战术能力短板 — 长杀深度、局时赛与多线程）
+- [ ] **`P2-1` 解锁 VCF 深度上限（移除 `VCFM = 5`）+ Zobrist VCF TT + 证明集对手 VCF 过滤**
+  - 位置：`src/threats/vcf.rs`、`src/search/root.rs:569-627`
+  - 目标：支持 14–20 ply 实战长冲四杀（带安全节点上限），对手 VCF 过滤从最多 225 次克隆盘面降至证明集子集 `play/undo`（提速 10×+）。
+- [ ] **`P2-2` 现代自适应时间管理 `timectl` + 安全复用末层未完搜索**
+  - 位置：`src/protocol/gomocup.rs:454-479`、`src/search/root.rs:691-884`
+  - 目标：修复局时赛（`timeout_match`/`time_left`）单步耗光问题；迭代加深超时时安全保留已验证改善的末层首着（减少 40%–60% 末层浪费）；纯 `timeout_turn` 严格禁用软早停。
+- [ ] **`P2-3` 多线程 ABDADA + NNUE 实测调优与去强屏障升级**
+  - 位置：`src/search/abdada.rs`、`src/search/root.rs:708-820`
+  - 目标：建立 4T/8T + NNUE 扩展率与对弈基线；消除 `DepthJob` 每层克隆与硬同步屏障；让 `overlap_vct_alphabeta` 复用线程池并移除整表 TT 拷贝。
+
+### P3（全平台产品落地、架构简化与外部标定）
+- [ ] **`P3-1` `aarch64` ARM64 NEON SIMD 内核**（`src/nnue/simd.rs`）：打通 Android 端实用化性能（替代慢 ~20× 的标量路径）。
+- [ ] **`P3-2` 桌面 GUI 与 Android JNI Bridge 接入 NNUE**（`src/bin/gomoku_gui.rs`、`src/app.rs`、`android/rust_bridge/src/lib.rs`、`ABOUT_TEXT` 清理）。
+- [ ] **`P3-3` 轻量迫着 `qsearch` + 可选剥离 NNUE 对经典 `EvalCaches` 的依赖**（仅当 P1 剪枝完成后确认 `EvalCaches`/水平线漏杀成为新第一瓶颈时再启动，避免过早大改）。
+- [ ] **`P3-4` Rapfi / SlowRenju 外部 Elo 标定 + 合成权重 CI 回归 + 可选 RTX 5080 自训权重闭环**。
+- [ ] **备选保留：`M3.1` 增强经典评估（仅用于无 NNUE 权重的纯轻量 fallback 模式，保持低优先级）**

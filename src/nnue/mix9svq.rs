@@ -9,9 +9,10 @@ use crate::board::{move_to_xy, Board};
 use crate::constants::{BLACK, BOARD_AREA, BOARD_SIZE, EMPTY};
 use crate::nnue::lz4::decompress_lz4_frame;
 use crate::nnue::simd::{
-    avg_u8, crelu_i32_to_i16_scalar, crelu_i32_to_i8_scalar, dot2_u7i8_scalar, has_avx2,
-    linear_i16_chunk2_prerelu_scalar, linear_i8_chunk4_scalar, linear_i8_row4_scalar, mulhi_i16,
-    preprocess_dynamic_weight_linear, preprocess_linear,
+    avg_u8, compute_signed_input_bias, crelu_i32_to_i16_scalar, crelu_i32_to_i8_scalar,
+    dot2_u7i8_scalar, has_avx2, has_avxvnni, linear_i16_chunk2_prerelu_scalar,
+    linear_i8_chunk4_scalar, linear_i8_row4_scalar, mulhi_i16, preprocess_dynamic_weight_linear,
+    preprocess_linear,
 };
 use crate::rules::RuleSet;
 use crate::types::Side;
@@ -20,7 +21,8 @@ use crate::types::Side;
 use crate::nnue::simd::{
     avg_pool_2x2_u8_avx2, commit_conv_cell_avx2, commit_vsum_avx2, crelu_i32_to_i16_avx2,
     crelu_i32_to_i8_avx2, dot2_u7i8_avx2, linear_i16_chunk2_prerelu_avx2, linear_i8_chunk4_avx2,
-    linear_i8_row4_avx2, policy_dot16_avx2, update_point_avx2,
+    linear_i8_chunk4_avxvnni, linear_i8_row4_avx2, linear_i8_row4_avxvnni, policy_dot16_avx2,
+    update_point_avx2,
 };
 
 pub const SHAPE_NUM: usize = 442_503;
@@ -80,6 +82,8 @@ impl StandardHeader {
 pub struct FcWeight<const OUT: usize, const IN: usize> {
     pub weight: Vec<i8>,
     pub bias: Vec<i32>,
+    /// Precomputed `bias[o] - 128 * sum_j weight[o][j]` for AVX-VNNI signed-i8 inputs.
+    pub signed_bias: Vec<i32>,
 }
 
 #[derive(Clone, Debug)]
@@ -172,7 +176,11 @@ impl<'a> ByteCursor<'a> {
     fn read_fc<const OUT: usize, const IN: usize>(&mut self) -> io::Result<FcWeight<OUT, IN>> {
         let weight = self.read_i8_vec(OUT * IN)?;
         let bias = self.read_i32_vec(OUT)?;
-        Ok(FcWeight { weight, bias })
+        Ok(FcWeight {
+            weight,
+            bias,
+            signed_bias: Vec::new(),
+        })
     }
 
     fn read_star_block<const OUT: usize, const IN: usize>(
@@ -380,6 +388,8 @@ impl Mix9svqWeight {
         >(&mut policy_pwconv_l2.weight);
 
         let preprocess_star = |b: &mut StarBlockWeight<VALUE_DIM, FEATURE_DIM>| {
+            b.down.signed_bias =
+                compute_signed_input_bias::<VALUE_DIM, VALUE_DIM>(&b.down.weight, &b.down.bias);
             preprocess_linear::<i8, { VALUE_DIM * 2 }, FEATURE_DIM, 4>(&mut b.up1.weight);
             preprocess_linear::<i8, { VALUE_DIM * 2 }, FEATURE_DIM, 4>(&mut b.up2.weight);
             preprocess_linear::<i8, VALUE_DIM, VALUE_DIM, 4>(&mut b.down.weight);
@@ -453,6 +463,7 @@ pub struct Mix9svqAccumulator {
     current_version: i32,
     group_index: [usize; BOARD_SIZE],
     use_avx2: bool,
+    use_avxvnni: bool,
 }
 
 fn border_encoding(left: usize, right: usize) -> u32 {
@@ -540,6 +551,7 @@ impl Mix9svqAccumulator {
             current_version: -1,
             group_index,
             use_avx2: has_avx2(),
+            use_avxvnni: has_avxvnni(),
         }
     }
 
@@ -870,6 +882,11 @@ impl Mix9svqAccumulator {
     /// Compute raw integer `layer3i32[0..3]` logits and `(win, loss, draw)` float logits.
     pub fn evaluate_value_logits(&self, w: &Mix9svqWeight) -> ([i32; 4], (f32, f32, f32)) {
         #[cfg(target_arch = "x86_64")]
+        if self.use_avxvnni {
+            // SAFETY: checked via runtime `is_x86_feature_detected!("avxvnni")`.
+            return unsafe { self.evaluate_value_logits_avxvnni(w) };
+        }
+        #[cfg(target_arch = "x86_64")]
         if self.use_avx2 {
             // SAFETY: checked via runtime `is_x86_feature_detected!("avx2")`.
             return unsafe { self.evaluate_value_logits_avx2(w) };
@@ -1069,6 +1086,98 @@ impl Mix9svqAccumulator {
         )
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,avxvnni")]
+    unsafe fn evaluate_value_logits_avxvnni(
+        &self,
+        w: &Mix9svqWeight,
+    ) -> ([i32; 4], (f32, f32, f32)) {
+        let value_sum = &self.value_sum_table[self.current_version as usize];
+        let b = &w.bucket;
+
+        let mut layer0 = [0_i8; FEATURE_DIM + VALUE_DIM * 4];
+        let mut global_i8 = [0_i8; FEATURE_DIM];
+        crelu_i32_to_i8_avx2::<FEATURE_DIM, 8, true>(&mut global_i8, &value_sum.global);
+        layer0[..FEATURE_DIM].copy_from_slice(&global_i8);
+
+        let mut group0 = [[[0_i8; FEATURE_DIM]; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                crelu_i32_to_i8_avx2::<FEATURE_DIM, 5, true>(
+                    &mut group0[i][j],
+                    &value_sum.group[i][j],
+                );
+            }
+        }
+
+        let mut group1 = [[[0_i8; VALUE_DIM]; 3]; 3];
+        star_block_avxvnni(&mut group1[0][0], &group0[0][0], &b.value_corner);
+        star_block_avxvnni(&mut group1[0][2], &group0[0][2], &b.value_corner);
+        star_block_avxvnni(&mut group1[2][0], &group0[2][0], &b.value_corner);
+        star_block_avxvnni(&mut group1[2][2], &group0[2][2], &b.value_corner);
+
+        star_block_avxvnni(&mut group1[0][1], &group0[0][1], &b.value_edge);
+        star_block_avxvnni(&mut group1[1][0], &group0[1][0], &b.value_edge);
+        star_block_avxvnni(&mut group1[1][2], &group0[1][2], &b.value_edge);
+        star_block_avxvnni(&mut group1[2][1], &group0[2][1], &b.value_edge);
+
+        star_block_avxvnni(&mut group1[1][1], &group0[1][1], &b.value_center);
+
+        let mut q00 = [0_i8; VALUE_DIM];
+        let mut q01 = [0_i8; VALUE_DIM];
+        let mut q10 = [0_i8; VALUE_DIM];
+        let mut q11 = [0_i8; VALUE_DIM];
+        avg_pool_2x2_u8_avx2(&mut q00, &mut q01, &mut q10, &mut q11, &group1);
+
+        let mut quad_out = [[0_i8; VALUE_DIM]; 4];
+        star_block_avxvnni(&mut quad_out[0], &q00, &b.value_quad);
+        star_block_avxvnni(&mut quad_out[1], &q01, &b.value_quad);
+        star_block_avxvnni(&mut quad_out[2], &q10, &b.value_quad);
+        star_block_avxvnni(&mut quad_out[3], &q11, &b.value_quad);
+        for q in 0..4 {
+            let off = FEATURE_DIM + q * VALUE_DIM;
+            layer0[off..off + VALUE_DIM].copy_from_slice(&quad_out[q]);
+        }
+
+        let mut l1_i32 = [0_i32; VALUE_DIM];
+        let mut l1 = [0_i8; VALUE_DIM];
+        linear_i8_chunk4_avxvnni::<VALUE_DIM, { FEATURE_DIM + VALUE_DIM * 4 }, false>(
+            &mut l1_i32,
+            &layer0,
+            &b.value_l1.weight,
+            &b.value_l1.bias,
+        );
+        crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(&mut l1, &l1_i32);
+
+        let mut l2_i32 = [0_i32; VALUE_DIM];
+        let mut l2 = [0_i8; VALUE_DIM];
+        linear_i8_chunk4_avxvnni::<VALUE_DIM, VALUE_DIM, false>(
+            &mut l2_i32,
+            &l1,
+            &b.value_l2.weight,
+            &b.value_l2.bias,
+        );
+        crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(&mut l2, &l2_i32);
+
+        let mut l3_i32 = [0_i32; 4];
+        let l3_bias: [i32; 4] = [
+            b.value_l3.bias[0],
+            b.value_l3.bias[1],
+            b.value_l3.bias[2],
+            b.value_l3.bias[3],
+        ];
+        linear_i8_row4_avxvnni::<VALUE_DIM>(&mut l3_i32, &l2, &b.value_l3.weight, &l3_bias);
+        let scale = 1.0_f32 / (128.0 * 128.0);
+        (
+            l3_i32,
+            (
+                l3_i32[0] as f32 * scale,
+                l3_i32[1] as f32 * scale,
+                l3_i32[2] as f32 * scale,
+            ),
+        )
+    }
+
     /// Fast policy evaluation for an explicit slice of `Move`s (e.g. `<= 40`
     /// candidates), avoiding scanning all 225 cells.
     pub fn evaluate_policy_moves(
@@ -1079,20 +1188,139 @@ impl Mix9svqAccumulator {
     ) {
         debug_assert_eq!(moves.len(), out_scores.len());
         #[cfg(target_arch = "x86_64")]
+        if self.use_avxvnni {
+            unsafe {
+                self.evaluate_policy_moves_avxvnni(w, moves, out_scores);
+            }
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
         if self.use_avx2 {
             unsafe {
                 self.evaluate_policy_moves_avx2(w, moves, out_scores);
             }
             return;
         }
-        let mut mask = [false; BOARD_AREA];
-        for &m in moves {
-            mask[m as usize] = true;
+        self.evaluate_policy_moves_scalar(w, moves, out_scores);
+    }
+
+    fn evaluate_policy_moves_scalar(
+        &self,
+        w: &Mix9svqWeight,
+        moves: &[crate::types::Move],
+        out_scores: &mut [f32],
+    ) {
+        let value_sum = &self.value_sum_table[self.current_version as usize];
+        let b = &w.bucket;
+
+        let mut layer0 = [0_i8; FEATURE_DIM];
+        crelu_i32_to_i8_scalar::<FEATURE_DIM, 8, true>(&mut layer0, &value_sum.global);
+
+        let mut l1_i32 = [0_i32; POLICY_DIM * 2];
+        let mut l1 = [0_i8; POLICY_DIM * 2];
+        linear_i8_chunk4_scalar::<{ POLICY_DIM * 2 }, FEATURE_DIM, false>(
+            &mut l1_i32,
+            &layer0,
+            &b.policy_pwconv_l1.weight,
+            &b.policy_pwconv_l1.bias,
+        );
+        crelu_i32_to_i8_scalar::<{ POLICY_DIM * 2 }, 7, false>(&mut l1, &l1_i32);
+
+        const L2_OUT: usize = POLICY_PWCONV_DIM * POLICY_DIM + POLICY_PWCONV_DIM;
+        let mut l2_i32 = [0_i32; L2_OUT];
+        linear_i8_chunk4_scalar::<L2_OUT, { POLICY_DIM * 2 }, false>(
+            &mut l2_i32,
+            &l1,
+            &b.policy_pwconv_l2.weight,
+            &b.policy_pwconv_l2.bias,
+        );
+        let mut pw_w = [0_i16; POLICY_PWCONV_DIM * POLICY_DIM];
+        let l2_head: &[i32; POLICY_PWCONV_DIM * POLICY_DIM] =
+            l2_i32[..POLICY_PWCONV_DIM * POLICY_DIM].try_into().unwrap();
+        crelu_i32_to_i16_scalar::<{ POLICY_PWCONV_DIM * POLICY_DIM }, 0, true>(&mut pw_w, l2_head);
+        let mut pw_b = [0_i32; POLICY_PWCONV_DIM];
+        for i in 0..POLICY_PWCONV_DIM {
+            pw_b[i] = l2_i32[POLICY_PWCONV_DIM * POLICY_DIM + i] << 7;
         }
-        let mut full = [0.0_f32; BOARD_AREA];
-        self.evaluate_policy_scalar(w, &mask, &mut full);
+
+        let outer_ver_base = (self.current_version as usize) * OUTER_BOARD_AREA;
+        let mut p_i32 = [0_i32; POLICY_PWCONV_DIM];
         for (dst, &m) in out_scores.iter_mut().zip(moves.iter()) {
-            *dst = full[m as usize];
+            let idx = m as usize;
+            let y = idx / BOARD_SIZE;
+            let x = idx % BOARD_SIZE;
+            let outer_idx = (y + 1) * OUTER_BOARD_SIZE + (x + 1);
+            let mc_idx = self.version_outer_index[outer_ver_base + outer_idx] as usize;
+            linear_i16_chunk2_prerelu_scalar::<POLICY_PWCONV_DIM, POLICY_DIM>(
+                &mut p_i32,
+                &self.map_conv[mc_idx],
+                &pw_w,
+                &pw_b,
+            );
+            let mut acc = 0.0_f32;
+            for c in 0..POLICY_PWCONV_DIM {
+                acc += (p_i32[c].max(0) as f32) * b.policy_output_weight[c];
+            }
+            *dst = acc + b.policy_output_bias;
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,avxvnni")]
+    unsafe fn evaluate_policy_moves_avxvnni(
+        &self,
+        w: &Mix9svqWeight,
+        moves: &[crate::types::Move],
+        out_scores: &mut [f32],
+    ) {
+        let value_sum = &self.value_sum_table[self.current_version as usize];
+        let b = &w.bucket;
+
+        let mut layer0 = [0_i8; FEATURE_DIM];
+        crelu_i32_to_i8_avx2::<FEATURE_DIM, 8, true>(&mut layer0, &value_sum.global);
+
+        let mut l1_i32 = [0_i32; POLICY_DIM * 2];
+        let mut l1 = [0_i8; POLICY_DIM * 2];
+        linear_i8_chunk4_avxvnni::<{ POLICY_DIM * 2 }, FEATURE_DIM, false>(
+            &mut l1_i32,
+            &layer0,
+            &b.policy_pwconv_l1.weight,
+            &b.policy_pwconv_l1.bias,
+        );
+        crelu_i32_to_i8_avx2::<{ POLICY_DIM * 2 }, 7, false>(&mut l1, &l1_i32);
+
+        const L2_OUT: usize = POLICY_PWCONV_DIM * POLICY_DIM + POLICY_PWCONV_DIM;
+        let mut l2_i32 = [0_i32; L2_OUT];
+        linear_i8_chunk4_avxvnni::<L2_OUT, { POLICY_DIM * 2 }, false>(
+            &mut l2_i32,
+            &l1,
+            &b.policy_pwconv_l2.weight,
+            &b.policy_pwconv_l2.bias,
+        );
+        let mut pw_w = [0_i16; POLICY_PWCONV_DIM * POLICY_DIM];
+        let l2_head: &[i32; POLICY_PWCONV_DIM * POLICY_DIM] =
+            l2_i32[..POLICY_PWCONV_DIM * POLICY_DIM].try_into().unwrap();
+        crelu_i32_to_i16_avx2::<{ POLICY_PWCONV_DIM * POLICY_DIM }, 0, true>(&mut pw_w, l2_head);
+        let mut pw_b = [0_i32; POLICY_PWCONV_DIM];
+        for i in 0..POLICY_PWCONV_DIM {
+            pw_b[i] = l2_i32[POLICY_PWCONV_DIM * POLICY_DIM + i] << 7;
+        }
+
+        let outer_ver_base = (self.current_version as usize) * OUTER_BOARD_AREA;
+        let mut p_i32 = [0_i32; POLICY_PWCONV_DIM];
+        for (dst, &m) in out_scores.iter_mut().zip(moves.iter()) {
+            let idx = m as usize;
+            let y = idx / BOARD_SIZE;
+            let x = idx % BOARD_SIZE;
+            let outer_idx = (y + 1) * OUTER_BOARD_SIZE + (x + 1);
+            let mc_idx = self.version_outer_index[outer_ver_base + outer_idx] as usize;
+            linear_i16_chunk2_prerelu_avx2::<POLICY_PWCONV_DIM, POLICY_DIM>(
+                &mut p_i32,
+                &self.map_conv[mc_idx],
+                &pw_w,
+                &pw_b,
+            );
+            *dst = policy_dot16_avx2(&p_i32, &b.policy_output_weight, b.policy_output_bias);
         }
     }
 
@@ -1295,11 +1523,8 @@ impl Mix9svqAccumulator {
                     &pw_w,
                     &pw_b,
                 );
-                let mut acc = 0.0_f32;
-                for c in 0..POLICY_PWCONV_DIM {
-                    acc += (p_i32[c].max(0) as f32) * b.policy_output_weight[c];
-                }
-                out_policy[inner_idx] = acc + b.policy_output_bias;
+                out_policy[inner_idx] =
+                    policy_dot16_avx2(&p_i32, &b.policy_output_weight, b.policy_output_bias);
             }
         }
     }
@@ -1383,6 +1608,46 @@ unsafe fn star_block_avx2(
     crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(output, &out_i32);
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,avxvnni")]
+unsafe fn star_block_avxvnni(
+    output: &mut [i8; VALUE_DIM],
+    input: &[i8; FEATURE_DIM],
+    w: &StarBlockWeight<VALUE_DIM, FEATURE_DIM>,
+) {
+    let mut up_i32 = [0_i32; VALUE_DIM * 2];
+    let mut up1 = [0_i8; VALUE_DIM * 2];
+    let mut up2 = [0_i8; VALUE_DIM * 2];
+
+    linear_i8_chunk4_avxvnni::<{ VALUE_DIM * 2 }, FEATURE_DIM, false>(
+        &mut up_i32,
+        input,
+        &w.up1.weight,
+        &w.up1.bias,
+    );
+    crelu_i32_to_i8_avx2::<{ VALUE_DIM * 2 }, 7, false>(&mut up1, &up_i32);
+
+    linear_i8_chunk4_avxvnni::<{ VALUE_DIM * 2 }, FEATURE_DIM, false>(
+        &mut up_i32,
+        input,
+        &w.up2.weight,
+        &w.up2.bias,
+    );
+    crelu_i32_to_i8_avx2::<{ VALUE_DIM * 2 }, 7, true>(&mut up2, &up_i32);
+
+    let mut dotsum = [0_i8; VALUE_DIM];
+    dot2_u7i8_avx2::<VALUE_DIM, 7>(&mut dotsum, &up1, &up2);
+
+    let mut out_i32 = [0_i32; VALUE_DIM];
+    linear_i8_chunk4_avxvnni::<VALUE_DIM, VALUE_DIM, true>(
+        &mut out_i32,
+        &dotsum,
+        &w.down.weight,
+        &w.down.signed_bias,
+    );
+    crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(output, &out_i32);
+}
+
 /// Convert `(win_logit, loss_logit, draw_logit)` via softmax and Rapfi's
 /// `winRateToValue` sigmoid into a signed evaluation in `[-NNUE_VALUE_CLAMP, NNUE_VALUE_CLAMP]`.
 #[inline]
@@ -1438,6 +1703,13 @@ pub struct Mix9svqEvaluator {
     weight: [Arc<Mix9svqWeight>; 2],
     accumulator: [Box<Mix9svqAccumulator>; 2],
     move_cache: [Vec<MoveCacheEntry>; 2],
+    /// Root move sequence currently reflected by the evaluator (when synced via
+    /// `sync_with_board` on a board with `move_history()`).
+    synced_history: Option<Vec<(Side, u8, u8)>>,
+    /// Net `before_move` minus `after_undo` calls since the last `sync_with_board`.
+    /// When zero, `sync_with_board` can safely apply only the LCP diff instead of
+    /// replaying the entire board from empty.
+    pending_balance: isize,
 }
 
 impl Mix9svqEvaluator {
@@ -1452,6 +1724,8 @@ impl Mix9svqEvaluator {
                 Vec::with_capacity(BOARD_AREA),
                 Vec::with_capacity(BOARD_AREA),
             ],
+            synced_history: None,
+            pending_balance: 0,
         };
         eval.init_empty_board();
         eval
@@ -1462,36 +1736,73 @@ impl Mix9svqEvaluator {
         self.move_cache[1].clear();
         self.accumulator[0].clear(&self.weight[0]);
         self.accumulator[1].clear(&self.weight[1]);
+        self.synced_history = Some(Vec::new());
+        self.pending_balance = 0;
     }
 
     pub fn sync_with_board(&mut self, board: &Board) {
-        self.init_empty_board();
-        if !board.move_history().is_empty() {
-            for played in board.move_history() {
+        let history = board.move_history();
+        if !history.is_empty() || board.move_count() == 0 {
+            let mut target = Vec::with_capacity(history.len());
+            for played in history {
                 if let Ok((x, y)) = move_to_xy(played.move_) {
-                    self.before_move(played.side, x, y);
+                    target.push((played.side, x as u8, y as u8));
                 }
             }
-        } else {
-            let grid = board.grid_rows();
-            for y in 0..BOARD_SIZE {
-                for x in 0..BOARD_SIZE {
-                    let cell = grid[y][x];
-                    if cell != EMPTY {
-                        self.before_move(cell, x, y);
+            if self.pending_balance == 0 {
+                if let Some(prev) = self.synced_history.take() {
+                    let lcp = prev
+                        .iter()
+                        .zip(target.iter())
+                        .take_while(|(a, b)| a == b)
+                        .count();
+                    if lcp == prev.len() && lcp == target.len() {
+                        self.synced_history = Some(prev);
+                        return;
                     }
+                    for &(side, x, y) in prev[lcp..].iter().rev() {
+                        self.queue_cache(side_to_color(side), x as usize, y as usize, true);
+                    }
+                    for &(side, x, y) in &target[lcp..] {
+                        self.queue_cache(side_to_color(side), x as usize, y as usize, false);
+                    }
+                    self.synced_history = Some(target);
+                    return;
+                }
+            }
+            self.init_empty_board();
+            for &(side, x, y) in &target {
+                self.queue_cache(side_to_color(side), x as usize, y as usize, false);
+            }
+            self.synced_history = Some(target);
+            self.pending_balance = 0;
+            return;
+        }
+
+        // Fallback for boards populated directly via `grid_rows_mut()` without move_history.
+        self.init_empty_board();
+        self.synced_history = None;
+        let grid = board.grid_rows();
+        for y in 0..BOARD_SIZE {
+            for x in 0..BOARD_SIZE {
+                let cell = grid[y][x];
+                if cell != EMPTY {
+                    self.queue_cache(side_to_color(cell), x, y, false);
                 }
             }
         }
+        self.pending_balance = 0;
     }
 
     #[inline(always)]
     pub fn before_move(&mut self, side: Side, x: usize, y: usize) {
+        self.pending_balance += 1;
         self.queue_cache(side_to_color(side), x, y, false);
     }
 
     #[inline(always)]
     pub fn after_undo(&mut self, side: Side, x: usize, y: usize) {
+        self.pending_balance -= 1;
         self.queue_cache(side_to_color(side), x, y, true);
     }
 
@@ -1589,11 +1900,13 @@ impl Mix9svqEvaluator {
         self.accumulator[slot].evaluate_policy(&self.weight[slot], compute_mask, out_policy);
     }
 
-    /// Verify scalar vs AVX2 bit-exactness (for tests).
+    /// Verify scalar vs AVX2 vs AVX-VNNI bit-exactness (for tests).
     #[cfg(test)]
-    pub(crate) fn set_use_avx2(&mut self, enabled: bool) {
-        self.accumulator[0].use_avx2 = enabled;
-        self.accumulator[1].use_avx2 = enabled;
+    pub(crate) fn set_simd_mode(&mut self, avx2: bool, avxvnni: bool) {
+        for acc in &mut self.accumulator {
+            acc.use_avx2 = avx2;
+            acc.use_avxvnni = avxvnni;
+        }
     }
 }
 
@@ -1621,9 +1934,11 @@ mod tests {
             )
             .expect("freestyle weight loads"),
         );
+        let mut ev_vnni = Mix9svqEvaluator::new(fs_w.clone(), fs_w.clone());
         let mut ev_avx = Mix9svqEvaluator::new(fs_w.clone(), fs_w.clone());
+        ev_avx.set_simd_mode(has_avx2(), false);
         let mut ev_sca = Mix9svqEvaluator::new(fs_w.clone(), fs_w);
-        ev_sca.set_use_avx2(false);
+        ev_sca.set_simd_mode(false, false);
 
         let moves = [
             (7, 7, BLACK),
@@ -1638,24 +1953,35 @@ mod tests {
         let mut board = Board::new();
         for (x, y, s) in moves {
             board.play(xy_to_move(x, y).unwrap(), Some(s)).unwrap();
+            ev_vnni.before_move(s, x, y);
             ev_avx.before_move(s, x, y);
             ev_sca.before_move(s, x, y);
         }
 
+        let (raw_v, log_v, val_v) = ev_vnni.evaluate_value_detailed(BLACK);
         let (raw_a, log_a, val_a) = ev_avx.evaluate_value_detailed(BLACK);
         let (raw_s, log_s, val_s) = ev_sca.evaluate_value_detailed(BLACK);
         assert_eq!(
             raw_a, raw_s,
             "AVX2 and scalar layer3i32 must be bit-identical"
         );
+        assert_eq!(
+            raw_v, raw_s,
+            "AVX-VNNI and scalar layer3i32 must be bit-identical"
+        );
         assert_eq!(val_a, val_s);
+        assert_eq!(val_v, val_s);
         assert!((log_a.0 - log_s.0).abs() < 1e-6);
+        assert!((log_v.0 - log_s.0).abs() < 1e-6);
 
         let mut mask = [false; BOARD_AREA];
+        let mut cand_moves = Vec::new();
         for y in 0..BOARD_SIZE {
             for x in 0..BOARD_SIZE {
                 if board.grid_rows()[y][x] == EMPTY {
-                    mask[y * BOARD_SIZE + x] = true;
+                    let idx = y * BOARD_SIZE + x;
+                    mask[idx] = true;
+                    cand_moves.push(idx as crate::types::Move);
                 }
             }
         }
@@ -1663,47 +1989,105 @@ mod tests {
         let mut pol_s = [0.0_f32; BOARD_AREA];
         ev_avx.evaluate_policy(BLACK, &mask, &mut pol_a);
         ev_sca.evaluate_policy(BLACK, &mask, &mut pol_s);
-        for idx in 0..BOARD_AREA {
-            if mask[idx] {
-                assert!(
-                    (pol_a[idx] - pol_s[idx]).abs() < 1e-4,
-                    "policy mismatch at idx {idx}: avx={} scalar={}",
-                    pol_a[idx],
-                    pol_s[idx]
-                );
-            }
+        let mut pm_v = vec![0.0_f32; cand_moves.len()];
+        let mut pm_a = vec![0.0_f32; cand_moves.len()];
+        let mut pm_s = vec![0.0_f32; cand_moves.len()];
+        ev_vnni.evaluate_policy_moves(BLACK, &cand_moves, &mut pm_v);
+        ev_avx.evaluate_policy_moves(BLACK, &cand_moves, &mut pm_a);
+        ev_sca.evaluate_policy_moves(BLACK, &cand_moves, &mut pm_s);
+        for (i, &m) in cand_moves.iter().enumerate() {
+            let idx = m as usize;
+            assert!(
+                (pol_a[idx] - pol_s[idx]).abs() < 1e-4,
+                "policy mismatch at idx {idx}: avx={} scalar={}",
+                pol_a[idx],
+                pol_s[idx]
+            );
+            assert!(
+                (pm_v[i] - pm_s[i]).abs() < 1e-4,
+                "policy_moves vnni mismatch at idx {idx}: vnni={} scalar={}",
+                pm_v[i],
+                pm_s[i]
+            );
+            assert!(
+                (pm_a[i] - pm_s[i]).abs() < 1e-4,
+                "policy_moves avx2 mismatch at idx {idx}: avx2={} scalar={}",
+                pm_a[i],
+                pm_s[i]
+            );
         }
 
-        // Undo 3 moves and verify version-stack undo matches fresh sync_with_board
-        for _ in 0..3 {
-            let played = board.undo().unwrap();
-            let (x, y) = move_to_xy(played.move_).unwrap();
-            ev_avx.after_undo(played.side, x, y);
-        }
-        let mut ev_fresh =
-            Mix9svqEvaluator::new(ev_avx.weight[0].clone(), ev_avx.weight[1].clone());
-        ev_fresh.sync_with_board(&board);
+        // Verify LCP incremental sync_with_board across: same board, +2 moves,
+        // undo 3 + divergent 2 moves, and manual before_move imbalance.
+        let mut ev_sync =
+            Mix9svqEvaluator::new(ev_vnni.weight[0].clone(), ev_vnni.weight[1].clone());
+        ev_sync.sync_with_board(&board);
+        assert_eq!(ev_sync.evaluate_value_detailed(BLACK).0, raw_s);
+        // Same board again (no-op fast path)
+        ev_sync.sync_with_board(&board);
+        assert_eq!(ev_sync.evaluate_value_detailed(BLACK).0, raw_s);
+        // +2 moves
+        board.play(xy_to_move(7, 9).unwrap(), Some(BLACK)).unwrap();
+        board.play(xy_to_move(6, 9).unwrap(), Some(WHITE)).unwrap();
+        ev_sync.sync_with_board(&board);
+        let mut ev_ref =
+            Mix9svqEvaluator::new(ev_vnni.weight[0].clone(), ev_vnni.weight[1].clone());
+        ev_ref.sync_with_board(&board);
         assert_eq!(
-            ev_avx.evaluate_value_detailed(WHITE).0,
-            ev_fresh.evaluate_value_detailed(WHITE).0
+            ev_sync.evaluate_value_detailed(BLACK).0,
+            ev_ref.evaluate_value_detailed(BLACK).0
+        );
+        // Undo 3 moves and play 2 divergent moves
+        for _ in 0..3 {
+            board.undo().unwrap();
+        }
+        board.play(xy_to_move(9, 7).unwrap(), Some(WHITE)).unwrap();
+        board.play(xy_to_move(10, 7).unwrap(), Some(BLACK)).unwrap();
+        ev_sync.sync_with_board(&board);
+        let mut ev_ref2 =
+            Mix9svqEvaluator::new(ev_vnni.weight[0].clone(), ev_vnni.weight[1].clone());
+        ev_ref2.sync_with_board(&board);
+        assert_eq!(
+            ev_sync.evaluate_value_detailed(WHITE).0,
+            ev_ref2.evaluate_value_detailed(WHITE).0
+        );
+        // Manual before_move imbalance forces full resync
+        ev_sync.before_move(WHITE, 4, 4);
+        ev_sync.sync_with_board(&board);
+        assert_eq!(
+            ev_sync.evaluate_value_detailed(WHITE).0,
+            ev_ref2.evaluate_value_detailed(WHITE).0
         );
 
-        // Microbenchmark AVX2 move + evaluate_value + evaluate_policy
+        // Microbenchmark AVX2 vs AVX-VNNI
         let t0 = std::time::Instant::now();
         let mut sink = 0_i64;
         for _ in 0..2000 {
-            ev_avx.before_move(WHITE, 5, 7);
-            sink += ev_avx.evaluate_value(BLACK) as i64;
-            ev_avx.after_undo(WHITE, 5, 7);
+            ev_avx.before_move(BLACK, 5, 7);
+            sink += ev_avx.evaluate_value(WHITE) as i64;
+            ev_avx.after_undo(BLACK, 5, 7);
         }
-        let us_move_eval = t0.elapsed().as_secs_f64() * 1e6 / 2000.0;
+        let us_avx2_me = t0.elapsed().as_secs_f64() * 1e6 / 2000.0;
         let t1 = std::time::Instant::now();
         for _ in 0..2000 {
-            sink += ev_avx.evaluate_value(WHITE) as i64;
+            sink += ev_avx.evaluate_value(BLACK) as i64;
         }
-        let us_eval_only = t1.elapsed().as_secs_f64() * 1e6 / 2000.0;
+        let us_avx2_e = t1.elapsed().as_secs_f64() * 1e6 / 2000.0;
+        let t2 = std::time::Instant::now();
+        for _ in 0..2000 {
+            ev_vnni.before_move(BLACK, 5, 7);
+            sink += ev_vnni.evaluate_value(WHITE) as i64;
+            ev_vnni.after_undo(BLACK, 5, 7);
+        }
+        let us_vnni_me = t2.elapsed().as_secs_f64() * 1e6 / 2000.0;
+        let t3 = std::time::Instant::now();
+        for _ in 0..2000 {
+            sink += ev_vnni.evaluate_value(BLACK) as i64;
+        }
+        let us_vnni_e = t3.elapsed().as_secs_f64() * 1e6 / 2000.0;
         eprintln!(
-            "mix9svq AVX2 bench: eval_only={us_eval_only:.2}us, move+eval+undo={us_move_eval:.2}us, sink={sink}"
+            "mix9svq bench: AVX2 eval={us_avx2_e:.2}us move+eval={us_avx2_me:.2}us | AVX-VNNI eval={us_vnni_e:.2}us move+eval={us_vnni_me:.2}us (has_avxvnni={}) sink={sink}",
+            has_avxvnni()
         );
         // Pin bit-exact match against Rapfi C++ oracle (`opponent/rapfi/Rapfi/eval/mix9svqnnue.cpp`)
         assert_eq!(

@@ -69,6 +69,8 @@ struct ProbeArgs {
     threads: Option<usize>,
     root_profile: bool,
     vct_strict_and_memo_key: Option<bool>,
+    nnue_dir: Option<String>,
+    no_nnue: bool,
 }
 
 #[derive(Serialize)]
@@ -114,6 +116,7 @@ struct TraceOutput {
     root_profile_depths: usize,
     tt_bestmove_current_generation: usize,
     tt_bestmove_old_generation: usize,
+    nnue_active: bool,
 }
 
 #[derive(Serialize)]
@@ -274,6 +277,8 @@ fn parse_args() -> Result<ProbeArgs, String> {
     let mut threads = None;
     let mut root_profile = false;
     let mut vct_strict_and_memo_key = None;
+    let mut nnue_dir = None;
+    let mut no_nnue = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--rule" => {
@@ -352,6 +357,17 @@ fn parse_args() -> Result<ProbeArgs, String> {
             "--no-vct-strict-and-memo-key" => {
                 vct_strict_and_memo_key = Some(false);
             }
+            "--nnue-dir" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--nnue-dir requires a directory path".to_string())?;
+                nnue_dir = Some(value);
+                no_nnue = false;
+            }
+            "--no-nnue" => {
+                nnue_dir = None;
+                no_nnue = true;
+            }
             "--profile" | "--fast-history-ordering" | "--no-fast-history-ordering" => {
                 return Err(format!("{arg} was removed with the Fast profile"));
             }
@@ -374,6 +390,8 @@ fn parse_args() -> Result<ProbeArgs, String> {
         threads,
         root_profile,
         vct_strict_and_memo_key,
+        nnue_dir,
+        no_nnue,
     })
 }
 
@@ -458,6 +476,19 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
     if let Some(vct_strict_and_memo_key) = args.vct_strict_and_memo_key {
         config.runtime.vct_strict_and_memo_key = vct_strict_and_memo_key;
     }
+    let resolved_nnue_dir = if args.no_nnue {
+        None
+    } else {
+        args.nnue_dir.clone().or_else(|| {
+            std::env::var("RUST_GOMOKU_NNUE_DIR")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+    };
+    if let Some(dir) = resolved_nnue_dir {
+        config.runtime.nnue_dir = Some(dir);
+        config.runtime.use_nnue = true;
+    }
     let default_limits = SearchLimits::fixed_from_config(&config);
     let limits = SearchLimits {
         max_depth: args.depth.unwrap_or(default_limits.max_depth),
@@ -472,6 +503,12 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
     } else {
         RootSearcher::new_for_limits(config, limits)
     };
+    if args.nnue_dir.is_some() && !searcher.has_nnue() {
+        return Err(format!(
+            "failed to load Mix9svq NNUE weights from {:?}",
+            args.nnue_dir
+        ));
+    }
     let start = Instant::now();
     let result = searcher
         .try_search(&mut board, Some(limits))
@@ -512,6 +549,7 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
             root_profile_depths: trace.root_profiles.len(),
             tt_bestmove_current_generation: trace.tt_bestmove_current_generation,
             tt_bestmove_old_generation: trace.tt_bestmove_old_generation,
+            nnue_active: searcher.has_nnue(),
         },
     })
 }

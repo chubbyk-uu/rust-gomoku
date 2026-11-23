@@ -29,6 +29,20 @@ pub fn has_avx2() -> bool {
     }
 }
 
+/// Runtime check for AVX-VNNI support on x86_64 (implies AVX2).
+#[inline(always)]
+pub fn has_avxvnni() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("avxvnni")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
 /// Scramble a row-major `[OutSize][InSize]` weight matrix into
 /// `[InSize / CHUNK][OutSize][CHUNK]` for chunked SIMD affine kernels.
 pub fn preprocess_linear<
@@ -742,4 +756,176 @@ pub unsafe fn commit_conv_cell_avx2(
         _mm256_storeu_si256(ptr as *mut __m256i, _mm256_add_epi32(cur0, lo));
         _mm256_storeu_si256(ptr.add(8) as *mut __m256i, _mm256_add_epi32(cur1, hi));
     }
+}
+
+// ============================================================================
+// AVX-VNNI SIMD Kernels (x86_64, `_mm256_dpbusd_avx_epi32`)
+// ============================================================================
+
+/// Compute the bias offset `-128 * sum_j weight[o][j]` for a row-major `[OUT][IN]`
+/// i8 matrix so signed-i8 inputs can be shifted by `+128` (`x ^ 0x80`) into `u8`
+/// and evaluated with a single `_mm256_dpbusd_avx_epi32` per output tile.
+pub fn compute_signed_input_bias<const OUT: usize, const IN: usize>(
+    row_major_weight: &[i8],
+    bias: &[i32],
+) -> Vec<i32> {
+    assert_eq!(row_major_weight.len(), OUT * IN);
+    assert_eq!(bias.len(), OUT);
+    let mut out = Vec::with_capacity(OUT);
+    for o in 0..OUT {
+        let mut col_sum = 0_i32;
+        let row = &row_major_weight[o * IN..(o + 1) * IN];
+        for &w in row {
+            col_sum += i32::from(w);
+        }
+        out.push(bias[o].wrapping_sub(col_sum.wrapping_mul(128)));
+    }
+    out
+}
+
+/// AVX-VNNI chunk-4 i8 affine layer (`_mm256_dpbusd_avx_epi32`).
+///
+/// When `SIGNED_INPUT == true`, `bias` MUST be the pre-adjusted `signed_bias`
+/// produced by [`compute_signed_input_bias`], and each input byte is shifted by
+/// `+128` (`^ 0x80`) into unsigned `u8` before `dpbusd`, which is bit-identical
+/// to exact `i8 * i8 -> i32` accumulation with half the instructions.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,avxvnni")]
+pub unsafe fn linear_i8_chunk4_avxvnni<
+    const OUT: usize,
+    const IN: usize,
+    const SIGNED_INPUT: bool,
+>(
+    output: &mut [i32; OUT],
+    input: &[i8],
+    weight: &[i8],
+    bias: &[i32],
+) {
+    debug_assert_eq!(OUT % 8, 0);
+    debug_assert_eq!(IN % 4, 0);
+    let num_batches = OUT / 8;
+    let num_chunks = IN / 4;
+    let sign_flip = _mm256_set1_epi8(-128_i8);
+    let in32_ptr = input.as_ptr() as *const i32;
+    let w_ptr = weight.as_ptr();
+    let b_ptr = bias.as_ptr();
+    let o_ptr = output.as_mut_ptr();
+
+    let mut out_batch = 0;
+    while out_batch + 8 <= num_batches {
+        let boff = out_batch * 8;
+        let mut a0 = _mm256_loadu_si256(b_ptr.add(boff) as *const __m256i);
+        let mut a1 = _mm256_loadu_si256(b_ptr.add(boff + 8) as *const __m256i);
+        let mut a2 = _mm256_loadu_si256(b_ptr.add(boff + 16) as *const __m256i);
+        let mut a3 = _mm256_loadu_si256(b_ptr.add(boff + 24) as *const __m256i);
+        let mut a4 = _mm256_loadu_si256(b_ptr.add(boff + 32) as *const __m256i);
+        let mut a5 = _mm256_loadu_si256(b_ptr.add(boff + 40) as *const __m256i);
+        let mut a6 = _mm256_loadu_si256(b_ptr.add(boff + 48) as *const __m256i);
+        let mut a7 = _mm256_loadu_si256(b_ptr.add(boff + 56) as *const __m256i);
+
+        let w_base = w_ptr.add(out_batch * 32);
+        let stride = OUT * 4;
+        for c in 0..num_chunks {
+            let mut in0 = _mm256_set1_epi32(std::ptr::read_unaligned(in32_ptr.add(c)));
+            if SIGNED_INPUT {
+                in0 = _mm256_xor_si256(in0, sign_flip);
+            }
+            let wc = w_base.add(c * stride);
+            a0 = _mm256_dpbusd_avx_epi32(a0, in0, _mm256_loadu_si256(wc as *const __m256i));
+            a1 = _mm256_dpbusd_avx_epi32(a1, in0, _mm256_loadu_si256(wc.add(32) as *const __m256i));
+            a2 = _mm256_dpbusd_avx_epi32(a2, in0, _mm256_loadu_si256(wc.add(64) as *const __m256i));
+            a3 = _mm256_dpbusd_avx_epi32(a3, in0, _mm256_loadu_si256(wc.add(96) as *const __m256i));
+            a4 =
+                _mm256_dpbusd_avx_epi32(a4, in0, _mm256_loadu_si256(wc.add(128) as *const __m256i));
+            a5 =
+                _mm256_dpbusd_avx_epi32(a5, in0, _mm256_loadu_si256(wc.add(160) as *const __m256i));
+            a6 =
+                _mm256_dpbusd_avx_epi32(a6, in0, _mm256_loadu_si256(wc.add(192) as *const __m256i));
+            a7 =
+                _mm256_dpbusd_avx_epi32(a7, in0, _mm256_loadu_si256(wc.add(224) as *const __m256i));
+        }
+
+        _mm256_storeu_si256(o_ptr.add(boff) as *mut __m256i, a0);
+        _mm256_storeu_si256(o_ptr.add(boff + 8) as *mut __m256i, a1);
+        _mm256_storeu_si256(o_ptr.add(boff + 16) as *mut __m256i, a2);
+        _mm256_storeu_si256(o_ptr.add(boff + 24) as *mut __m256i, a3);
+        _mm256_storeu_si256(o_ptr.add(boff + 32) as *mut __m256i, a4);
+        _mm256_storeu_si256(o_ptr.add(boff + 40) as *mut __m256i, a5);
+        _mm256_storeu_si256(o_ptr.add(boff + 48) as *mut __m256i, a6);
+        _mm256_storeu_si256(o_ptr.add(boff + 56) as *mut __m256i, a7);
+        out_batch += 8;
+    }
+
+    let rem = num_batches - out_batch;
+    if rem > 0 {
+        let mut acc = [_mm256_setzero_si256(); 8];
+        for t in 0..rem {
+            acc[t] = _mm256_loadu_si256(b_ptr.add((out_batch + t) * 8) as *const __m256i);
+        }
+        let w_base = w_ptr.add(out_batch * 32);
+        let stride = OUT * 4;
+        for c in 0..num_chunks {
+            let mut in0 = _mm256_set1_epi32(std::ptr::read_unaligned(in32_ptr.add(c)));
+            if SIGNED_INPUT {
+                in0 = _mm256_xor_si256(in0, sign_flip);
+            }
+            let wc = w_base.add(c * stride);
+            for t in 0..rem {
+                let w0 = _mm256_loadu_si256(wc.add(t * 32) as *const __m256i);
+                acc[t] = _mm256_dpbusd_avx_epi32(acc[t], in0, w0);
+            }
+        }
+        for t in 0..rem {
+            _mm256_storeu_si256(o_ptr.add((out_batch + t) * 8) as *mut __m256i, acc[t]);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,avxvnni")]
+pub unsafe fn linear_i8_row4_avxvnni<const IN: usize>(
+    output: &mut [i32; 4],
+    input: &[i8; IN],
+    weight: &[i8],
+    bias: &[i32; 4],
+) {
+    debug_assert_eq!(IN % 32, 0);
+    let mut sum0 = _mm256_setzero_si256();
+    let mut sum1 = _mm256_setzero_si256();
+    let mut sum2 = _mm256_setzero_si256();
+    let mut sum3 = _mm256_setzero_si256();
+    let in_ptr = input.as_ptr();
+    let w_ptr = weight.as_ptr();
+    for j in 0..(IN / 32) {
+        let off = j * 32;
+        let inv = _mm256_loadu_si256(in_ptr.add(off) as *const __m256i);
+        sum0 = _mm256_dpbusd_avx_epi32(
+            sum0,
+            inv,
+            _mm256_loadu_si256(w_ptr.add(off) as *const __m256i),
+        );
+        sum1 = _mm256_dpbusd_avx_epi32(
+            sum1,
+            inv,
+            _mm256_loadu_si256(w_ptr.add(IN + off) as *const __m256i),
+        );
+        sum2 = _mm256_dpbusd_avx_epi32(
+            sum2,
+            inv,
+            _mm256_loadu_si256(w_ptr.add(2 * IN + off) as *const __m256i),
+        );
+        sum3 = _mm256_dpbusd_avx_epi32(
+            sum3,
+            inv,
+            _mm256_loadu_si256(w_ptr.add(3 * IN + off) as *const __m256i),
+        );
+    }
+    let s01 = _mm256_hadd_epi32(sum0, sum1);
+    let s23 = _mm256_hadd_epi32(sum2, sum3);
+    let s0123 = _mm256_hadd_epi32(s01, s23);
+    let lo = _mm256_castsi256_si128(s0123);
+    let hi = _mm256_extracti128_si256(s0123, 1);
+    let total = _mm_add_epi32(lo, hi);
+    let b = _mm_loadu_si128(bias.as_ptr() as *const __m128i);
+    _mm_storeu_si128(output.as_mut_ptr() as *mut __m128i, _mm_add_epi32(total, b));
 }

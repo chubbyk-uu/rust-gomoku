@@ -1,7 +1,7 @@
 # Mix9svq NNUE 接入设计与可行性审查方案（`M3.2`）
 
-> 状态：已通过代码级可行性预审，待确认实施。
-> 基线：`master` `8563005`（已完成 P0、`M1.1`、`M2.3` `df-pn` VCT）。
+> 状态：阶段 1–3a 已在分支 `exp/m32-nnue-mix9svq`（`9f6b899`）实现并通过 300 局验收；**暂缓合入 `master`**，优先修复审计发现的 P0 缺陷并推进 P1 搜索剪枝/TT 优化。
+> 基线：`master` `8cc9dc7`（代码等价 `8563005`，已完成 P0、`M1.1`、`M2.3` `df-pn` VCT）。
 > 参考实现：[opponent/rapfi](file:///home/jerry/rust_ws/rust-gomoku/opponent/rapfi)（GPL-3.0）与 [opponent/rapfi-networks/mix9svq](file:///home/jerry/rust_ws/rust-gomoku/opponent/rapfi-networks/mix9svq)（权重 **CC0 公有领域**）。
 
 ---
@@ -92,3 +92,29 @@
 1. **零猜测、零黑盒**：权重已经过世界顶级五子棋引擎验证，阶段 1 用 Rapfi C++ 做逐层比特级对拍，不存在“调参调半天不知道是权重差还是代码错”的问题。
 2. **每一步都是长期资产**：纯 Rust LZ4、`Mix9svq` 版本栈累加器、AVX2/NEON 算子、Policy/Value 接口，后续哪怕用 5080 自训新权重也能 100% 复用。
 3. **快速失败闭环**：C++ 对拍（分钟级）→ 微基准 µs/eval（秒级）→ 40 局 smoke（~2 分钟）→ 300 局全量验收，任何问题都在几分钟内暴露，绝不浪费半小时跑必输局。
+
+---
+
+## 6. 阶段 1–3a 实测结果与暂缓合并前的审计清单（2026-11-23）
+
+### 6.1 已完成的 300 局中心开局验收（`exp/m32-nnue-mix9svq` `9f6b899` vs `master` `8563005`）
+
+| 赛制 | 战绩 (W-L-D) | 得分率 / Elo | 配对 Pentanomial | 备注 |
+| --- | :---: | :---: | :---: | --- |
+| Renju 限时 `1s/move`（100 局） | `79-21-0` | `79.0%` / `+230.2 Elo` | `WW=29, WL=21, LD=0, LL=0` | 0 错误 / 0 超时，均耗 `491.5ms` vs `463.3ms` |
+| Freestyle 限时 `1s/move`（100 局） | `71-28-1` | `71.5%` / `+159.8 Elo` | `WW=21, WD=1, WL=28, LD=0, LL=0` | 0 错误 / 0 超时，均耗 `491.0ms` vs `446.7ms` |
+| Renju 不限时 `d8/w40`（100 局） | `79-18-3` | `80.5%` / `+246.6 Elo` | `WW=29, WD=3, WL=18, LD=0, LL=0` | 其中 3 局 225 手满盘和棋重跑完赛，`nnue` 均耗 `4.21s` vs `master` `5.41s`，但双方单手长尾均达 `66–68s` |
+
+### 6.2 暂缓合并的原因与防返工修正后的修复路线（详见 [docs/optimization-roadmap.md](optimization-roadmap.md) 第 7 节）
+
+1. **P0（合并前必修 + 零风险提速，全部可比特级/节点级验证）**：
+   - `P0-1`：`src/search/root.rs:646` 覆盖 `alphabeta.config` 未触发 NNUE 重载，且 `load_nnue_for_config().ok()` 静默吞错；
+   - `P0-2`：`src/protocol/gomocup.rs` `INFO nnue_dir` 按空白切分导致带空格路径被截断；
+   - `P0-3`：NNUE Policy 排序抢跑在 `tt_best_move` 截断之前（推迟至 `index == 1`，100% 等价），且迭代加深每层入口都从空盘重放 `sync_with_board(board)`（改 LCP 增量同步）；顺带补齐标量 `evaluate_policy_moves` 仅算候选子集与 `evaluate_policy_avx2` 末层 `policy_dot16_avx2`；
+   - `P0-4`：`src/bin/case_probe.rs` 补齐 `--nnue-dir` / `RUST_GOMOKU_NNUE_DIR` 支持；
+   - `P0-5`：**提级 `AVX-VNNI`（`_mm256_dpbusd_epi32`）**：已实测 `rustc 1.96.0` 稳定版原生支持，~100 行代码、100% 比特级对齐、零搜索风险，直接为后续全部实验降耗 ~25%–40%。
+2. **P1（依赖顺序已校正：先 4-way TT 含 `static_eval`，再逐项消融现代剪枝）**：
+   - `P1-1`（前置）：**4-way 64B 对齐 NNUE TT（32-bit key tag + 96-bit 载荷，内置 `static_eval: i16` 与 `tt_pv`）+ 同 key 去重 + 世代替换 + 停写纯叶节点 + 修 `probe()` slot 1 瑕疵**（不破坏古典 `base` 13/13 diff）；
+   - `P1-2`：**逐项消融 LMP（`~107 Elo`）→ 战术保护下 NNUE 浅层 RFP（`~121 Elo`，复用 TT `static_eval`）→ 归一化 softmax Policy-LMR（`~59 Elo`）与移除 `running_downf` 跨层余数 / 延伸上限**；每项同时对照 `master`（`8563005`）与 `M3.2`（`9f6b899`）做 `case_probe` + 40 局 smoke + 100 局全测。
+3. **P2（实战与战术补齐）**：`P2-1` 解锁 `VCFM = 5` + Zobrist VCF TT + 证明集对手 VCF 过滤；`P2-2` 现代 `timectl` 与安全复用末层未完搜索；`P2-3` 多线程 ABDADA + NNUE 实测与去强屏障。
+4. **P3（全平台落地与后置大改）**：`P3-1` ARM64 NEON SIMD；`P3-2` 桌面 GUI（`src/bin/gomoku_gui.rs` / `src/app.rs`）与 Android JNI Bridge 接入 NNUE；`P3-3` 轻量迫着 `qsearch` 与剥离 `EvalCaches`（**已从 P1 降级**：核查发现 `EvalCaches` 深度耦合 movegen/Renju 禁手快筛且叶子古典点积仅 `~0.1 µs`，避免过早大改返工）；`P3-4` Rapfi/SlowRenju 外部标定与 CI 合成权重回归。

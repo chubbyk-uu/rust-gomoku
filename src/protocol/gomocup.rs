@@ -120,7 +120,8 @@ impl GomocupProtocol {
                 Vec::new()
             }
             "INFO" => {
-                self.handle_info(&parts[1..]);
+                let rest = raw[parts[0].len()..].trim_start();
+                self.handle_info(&parts[1..], rest);
                 Vec::new()
             }
             "TAKEBACK" => self.handle_takeback(&parts),
@@ -284,11 +285,35 @@ impl GomocupProtocol {
         self.search_move()
     }
 
-    fn handle_info(&mut self, args: &[&str]) {
-        if args.len() < 2 {
+    fn handle_info(&mut self, args: &[&str], raw_rest: &str) {
+        if args.is_empty() {
             return;
         }
         let key = args[0].to_ascii_lowercase();
+        if key == "nnue_dir" {
+            let raw_val = raw_rest.get(args[0].len()..).unwrap_or("").trim();
+            let unquoted = if raw_val.len() >= 2
+                && ((raw_val.starts_with('"') && raw_val.ends_with('"'))
+                    || (raw_val.starts_with('\'') && raw_val.ends_with('\'')))
+            {
+                &raw_val[1..raw_val.len() - 1]
+            } else {
+                raw_val
+            };
+            let trimmed = unquoted.trim();
+            if trimmed.is_empty() {
+                self.config.runtime.nnue_dir = None;
+                self.config.runtime.use_nnue = false;
+            } else {
+                self.config.runtime.nnue_dir = Some(trimmed.to_string());
+                self.config.runtime.use_nnue = true;
+            }
+            self.searcher = None;
+            return;
+        }
+        if args.len() < 2 {
+            return;
+        }
         let value = args[1];
         match key.as_str() {
             "timeout_turn" => {
@@ -379,17 +404,6 @@ impl GomocupProtocol {
                     self.config.runtime.use_nnue = parsed != 0;
                     self.searcher = None;
                 }
-            }
-            "nnue_dir" => {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    self.config.runtime.nnue_dir = None;
-                    self.config.runtime.use_nnue = false;
-                } else {
-                    self.config.runtime.nnue_dir = Some(trimmed.to_string());
-                    self.config.runtime.use_nnue = true;
-                }
-                self.searcher = None;
             }
             "vct_strict_and_memo_key" => {
                 if let Some(parsed) = parse_one::<i32>(value) {
@@ -742,5 +756,30 @@ mod tests {
             .unwrap()
             .tt
             .is_shared_with(&tt_explicit));
+    }
+
+    #[test]
+    fn gomocup_info_nnue_dir_preserves_spaces_and_quotes() {
+        let mut protocol = GomocupProtocol::default();
+        assert!(!protocol.config.runtime.use_nnue);
+        assert_eq!(protocol.config.runtime.nnue_dir, None);
+
+        protocol.handle_line("INFO nnue_dir /tmp/my weights/mix9svq dir");
+        assert!(protocol.config.runtime.use_nnue);
+        assert_eq!(
+            protocol.config.runtime.nnue_dir.as_deref(),
+            Some("/tmp/my weights/mix9svq dir")
+        );
+
+        protocol.handle_line("INFO nnue_dir \"C:\\Program Files\\Gomoku\\mix9svq\"");
+        assert!(protocol.config.runtime.use_nnue);
+        assert_eq!(
+            protocol.config.runtime.nnue_dir.as_deref(),
+            Some("C:\\Program Files\\Gomoku\\mix9svq")
+        );
+
+        protocol.handle_line("INFO nnue_dir");
+        assert!(!protocol.config.runtime.use_nnue);
+        assert_eq!(protocol.config.runtime.nnue_dir, None);
     }
 }

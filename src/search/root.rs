@@ -431,6 +431,10 @@ impl RootSearcher {
         }
     }
 
+    pub fn has_nnue(&self) -> bool {
+        self.alphabeta.has_nnue()
+    }
+
     pub(crate) fn take_worker_pool(&mut self) -> Option<SearchWorkerPool> {
         self.worker_pool.take()
     }
@@ -643,7 +647,7 @@ impl RootSearcher {
         let mut caches = EvalCaches::new();
         recompute_all_for_rule(board, &mut caches, self.config.rule_set);
 
-        self.alphabeta.config = self.config.clone();
+        self.alphabeta.sync_config(&self.config);
         let subply = self.config.runtime.threads > 1;
         self.tt.set_subply(subply);
         self.alphabeta.tt.set_subply(subply);
@@ -1534,5 +1538,45 @@ mod tests {
             searcher.verify_root_vct_move(&board, BLACK, xy_to_move(5, 7).unwrap());
         assert!(!accepted);
         assert_eq!(reason, Some("budget"));
+    }
+
+    #[test]
+    fn root_searcher_hot_reloads_nnue_on_config_mutation() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("opponent/rapfi-networks/mix9svq");
+        if !dir.is_dir() {
+            return;
+        }
+        let mut board = Board::new();
+        for (x, y) in [(7, 7), (8, 7), (7, 8), (6, 6)] {
+            board
+                .play_for_rule(xy_to_move(x, y).unwrap(), None, RuleSet::Freestyle)
+                .unwrap();
+        }
+        let limits = SearchLimits {
+            max_depth: 2,
+            root_width: 8,
+            ..SearchLimits::default()
+        };
+        let mut config = load_default_config();
+        config.rule_set = RuleSet::Freestyle;
+        let mut searcher = RootSearcher::new_for_limits(config, limits);
+        assert!(!searcher.has_nnue());
+
+        // Hot-enable NNUE on an existing RootSearcher
+        searcher.config.runtime.use_nnue = true;
+        searcher.config.runtime.nnue_dir = Some(dir.to_string_lossy().into_owned());
+        let _ = searcher.search(&mut board, Some(limits));
+        assert!(searcher.has_nnue());
+
+        // Hot-switch rule_set from Freestyle to Renju and reload Renju weights
+        searcher.config.rule_set = RuleSet::Renju;
+        let _ = searcher.search(&mut board, Some(limits));
+        assert!(searcher.has_nnue());
+
+        // Hot-disable NNUE
+        searcher.config.runtime.use_nnue = false;
+        let _ = searcher.search(&mut board, Some(limits));
+        assert!(!searcher.has_nnue());
     }
 }
