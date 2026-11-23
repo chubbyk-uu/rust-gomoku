@@ -750,6 +750,11 @@ pub(crate) struct MoveSet225 {
 
 impl MoveSet225 {
     #[inline]
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    #[inline]
     pub(crate) fn insert(&mut self, m: Move) -> bool {
         let idx = m as usize;
         if self.bits.contains(idx) {
@@ -768,6 +773,11 @@ impl MoveSet225 {
     #[inline]
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+
+    #[inline]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = Move> + '_ {
+        self.bits.iter_indices().map(|idx| idx as Move)
     }
 }
 
