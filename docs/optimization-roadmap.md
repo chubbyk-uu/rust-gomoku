@@ -318,17 +318,19 @@ flowchart TD
   - 位置：`src/nnue/simd.rs`、`src/nnue/mix9svq.rs`
   - 结果：运行时检测 `avxvnni`，拦截并避开 EVEX `_mm256_dpbusd_epi32` 的 `SIGILL` 陷阱，验证 `AVX-VNNI == AVX2 == Scalar` 100% 比特级一致；Release 微基准单叶评估从 **`2.84 µs → 1.93 µs`（提速 `1.47×` / `-32%`）**，`move+eval` 从 `2.86 µs → 1.96 µs`。
 
-### P1（最高收益性能与棋力突破 — 根治百手密盘 50–68s 长尾 & 对 `M3.2` 再涨 +100~200 Elo）
-- [ ] **`P1-1`（前置）4-way 64B 对齐 NNUE TT（含 `static_eval: i16` + `tt_pv`）+ 同 key 去重 + 世代替换 + 停写纯叶节点 + 修复 `probe()` 瑕疵**
+### P1（最高收益性能与棋力突破 — **第二批已完成并验证**）
+- [x] **`P1-1`（前置）4-way 64B 对齐 NNUE TT（含 `static_eval: i16` + `tt_pv`）+ 同 key 去重 + 世代替换 + 叶节点不驱逐内部节点 + 修复 `probe()` 瑕疵**
   - 位置：`src/search/tt.rs`、`src/search/alphabeta.rs`
-  - 设计要点：采用 `#[repr(C, align(64))]` 4×16B 桶；高 32 位 key 校验标签 + 96 位载荷（含 `value: i16`、`static_eval: i16`、`depth`、`flag`、`tt_pv`、`best_move`、`generation`）保留无锁 XOR 抗撕裂；古典 `base` 保持兼容确保 `run_diff.py` 13/13 零回归。
-- [ ] **`P1-2` 现代 NNUE 剪枝三件套（严格逐项消融，受第 5 节禁区约束）**
+  - 实测：`#[repr(C, align(64))]` 4×16B 桶（64-bit XOR key 校验 + 64-bit 载荷，完整保留 64-bit key 零截断且与 2-way 同内存占幅）；单开 `P1-1` 即令 `case22_ply109` 从 `19.96M / 47.90s` 降至 `14.88M / 33.95s`（`-29.1%`）；古典 `base` 走原 2-way 路径，`run_diff.py` 13/13 零回归。
+- [x] **`P1-2` 现代 NNUE 剪枝三件套（PV 安全 LMP + 战术保护 RFP + 归一化 Policy-LMR）**
   - 位置：`src/search/alphabeta.rs`
-  - 消融顺序（每项单独过 `case_probe` 5 秒检验 + 40 局 `1s/move` vs `M3.2`）：
-    1. **安全 Move Count Pruning（LMP，Rapfi `~107 Elo`）**：`!root && !single_forcing && !hostile_threat && best_value > -WIN` 时按深度限制安静着展开数，直接斩断 `d8/w40` 百手密盘 9,455 万节点爆炸；
-    2. **NNUE 浅层 RFP（Reverse Futility Pruning，Rapfi `~121 Elo`）**：利用 `P1-1` 缓存的 `static_eval`，在 `!pv && !single_forcing && !hostile_threat && depth <= 4` 且 `eval - margin(depth, improving) >= beta` 时直接截断（配合 `Mix9svq` 懒 `MoveCache`，截断同时省去 `play_move` 与 `evaluate_value`）；
-    3. **归一化 Policy-LMR（Rapfi `~59 Elo`）+ 去掉跨层 `running_downf` 余数 + `extend_ratio` 延伸上限**：用 softmax / 相对 logit 概率与对数深度表驱动 LMR（fail-high 全深重搜），彻底消除 `running_downf` 跨路径 TT 污染，并解锁 1T 统一深度 TT 命中率；
-    4. **按需增量消融**：浅层 Razoring / Fail-High Reduction / Singular Extension（仅在验证对 `M3.2` 稳定净胜时保留）。
+  - 最终调优配置（`P1b`）：仅在 `use_nnue` 路径生效；非 PV 浅层 LMP（`d <= 4.0` 对应 `6/10/15/22`，保护迫着/活三威胁及无非败手情况）、战术保护浅层 RFP（`!is_pv && depth <= 3.0`, `margin = 135 * d`，复用 TT `static_eval`）、平移不变 Policy-LMR（`gap = p_max - p_i > 1.5`，fail-high 全深重搜）。
+  - 验收数据（`center_50_prefixes.jsonl`，100 局/组，`--jobs 16 --reuse-engine-state`）：
+    - **vs `P0`（`e68d198`）Renju `1s/move`**：**`59-39-2` (`60.0%`, `+70.44 Elo`, 95% CI `[+27.8, +115.2]`, `WW=10, WD=1, WL/DD=38, LD=1, LL=0`)**，中位单手 `83.3ms` vs `390.0ms`（快 `4.68×`），0 错误 / 0 超时；
+    - **vs `master` Renju `1s/move`**（初版 `P1`）：**`84-15-1` (`84.5%`, `+294.6 Elo`, `WW=34, WD=1, WL=15, LD=0, LL=0`)**，均耗 `453.7ms` 反超古典 `master`（`469.2ms`）；
+    - **vs `master` Renju 不限时 `d8/w40`**（`P1b`）：**`77-20-2` (`78.57%`, `+225.7 Elo`, `WW=27, WD=2, WL=20, LD=0, LL=0` 零败对)**，均耗 **`630.6ms`** vs `master` `1631.4ms`（比 `master` 快 **`2.59×`**，比 `M3.2` 快 **`3.36×`**），`p95` `2.67s` vs `6.90s`，`max` `15.6s` vs `40.9s`；
+    - **vs `P0` Freestyle `1s/move`**：**`50-42-8` (`54.0%`, `+27.85 Elo`, `WW=4, WD=7, LD=1, LL=3`)**，0 错误 / 0 超时。
+  - 后续可选增量消融：去掉跨层 `running_downf` 余数 + `extend_ratio` 延伸上限、浅层 Razoring / Singular Extension。
 
 ### P2（实战与战术能力短板 — 长杀深度、局时赛与多线程）
 - [ ] **`P2-1` 解锁 VCF 深度上限（移除 `VCFM = 5`）+ Zobrist VCF TT + 证明集对手 VCF 过滤**

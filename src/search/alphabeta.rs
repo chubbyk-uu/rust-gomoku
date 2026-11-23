@@ -20,7 +20,7 @@ use crate::search::ordering::{
     order_candidates_owned, order_candidates_primary_owned, order_candidates_primary_slice,
     resolve_candidate_tie_group,
 };
-use crate::search::tt::TTTableView;
+use crate::search::tt::{TTEntry4, TTTableView, TTTableView4, TT_VALUE_NONE};
 use crate::search::{order_candidates_root_classic, TTEntry, TranspositionTable};
 use crate::threats::VCFSearcher;
 use crate::types::{Move, Side};
@@ -348,6 +348,11 @@ impl AlphaBetaSearcher {
         self.tt.set_subply(self.config.runtime.threads > 1);
         let tt = self.tt.clone();
         let tt_view = tt.view();
+        let tt_view4 = if self.nnue.is_some() {
+            tt.view4()
+        } else {
+            None
+        };
         if let Some(nnue) = self.nnue.as_mut() {
             nnue.sync_with_board(board);
         }
@@ -366,6 +371,7 @@ impl AlphaBetaSearcher {
             None,
             abdada,
             tt_view,
+            tt_view4,
         )
     }
 
@@ -385,6 +391,7 @@ impl AlphaBetaSearcher {
         pending_cache: Option<((usize, usize), &mut Option<EvalSnapshot>)>,
         abdada: Option<&AbdadaContext>,
         tt_view: TTTableView<'_>,
+        tt_view4: Option<TTTableView4<'_>>,
     ) -> (i32, Option<Move>) {
         let root_depth = options.root_depth.unwrap_or(depth);
         let priority_base = options.priority_base.unwrap_or(board.move_count() as i32);
@@ -480,29 +487,77 @@ impl AlphaBetaSearcher {
 
         // Stored depths round down. Round the requirement up so a leaf never
         // cuts off a positive-depth search, even after fractional reductions.
-        let probe = tt_view.probe(
-            board.zobrist_key(),
-            probe_depth,
-            score_to_tt(alpha, options.ply),
-            score_to_tt(beta, options.ply),
-        );
-        if let Some(best_move_hint) = probe.best_move_hint {
+        let is_pv = beta - alpha > 1;
+        let (
+            probe_hit,
+            probe_value,
+            probe_tt_value,
+            probe_tt_flag,
+            probe_best_move,
+            probe_best_move_hint,
+            probe_has_window,
+            probe_window_alpha,
+            probe_window_beta,
+            mut tt_static_eval,
+            tt_was_pv,
+        ) = if let Some(tt4) = tt_view4 {
+            let p4 = tt4.probe(
+                board.zobrist_key(),
+                probe_depth,
+                score_to_tt(alpha, options.ply),
+                score_to_tt(beta, options.ply),
+            );
+            (
+                p4.hit,
+                p4.value,
+                p4.tt_value,
+                p4.tt_flag,
+                p4.best_move,
+                p4.best_move_hint,
+                p4.has_window,
+                p4.window_alpha,
+                p4.window_beta,
+                p4.static_eval,
+                p4.tt_pv,
+            )
+        } else {
+            let p2 = tt_view.probe(
+                board.zobrist_key(),
+                probe_depth,
+                score_to_tt(alpha, options.ply),
+                score_to_tt(beta, options.ply),
+            );
+            (
+                p2.hit,
+                p2.value,
+                None,
+                0,
+                p2.best_move,
+                p2.best_move_hint,
+                p2.has_window,
+                p2.window_alpha,
+                p2.window_beta,
+                None,
+                false,
+            )
+        };
+        if let Some(best_move_hint) = probe_best_move_hint {
             if best_move_hint.generation == self.tt_generation {
                 stats.tt_bestmove_current_generation += 1;
             } else {
                 stats.tt_bestmove_old_generation += 1;
             }
         }
-        if !root_restricted && probe.hit && probe.value.is_some() {
+        if !root_restricted && probe_hit && probe_value.is_some() {
             stats.tt_hits += 1;
             return (
-                score_from_tt(probe.value.expect("checked above"), options.ply),
-                probe.best_move,
+                score_from_tt(probe_value.expect("checked above"), options.ply),
+                probe_best_move,
             );
         }
-        if probe.has_window && !options.root {
-            alpha = alpha.max(score_from_tt(probe.window_alpha, options.ply));
-            beta = beta.min(score_from_tt(probe.window_beta, options.ply));
+        if probe_has_window && !options.root {
+            alpha = alpha.max(score_from_tt(probe_window_alpha, options.ply));
+            beta = beta.min(score_from_tt(probe_window_beta, options.ply));
         }
 
         if let Some(((mx, my), snapshot_slot)) = pending_cache {
@@ -516,22 +571,37 @@ impl AlphaBetaSearcher {
             stats.leaf_nodes += 1;
             let mut score =
                 (-evaluate_board(board, caches, -side, options.opo, &self.config)) as i32;
+            let mut leaf_static_eval = TT_VALUE_NONE;
             if score >= WIN {
                 score = INF - options.ply;
             } else if score <= -WIN {
                 score = -INF + options.ply;
             } else if let Some(nnue) = self.nnue.as_mut() {
-                score = nnue.evaluate_value(side);
+                score = tt_static_eval.unwrap_or_else(|| nnue.evaluate_value(side));
+                leaf_static_eval = score;
             }
-            tt_view.store(TTEntry {
-                key: board.zobrist_key(),
-                value: score_to_tt(score, options.ply),
-                flag: HASHF_EXACT,
-                depth: 0,
-                priority: priority_base * 10,
-                best_move: None,
-                generation: self.tt_generation,
-            });
+            if let Some(tt4) = tt_view4 {
+                tt4.store(TTEntry4 {
+                    key: board.zobrist_key(),
+                    value: score_to_tt(score, options.ply),
+                    static_eval: leaf_static_eval,
+                    flag: HASHF_EXACT,
+                    depth: 0,
+                    best_move: None,
+                    tt_pv: is_pv || tt_was_pv,
+                    generation: self.tt_generation,
+                });
+            } else {
+                tt_view.store(TTEntry {
+                    key: board.zobrist_key(),
+                    value: score_to_tt(score, options.ply),
+                    flag: HASHF_EXACT,
+                    depth: 0,
+                    priority: priority_base * 10,
+                    best_move: None,
+                    generation: self.tt_generation,
+                });
+            }
             return (score, None);
         }
 
@@ -539,9 +609,9 @@ impl AlphaBetaSearcher {
             options
                 .root_preferred_move
                 .filter(|move_| allowed.contains(move_))
-                .or_else(|| probe.best_move.filter(|move_| allowed.contains(move_)))
+                .or_else(|| probe_best_move.filter(|move_| allowed.contains(move_)))
         } else {
-            probe.best_move
+            probe_best_move
         };
 
         let generated = generate_candidates_with_coverage_scratch(
@@ -558,6 +628,60 @@ impl AlphaBetaSearcher {
         );
         let win_priority = generated.win_priority;
         let single_forcing = generated.single_forcing;
+        let hostile_threat = generated.hostile_threat;
+
+        // Tactically-guarded NNUE Reverse Futility Pruning (RFP):
+        // At shallow non-PV quiet nodes with no immediate win/forcing/open-3
+        // threat, if the NNUE static evaluation (cached in 4-way TT) exceeds
+        // beta by a generous depth-scaled margin, cut off without expanding
+        // wide candidates.
+        if let (Some(tt4), Some(nnue)) = (tt_view4, self.nnue.as_mut()) {
+            if !options.root
+                && !is_pv
+                && !win_priority
+                && !single_forcing
+                && !hostile_threat
+                && depth > 0.0
+                && depth <= 3.0
+                && beta > -WIN
+                && beta < WIN
+            {
+                let raw_eval = match tt_static_eval {
+                    Some(ev) => ev,
+                    None => {
+                        let ev = nnue.evaluate_value(side);
+                        tt_static_eval = Some(ev);
+                        tt4.store(TTEntry4 {
+                            key: board.zobrist_key(),
+                            value: TT_VALUE_NONE,
+                            static_eval: ev,
+                            flag: crate::constants::HASHF_EMPTY,
+                            depth: 0,
+                            best_move: None,
+                            tt_pv: tt_was_pv,
+                            generation: self.tt_generation,
+                        });
+                        ev
+                    }
+                };
+                let mut eval = raw_eval;
+                if let Some(tt_val) = probe_tt_value {
+                    let adj = score_from_tt(tt_val, options.ply);
+                    if adj.abs() < WIN
+                        && (probe_tt_flag == HASHF_EXACT
+                            || (probe_tt_flag == HASHF_BETA && adj > eval)
+                            || (probe_tt_flag == HASHF_ALPHA && adj < eval))
+                    {
+                        eval = adj;
+                    }
+                }
+                let rfp_margin = (135.0 * depth).round() as i32;
+                if eval < WIN && eval - rfp_margin >= beta {
+                    return (eval, None);
+                }
+            }
+        }
+
         let lazy_tie_ordering = !options.root && !self.config.runtime.nonroot_vcf;
         let mut rest_primary_sorted = true;
         let mut policy_rest_sorted = true;
@@ -720,6 +844,30 @@ impl AlphaBetaSearcher {
         } else {
             raw_depthdown
         };
+        let mut policy_top_logit = f64::NEG_INFINITY;
+        if use_nnue_policy && policy_rest_sorted && !ordered.is_empty() {
+            policy_top_logit = ordered[0].order_score;
+        }
+        let nnue_lmp_limit = if self.nnue.is_some()
+            && !options.root
+            && !is_pv
+            && !win_priority
+            && !single_forcing
+            && !hostile_threat
+            && depth <= 4.0
+        {
+            if depth <= 1.0 {
+                6
+            } else if depth <= 2.0 {
+                10
+            } else if depth <= 3.0 {
+                15
+            } else {
+                22
+            }
+        } else {
+            usize::MAX
+        };
         let use_abdada = abdada.is_some() && depth >= ABDADA_MIN_DEPTH && search_limit > 1;
 
         #[derive(Clone, Copy)]
@@ -768,6 +916,9 @@ impl AlphaBetaSearcher {
                             c.order_score = f64::from(score_buf[i]);
                         }
                         rest.sort_by(|a, b| b.order_score.total_cmp(&a.order_score));
+                        if let Some(first) = rest.first() {
+                            policy_top_logit = first.order_score;
+                        }
                         policy_rest_sorted = true;
                     }
                     if !rest_primary_sorted && index == 1 {
@@ -784,6 +935,16 @@ impl AlphaBetaSearcher {
                         );
                     }
                     let candidate = ordered[index];
+                    // Safe Move Count Pruning (LMP) for quiet non-forcing NNUE
+                    // tail moves once at least one non-losing move is found.
+                    if index >= nnue_lmp_limit
+                        && has_score
+                        && current > -WIN
+                        && candidate.self_attack < 4
+                        && candidate.opp_attack < 4
+                    {
+                        continue;
+                    }
                     running_downf += index as i32;
                     let mut local_downf = running_downf;
                     let mut depthdown = base_depthdown;
@@ -794,6 +955,26 @@ impl AlphaBetaSearcher {
                         local_downf %= 15;
                     }
                     running_downf = local_downf;
+                    // Shift-invariant Policy-guided LMR for low-probability
+                    // quiet tail moves (re-searched at full depth on fail-high).
+                    if use_nnue_policy
+                        && index >= 2
+                        && !hostile_threat
+                        && candidate.self_attack < 4
+                        && candidate.opp_attack < 4
+                        && policy_top_logit.is_finite()
+                    {
+                        let gap = (policy_top_logit - candidate.order_score).max(0.0);
+                        if gap > 1.5 {
+                            let scale = if is_pv { 0.18 } else { 0.35 };
+                            let extra = (scale * (gap - 1.5)).min(2.5);
+                            let extra_plies = extra.floor() as i32;
+                            if extra_plies > 0 {
+                                depthdown += f64::from(extra_plies);
+                                net += extra_plies;
+                            }
+                        }
+                    }
                     (index, candidate, local_downf, depthdown, net)
                 } else {
                     let wid = abdada.map_or(0, |ctx| ctx.worker_id);
@@ -871,7 +1052,11 @@ impl AlphaBetaSearcher {
                 board
                     .play_assuming_rule_legal(candidate.move_, Some(side), self.config.rule_set)
                     .expect("ordered candidate stays legal");
-                tt_view.prefetch(board.zobrist_key());
+                if let Some(tt4) = tt_view4 {
+                    tt4.prefetch(board.zobrist_key());
+                } else {
+                    tt_view.prefetch(board.zobrist_key());
+                }
                 coverage.add_move(candidate.move_);
                 if let Some(nnue) = self.nnue.as_mut() {
                     nnue.before_move(side, mx, my);
@@ -923,6 +1108,7 @@ impl AlphaBetaSearcher {
                             Some(((mx, my), &mut candidate_snapshot)),
                             abdada,
                             tt_view,
+                            tt_view4,
                         );
                         if let Some(start) = narrow_start {
                             profile_zero_window_nodes +=
@@ -951,6 +1137,7 @@ impl AlphaBetaSearcher {
                                 Some(((mx, my), &mut candidate_snapshot)),
                                 abdada,
                                 tt_view,
+                                tt_view4,
                             );
                             if let Some(start) = full_start {
                                 profile_full_window_nodes +=
@@ -981,6 +1168,7 @@ impl AlphaBetaSearcher {
                             Some(((mx, my), &mut candidate_snapshot)),
                             abdada,
                             tt_view,
+                            tt_view4,
                         );
                         if let Some(start) = full_start {
                             profile_full_window_nodes +=
@@ -1134,19 +1322,32 @@ impl AlphaBetaSearcher {
                 hash_flag = HASHF_EXACT;
                 store_depth += if subply_tt { SUBPLY_TT_WIN_BONUS } else { 10 };
             }
-            tt_view.store(TTEntry {
-                key: board.zobrist_key(),
-                value: score_to_tt(current, options.ply),
-                flag: hash_flag,
-                depth: store_depth,
-                priority: if subply_tt {
-                    priority_base * 256 + hash_depth
-                } else {
-                    priority_base * 10 + hash_depth
-                },
-                best_move,
-                generation: self.tt_generation,
-            });
+            if let Some(tt4) = tt_view4 {
+                tt4.store(TTEntry4 {
+                    key: board.zobrist_key(),
+                    value: score_to_tt(current, options.ply),
+                    static_eval: tt_static_eval.unwrap_or(TT_VALUE_NONE),
+                    flag: hash_flag,
+                    depth: store_depth,
+                    best_move,
+                    tt_pv: is_pv || tt_was_pv,
+                    generation: self.tt_generation,
+                });
+            } else {
+                tt_view.store(TTEntry {
+                    key: board.zobrist_key(),
+                    value: score_to_tt(current, options.ply),
+                    flag: hash_flag,
+                    depth: store_depth,
+                    priority: if subply_tt {
+                        priority_base * 256 + hash_depth
+                    } else {
+                        priority_base * 10 + hash_depth
+                    },
+                    best_move,
+                    generation: self.tt_generation,
+                });
+            }
         }
         (current, best_move)
     }

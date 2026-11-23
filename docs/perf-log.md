@@ -1184,3 +1184,37 @@ Verification & A/B benchmarks (release build vs `master` `8563005`):
 Decision:
 
 - `M3.2` (`Mix9svq` Value + Policy + AVX2) delivers a massive `+160` to `+250+ Elo` leap across BOTH Renju & Freestyle and BOTH untimed `d8/w40` & timed `1s/move` with zero lost pairs. Ready for merge to `master` upon user approval; next follow-ups are Policy-guided LMR / 4-way TT (to make `d8/w40` even faster than classical `master`) and ARM64 NEON SIMD for Android.
+
+### 2026-11-23 (2): `P0` (`AVX-VNNI` + Lazy Policy + LCP board sync) & `P1` (4-way 64B TT + PV-safe LMP + RFP + Policy-LMR) (`exp/m32-nnue-mix9svq`)
+
+Hotspot evidence & target:
+
+- On 100-game Renju untimed `d8/w40`, `M3.2` (`9f6b899`) beat `master` `79-18-3` (`80.5%`, `LD=0, LL=0`), but dense 100+ ply endgames still exploded (`case22_ply109`: `19.96M` nodes / `47.9s`; `case22_ply114`: `43.48M` nodes / `87.0s` NNUE vs `94.56M` / `58.1s` classical `master`), averaging `2121 ms/move` vs `master` `1561 ms/move`.
+- Target: eliminate eager Policy waste & repeated full-board replays (`P0`), accelerate NNUE inference via VEX `AVX-VNNI`, upgrade the NNUE TT to a 64B-aligned 4-way table caching `static_eval`, and add tactically-guarded modern pruning (`LMP + RFP + shift-invariant Policy-LMR`) to both beat `P0` significantly in `1s/move` AND beat classical `master` in `d8/w40` wall time.
+
+Modification scope:
+
+- **`P0` (`e68d198`)**:
+  - `src/search/alphabeta.rs` & `src/search/root.rs`: `sync_config` hot-reloads NNUE when `(use_nnue, nnue_dir, rule_set)` changes with explicit load-failure warnings; deferred `evaluate_policy_moves()` until `index == 1` using `rotate_right(1)` (100% search-tree equivalent to eager Policy).
+  - `src/protocol/gomocup.rs`: preserve full unquoted paths with spaces in `INFO nnue_dir`.
+  - `src/bin/case_probe.rs`: added `--nnue-dir` / `--no-nnue` / `RUST_GOMOKU_NNUE_DIR` + `trace.nnue_active`.
+  - `src/nnue/simd.rs` & `src/nnue/mix9svq.rs`: added runtime-detected VEX `AVX-VNNI` (`_mm256_dpbusd_avx_epi32`, avoiding EVEX `SIGILL` on non-AVX512 CPUs) with precomputed `signed_bias` for `star_block.down`; added LCP incremental `sync_with_board`; fixed scalar `evaluate_policy_moves` & AVX2 `policy_dot16_avx2`.
+- **`P1` (`P1-1 + P1-2`, `P1b`)**:
+  - `src/search/tt.rs`: added `#[repr(C, align(64))]` 4-way `TTBucket4` (4 × 16B, full 64-bit XOR key check + 64-bit payload storing `value`, `static_eval: i16`, `depth`, `best_move`, `flag`, `tt_pv`, `generation`) at identical memory footprint; same-key dedup preserving `best_move`/`static_eval` and deeper bounds; depth-0 entries never evict current-gen `depth > 0` slots; classical `use_nnue = false` keeps the 2-way path 100% untouched.
+  - `src/search/alphabeta.rs`: wired `TTTableView4` + leaf `static_eval` reuse + tactically-guarded non-PV RFP (`depth <= 3.0`, `margin = 135 * d`), PV-safe non-PV LMP (`d <= 4.0`: `6/10/15/22`, guarded by `!win_priority && !single_forcing && !hostile_threat && current > -WIN && self_attack < 4 && opp_attack < 4`), and shift-invariant Policy-LMR (`gap = p_max - p_i > 1.5`, full-depth re-search on fail-high).
+
+Verification & A/B benchmarks:
+
+- Microbenchmark (Release): `AVX2 eval = 2.84 us -> AVX-VNNI eval = 1.93 us` (**`1.47x` / `-32.0%`**); `AVX-VNNI == AVX2 == Scalar` bit-identical; `cargo fmt --check`, `git diff --check`, full `cargo test` (zero warnings), `android/rust_bridge` 6/6, and `run_diff.py --profile all --check-baselines --jobs 8` (**13/13 passed**).
+- Single-move slow probe (`case_probe --nnue-dir`, `d8/w40` Renju):
+  - `case22_ply109`: `P0` `19.96M` / `47.90s` → `P1-1` (4-way TT only) `14.88M` / `33.95s` (`-29.1%`) → `P1-1+P1-2` `1.07M` / `3.15s` (**`15.2x` faster**).
+  - `case22_ply114`: `P0` `43.48M` / `87.03s` (classical `master`: `94.56M` / `58.09s`) → `P1-1+P1-2` `16.04M` / `32.51s` (**`2.68x` faster than `P0`, `1.79x` faster than `master`**).
+- 100-game center-opening matches (`center_50_prefixes.jsonl`, `--jobs 16 --reuse-engine-state`):
+  - **`P1b` vs `P0` (`e68d198`) Renju `1s/move`**: **`59-39-2` (`60.0%`, `+70.44 Elo`, 95% CI `[+27.84, +115.24]`, `WW=10, WD=1, WL/DD=38, LD=1, LL=0`)**, `0` errors / `0` timeouts; median **`83.3 ms`** vs `390.0 ms` (**`4.68x` faster median**).
+  - **`P1` vs `P0` (`e68d198`) Freestyle `1s/move`**: **`50-42-8` (`54.0%`, `+27.85 Elo`, `WW=4, WD=7, WL/DD=35, LD=1, LL=3`)**, `0` errors / `0` timeouts.
+  - **`P1` vs `master` Renju `1s/move`**: **`84-15-1` (`84.5%`, `+294.61 Elo`, 95% CI `[+216.3, +409.5]`, `WW=34, WD=1, WL/DD=15, LD=0, LL=0`)**, `0` errors / `0` timeouts; avg **`453.7 ms`** / med **`8.0 ms`** (faster than classical `master` `469.2 ms` / `17.8 ms`).
+  - **`P1b` vs `master` Renju untimed `d8/w40`**: **`77-20-2` (`78.57%`, `+225.71 Elo`, `WW=27, WD=2, WL/DD=20, LD=0, LL=0`)** (+ 1 `master`-driven 900s timeout on `case=37` where `P1b` max move was only `15.6s` vs `master` `40.9s`); avg **`630.6 ms`** vs `master` `1631.4 ms` (**`2.59x` faster than `master`, `3.36x` faster than `M3.2`**), p95 **`2675 ms`** vs `6902 ms`, max **`15.6s`** vs `40.9s`.
+
+Decision:
+
+- `P0 + P1b` achieves a massive dual-mode win: `+70.4 Elo` over `P0` in `1s/move` Renju (`LL=0`), `+27.9 Elo` over `P0` in `1s/move` Freestyle, `+295 Elo` over `master` in `1s/move`, and `78.57%` (`LD=0, LL=0`) while running **`2.59x` faster than classical `master`** in fixed-depth `d8/w40`. Ready for merge or next step (`P2`: VCF depth unlock + Zobrist TT, `timectl`, MT ABDADA + NNUE).
