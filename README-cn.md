@@ -179,6 +179,8 @@ target/release/gomocup_engine --tt-bits 22
 - `INFO compute_vct 0|1`
 - `INFO root_vct_depth N`
 - `INFO vct_use_dfpn 0|1`
+- `INFO use_nnue 0|1`
+- `INFO nnue_dir PATH`（指向 Rapfi CC0 `mix9svq*.bin.lz4` 权重目录；亦支持 CLI `--nnue-dir PATH` 或环境变量 `RUST_GOMOKU_NNUE_DIR`）
 - `INFO vct_strict_and_memo_key 0|1`
 - `INFO nonroot_vcf 0|1`
 - `INFO overlap_vct_alphabeta 0|1`

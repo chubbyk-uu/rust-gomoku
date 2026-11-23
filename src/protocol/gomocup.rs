@@ -374,6 +374,23 @@ impl GomocupProtocol {
                     self.searcher = None;
                 }
             }
+            "use_nnue" => {
+                if let Some(parsed) = parse_one::<i32>(value) {
+                    self.config.runtime.use_nnue = parsed != 0;
+                    self.searcher = None;
+                }
+            }
+            "nnue_dir" => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    self.config.runtime.nnue_dir = None;
+                    self.config.runtime.use_nnue = false;
+                } else {
+                    self.config.runtime.nnue_dir = Some(trimmed.to_string());
+                    self.config.runtime.use_nnue = true;
+                }
+                self.searcher = None;
+            }
             "vct_strict_and_memo_key" => {
                 if let Some(parsed) = parse_one::<i32>(value) {
                     self.config.runtime.vct_strict_and_memo_key = parsed != 0;

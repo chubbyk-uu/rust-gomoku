@@ -11,6 +11,7 @@ use crate::board::{move_to_xy, Board};
 use crate::config::EngineConfig;
 use crate::constants::{BOARD_AREA, HASHF_ALPHA, HASHF_BETA, HASHF_EXACT, INF, WIN};
 use crate::eval::{evaluate_board, value_wide_compute_for_rule, EvalCaches, EvalSnapshot};
+use crate::nnue::{load_mix9svq_evaluator_for_rule, Mix9svqEvaluator};
 use crate::search::abdada::{AbdadaContext, ABDADA_MIN_DEPTH};
 use crate::search::movegen::{
     generate_candidates_with_coverage_scratch, Candidate, CoverageTracker, MoveAnalysis,
@@ -210,29 +211,42 @@ pub struct AlphaBetaSearcher {
     pub vcf: VCFSearcher,
     tt_generation: u16,
     movegen_scratch: MoveAnalysis,
+    nnue: Option<Mix9svqEvaluator>,
+}
+
+fn load_nnue_for_config(config: &EngineConfig) -> Option<Mix9svqEvaluator> {
+    if !config.runtime.use_nnue {
+        return None;
+    }
+    let dir = config.runtime.nnue_dir.as_deref()?;
+    load_mix9svq_evaluator_for_rule(std::path::Path::new(dir), config.rule_set).ok()
 }
 
 impl AlphaBetaSearcher {
     pub fn new(config: EngineConfig) -> Self {
         let mut tt = TranspositionTable::default();
         tt.set_subply(config.runtime.threads > 1);
+        let nnue = load_nnue_for_config(&config);
         Self {
             config,
             tt,
             vcf: VCFSearcher::default(),
             tt_generation: 0,
             movegen_scratch: MoveAnalysis::new(),
+            nnue,
         }
     }
 
     pub fn with_tt(config: EngineConfig, mut tt: TranspositionTable) -> Self {
         tt.set_subply(config.runtime.threads > 1);
+        let nnue = load_nnue_for_config(&config);
         Self {
             config,
             tt,
             vcf: VCFSearcher::default(),
             tt_generation: 0,
             movegen_scratch: MoveAnalysis::new(),
+            nnue,
         }
     }
 
@@ -257,8 +271,14 @@ impl AlphaBetaSearcher {
         tt: &TranspositionTable,
         tt_generation: u16,
     ) {
+        let nnue_changed = self.config.runtime.use_nnue != config.runtime.use_nnue
+            || self.config.runtime.nnue_dir != config.runtime.nnue_dir
+            || self.config.rule_set != config.rule_set;
         if self.config != *config {
             self.config = config.clone();
+        }
+        if nnue_changed {
+            self.nnue = load_nnue_for_config(&self.config);
         }
         if !self.tt.is_shared_with(tt) || self.tt.is_subply() != tt.is_subply() {
             self.tt = tt.clone();
@@ -306,6 +326,9 @@ impl AlphaBetaSearcher {
         self.tt.set_subply(self.config.runtime.threads > 1);
         let tt = self.tt.clone();
         let tt_view = tt.view();
+        if let Some(nnue) = self.nnue.as_mut() {
+            nnue.sync_with_board(board);
+        }
         let mut coverage = CoverageTracker::from_board(board);
         self.search_with_coverage(
             board,
@@ -475,6 +498,8 @@ impl AlphaBetaSearcher {
                 score = INF - options.ply;
             } else if score <= -WIN {
                 score = -INF + options.ply;
+            } else if let Some(nnue) = self.nnue.as_mut() {
+                score = nnue.evaluate_value(side);
             }
             tt_view.store(TTEntry {
                 key: board.zobrist_key(),
@@ -513,7 +538,33 @@ impl AlphaBetaSearcher {
         let single_forcing = generated.single_forcing;
         let lazy_tie_ordering = !options.root && !self.config.runtime.nonroot_vcf;
         let mut rest_primary_sorted = true;
-        let mut ordered = if options.root {
+        let use_nnue_policy = self.nnue.is_some()
+            && !win_priority
+            && !single_forcing
+            && generated.candidates.len() > 1
+            && (options.root || depth >= 2.0);
+        let mut ordered = if use_nnue_policy {
+            let mut candidates = generated.candidates;
+            let n = candidates.len();
+            let mut move_buf = [0_u16; BOARD_AREA];
+            let mut score_buf = [0.0_f32; BOARD_AREA];
+            for (i, c) in candidates.iter().enumerate() {
+                move_buf[i] = c.move_;
+            }
+            if let Some(nnue) = self.nnue.as_mut() {
+                nnue.evaluate_policy_moves(side, &move_buf[..n], &mut score_buf[..n]);
+            }
+            for (i, c) in candidates.iter_mut().enumerate() {
+                c.order_score = f64::from(score_buf[i]);
+            }
+            candidates.sort_by(|a, b| {
+                let a_tt = Some(a.move_) == tt_best_move;
+                let b_tt = Some(b.move_) == tt_best_move;
+                b_tt.cmp(&a_tt)
+                    .then_with(|| b.order_score.total_cmp(&a.order_score))
+            });
+            candidates
+        } else if options.root {
             order_candidates_root_classic(board, &generated.candidates, side)
         } else if lazy_tie_ordering {
             let mut candidates = generated.candidates;
@@ -534,7 +585,7 @@ impl AlphaBetaSearcher {
         } else {
             order_candidates_owned(board, generated.candidates, side, tt_best_move)
         };
-        let mut tie_sorted_until = if !lazy_tie_ordering {
+        let mut tie_sorted_until = if use_nnue_policy || !lazy_tie_ordering {
             ordered.len()
         } else if !rest_primary_sorted {
             1
@@ -774,19 +825,24 @@ impl AlphaBetaSearcher {
                     .expect("ordered candidate stays legal");
                 tt_view.prefetch(board.zobrist_key());
                 coverage.add_move(candidate.move_);
+                if let Some(nnue) = self.nnue.as_mut() {
+                    nnue.before_move(side, mx, my);
+                }
 
                 let mut atdown = 0_i32;
-                if candidate.self_attack == 4 {
-                    atdown = self.config.search.atdown4 as i32;
-                } else if candidate.self_attack == 3 {
-                    atdown = self.config.search.atdown3 as i32;
-                }
-                if options.root {
-                    let (x, y) =
-                        move_to_xy(candidate.move_).expect("ordered candidate stays in range");
-                    let h = x.min(y).min(board.size() - 1 - x).min(board.size() - 1 - y);
-                    let is_corner = pre_corner || h <= 1 || (h == 2 && pre_half >= 1);
-                    atdown += rootbonus(board, x, y, is_corner);
+                if self.nnue.is_none() {
+                    if candidate.self_attack == 4 {
+                        atdown = self.config.search.atdown4 as i32;
+                    } else if candidate.self_attack == 3 {
+                        atdown = self.config.search.atdown3 as i32;
+                    }
+                    if options.root {
+                        let (x, y) =
+                            move_to_xy(candidate.move_).expect("ordered candidate stays in range");
+                        let h = x.min(y).min(board.size() - 1 - x).min(board.size() - 1 - y);
+                        let is_corner = pre_corner || h <= 1 || (h == 2 && pre_half >= 1);
+                        atdown += rootbonus(board, x, y, is_corner);
+                    }
                 }
 
                 let mut attempt_depth = depth - depthdown;
@@ -904,6 +960,9 @@ impl AlphaBetaSearcher {
                 }
 
                 board.undo().expect("ordered candidate was just played");
+                if let Some(nnue) = self.nnue.as_mut() {
+                    nnue.after_undo(side, mx, my);
+                }
                 coverage.remove_move(candidate.move_);
                 if let Some(snapshot) = candidate_snapshot {
                     caches.restore_snapshot(&snapshot);

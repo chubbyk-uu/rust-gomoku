@@ -18,6 +18,14 @@ fn main() {
     if let Some(threads) = args.threads {
         config.runtime.threads = threads;
     }
+    if let Some(nnue_dir) = args.nnue_dir.or_else(|| {
+        std::env::var("RUST_GOMOKU_NNUE_DIR")
+            .ok()
+            .filter(|s| !s.is_empty())
+    }) {
+        config.runtime.nnue_dir = Some(nnue_dir);
+        config.runtime.use_nnue = true;
+    }
     let search_limits = if args.depth.is_some() || args.width.is_some() {
         let fixed = SearchLimits::fixed_from_config(&config);
         Some(SearchLimits {
@@ -54,6 +62,7 @@ struct CliArgs {
     root_profile: Option<bool>,
     tt_bits: Option<u32>,
     threads: Option<usize>,
+    nnue_dir: Option<String>,
 }
 
 fn parse_args() -> Result<CliArgs, String> {
@@ -62,6 +71,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut root_profile = None;
     let mut tt_bits = None;
     let mut threads = None;
+    let mut nnue_dir = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -109,6 +119,12 @@ fn parse_args() -> Result<CliArgs, String> {
                 }
                 threads = Some(parsed);
             }
+            "--nnue-dir" => {
+                let Some(value) = args.next() else {
+                    return Err("--nnue-dir requires a directory path".to_string());
+                };
+                nnue_dir = Some(value);
+            }
             "--profile" | "--fast-history-ordering" | "--no-fast-history-ordering" => {
                 return Err(format!("{arg} was removed with the Fast profile"));
             }
@@ -124,5 +140,6 @@ fn parse_args() -> Result<CliArgs, String> {
         root_profile,
         tt_bits,
         threads,
+        nnue_dir,
     })
 }

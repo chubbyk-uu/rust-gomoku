@@ -186,6 +186,8 @@ Common `INFO` commands:
 - `INFO compute_vct 0|1`
 - `INFO root_vct_depth N`
 - `INFO vct_use_dfpn 0|1`
+- `INFO use_nnue 0|1`
+- `INFO nnue_dir PATH` (directory containing Rapfi CC0 `mix9svq*.bin.lz4` weights; CLI `--nnue-dir PATH` or env `RUST_GOMOKU_NNUE_DIR`)
 - `INFO vct_strict_and_memo_key 0|1`
 - `INFO nonroot_vcf 0|1`
 - `INFO overlap_vct_alphabeta 0|1`

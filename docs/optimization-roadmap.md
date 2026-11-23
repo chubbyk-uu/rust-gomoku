@@ -277,9 +277,14 @@ flowchart TD
   - [x] 已在 `center_50_prefixes` 100 局 `1s/move` 实测（`48-50-2`, `49.0%`）；因中盘几乎总存在至少一个 `L4`/`L5` 格导致 `!has_high_threat_bucket()` 拦截 ~90% 节点，无净收益已回退；待 `M2.4` + 栈上分阶段 `MovePicker` 阶段再重做
 - [x] **阶段 2（已合入 `master` 并完成审阅加固）：`M2.3` `df-pn` VCT 求解器**
   - [x] 实现 2-way 3 MiB Zobrist TT + 深度加权 proof-number + 本地子节点 `(pn, dn)` 缓存的 `df-pn` 求解器，支持 `vct_use_dfpn` 回退开关；`vct_dense_ply78` 提速 `3.31x`（`165.1ms -> 49.8ms`），`vct_counter_win_scan_ply75` 提速 `2.63x`（`336.8ms -> 128.3ms`），`case17` `7.69ms` 证出真胜手且零误判；`run_diff.py` 13/13 全通过；300 局中心开局验证 **Renju 限时 `1s/move` `52-47-1` (`52.5%`, `+17.4 Elo`)**、**Freestyle 限时 `1s/move` `50-48-2` (`51.0%`, `+7.0 Elo`, med `3.16x` 提速)**、**Renju 不限时 `d8/w40` `48-48-4` (`50.0%`, `LD=0, LL=0`, avg `-1.6%`, p95 `-3.6%`)**，全 300 局 0 错误 / 0 超时
-- [ ] **阶段 3（当前主攻，跳过 `M3.1` 直奔质变）：`M3.2` `Mix9svq` 增量 NNUE（Value + Policy + AVX2/NEON SIMD）**
-  - [ ] 详细设计与可行性预审见 [docs/nnue-mix9svq-plan.md](nnue-mix9svq-plan.md)
-  - [ ] 阶段 3.1：纯 Rust LZ4 Frame 解压 + `Mix9svq` 版本栈累加器 + AVX2 SIMD + Rapfi C++ 比特级对齐单测
-  - [ ] 阶段 3.2：接入 `Mix9svq` Value（保留 `VCF / df-pn VCT / ±WIN` 必杀层 + 可配置回退开关），完成 40 局 smoke 与 300 局双规则双模式验收
-  - [ ] 阶段 3.3：接入 `Mix9svq` Policy 排序与懒窗口门控，压缩 `d8/w40` 节点与耗时，随后释放 `M2.4 / M2.1 / M2.5` 现代搜索红利（并保留 RTX 5080 + `pytorch-nnue-trainer` 自训权重闭环）
+- [x] **阶段 3（已完成，待合入 `master`）：`M3.2` `Mix9svq` 增量 NNUE（Value + Policy + AVX2 SIMD，`exp/m32-nnue-mix9svq`）**
+  - [x] 详细设计与可行性预审见 [docs/nnue-mix9svq-plan.md](nnue-mix9svq-plan.md)
+  - [x] 阶段 3.1：纯 Rust LZ4 Frame 解压 + `Mix9svq` 版本栈累加器 + 8 路展开 AVX2 SIMD（`eval_only = 2.83 µs`）+ Rapfi C++ 比特级对齐单测（Freestyle `994` / Renju `80, 225` 完全一致）
+  - [x] 阶段 3.2 + 3.3a：接入 `Mix9svq` Value + Policy 排序（保留 `VCF / df-pn VCT / ±WIN` 必杀层 + 默认关闭古典回退开关，`run_diff.py` 13/13 全绿）；300 局 `center_50` 验收 **全 300 局零负对（`LD=0, LL=0`）**：
+    - Renju 限时 `1s/move`：**`79-21-0` (`79.0%`, `+230.2 Elo`, `WW=29, LL=0`)**
+    - Freestyle 限时 `1s/move`：**`71-28-1` (`71.5%`, `+159.8 Elo`, `WW=21, WD=1, LL=0`)**
+    - Renju 不限时 `d8/w40`：**`79-18-0` (`80.85%`, `+250.2 Elo`, `WW=29, LL=0`, 节点少 `1.97x`)**
+- [ ] **阶段 4（下一步）：在 `Mix9svq` 之上释放现代搜索红利 + ARM64 NEON**
+  - [ ] Policy 引导 LMR / 4-way TT / 窗口门控，将 `d8/w40` 单手耗时压到反超旧古典 `master` 并再推高限时胜率
+  - [ ] 补齐 `aarch64` NEON SIMD（供 Android 端极速运行）+ 可选 RTX 5080 `pytorch-nnue-trainer` 自训权重闭环
 - [ ] **备选保留：`M3.1` 增强经典评估（仅用于无 NNUE 权重的纯轻量 fallback 模式，当前降级为低优先级）**

@@ -1157,3 +1157,30 @@ Verification & A/B benchmarks (release build vs `master` `7a30f07`):
 Decision:
 
 - `M2.3` (`df-pn` VCT) is hardened and verified on `master` across both rulesets and both time modes; next milestone is `M3.1` (stronger integer classical evaluation + SPSA/Texel tuning).
+
+### 2026-11-23: `M3.2` `Mix9svq` incremental NNUE (Value + Policy ordering + AVX2 SIMD) (`exp/m32-nnue-mix9svq`)
+
+Context & modification scope:
+
+- Implemented pure-Rust `Mix9svq` NNUE inference compatible with Rapfi's CC0 `.bin.lz4` weights (`src/nnue/lz4.rs`, `src/nnue/simd.rs`, `src/nnue/mix9svq.rs`, `src/nnue/mod.rs`), preserving 100% classical fallback when `use_nnue = false` (default when no `--nnue-dir` / `INFO nnue_dir` / `RUST_GOMOKU_NNUE_DIR` is supplied).
+- Architecture & SIMD optimizations:
+  - Pure-Rust standard LZ4 Frame decoder + `StandardHeader` validator (`0xacd8cc6a` + `MIX9SVQ_ARCH_HASH` + rule/board-size masks) + 10-bit `PackedSigned10Stream` codebook decoder + `OnceLock` `Arc<Mix9svqWeight>` read-only weight cache shared across ABDADA threads.
+  - Version-stacked incremental accumulator (`undo()` = `current_version -= 1`, O(1)) + lazy `MoveCache` cancelling consecutive opposite moves before any evaluation occurs.
+  - Runtime-detected `x86_64` AVX2 kernels with 8-YMM-register unrolled `linear_i8_chunk4_avx2` (hoisting signed-input `msb/low7` splits once per chunk), `commit_vsum_avx2`, `codebook` prefetching, and candidate-only `evaluate_policy_moves_avx2` + `policy_dot16_avx2` (`evaluate_value`: `3.91 us -> 2.83 us`, **`-27.6%` / `1.38x`** speedup).
+- Search integration (`src/search/alphabeta.rs`, `src/config.rs`, `src/protocol/gomocup.rs`, `src/bin/gomocup_engine.rs`):
+  - Keeps root `VCF + df-pn VCT` and leaf `±WIN` exact tactical win/loss checks untouched; replaces non-mate leaf static evaluation with `Mix9svq` Value (`ScalingFactor = 200`, clamped `[-15_000, +15_000]`), disables classical `atdown/rootbonus` when NNUE is active, and sorts root & `depth >= 2.0` internal non-forcing candidates with `Mix9svq` Policy (keeping `tt_best_move` first).
+
+Verification & A/B benchmarks (release build vs `master` `8563005`):
+
+- Bit-exact C++ oracle verification (against compiled `opponent/rapfi/Rapfi/eval/mix9svqnnue.cpp`):
+  - Freestyle 8-ply BLACK: Rust `val = 994` vs Rapfi C++ `994` (exact); top-5 Policy matches to `< 2e-6` (`12.929857` vs `12.929859`).
+  - Renju 7-ply WHITE / 8-ply BLACK: Rust `80 / 225` vs Rapfi C++ `80 / 225` (exact); AVX2 matches scalar `layer3i32` bit-identically; `undo()` matches `sync_with_board()`.
+- Unit/integration & diff regression: `cargo fmt --check`, `git diff --check`, full `cargo test` (zero warnings), `android/rust_bridge` 6/6, and `scripts/run_diff.py --profile all --check-baselines --jobs 8` (**13/13 passed** with default classical fallback).
+- 300-game center-opening verification (`center_50_prefixes.jsonl`, `--jobs 16 --reuse-engine-state`, vs `master_8563005`, **ZERO lost pairs `LD=0, LL=0` across all 300 games**):
+  - **Renju timed `1s/move` (100 games)**: **`79-21-0` (`79.0%`, `+230.16 Elo`, 95% CI `[+162.2, +318.5]`, `WW=29, WD=0, WL/DD=21, LD=0, LL=0`)**, `0` errors / `0` timeouts; avg `491.5 ms` / med `120.1 ms` / p95 `1068.6 ms` / max `1107.3 ms` vs `master` avg `463.3 ms` / med `18.5 ms` / p95 `1010.6 ms` / max `1022.3 ms`.
+  - **Freestyle timed `1s/move` (100 games)**: **`71-28-1` (`71.5%`, `+159.78 Elo`, 95% CI `[+103.1, +225.8]`, `WW=21, WD=1, WL/DD=28, LD=0, LL=0`)**, `0` errors / `0` timeouts; avg `491.0 ms` / med `122.9 ms` / p95 `1042.3 ms` / max `1072.4 ms` vs `master` avg `446.7 ms` / med `10.6 ms` / p95 `1009.0 ms` / max `1024.1 ms`.
+  - **Renju untimed `d8/w40` (100 games, 97 completed + 3 long games hit harness default 900s game-timeout at plies 118–160 under 16-way contention)**: **`79-18-0` (`80.85%`, `+250.22 Elo`, 95% CI `[+176.8, +350.3]`, `WW=29, WD=0, WL/DD=18, LD=0, LL=0`)**; TT nodes **`82.5M` vs `162.3M` (`1.97x` fewer nodes)**; avg `2121.2 ms` / med `730.3 ms` / p95 `8395.9 ms` / max `65837.8 ms` vs `master` avg `1561.2 ms` / med `378.9 ms` / p95 `6584.4 ms` / max `59146.8 ms`.
+
+Decision:
+
+- `M3.2` (`Mix9svq` Value + Policy + AVX2) delivers a massive `+160` to `+250+ Elo` leap across BOTH Renju & Freestyle and BOTH untimed `d8/w40` & timed `1s/move` with zero lost pairs. Ready for merge to `master` upon user approval; next follow-ups are Policy-guided LMR / 4-way TT (to make `d8/w40` even faster than classical `master`) and ARM64 NEON SIMD for Android.

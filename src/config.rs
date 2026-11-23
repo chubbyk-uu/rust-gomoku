@@ -19,6 +19,7 @@ pub const DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH: i32 = 4;
 pub const DEFAULT_VCF_MULTI_REPLY: bool = true;
 pub const DEFAULT_ROOT_VCT_DEPTH: i32 = 6;
 pub const DEFAULT_VCT_USE_DFPN: bool = true;
+pub const DEFAULT_USE_NNUE: bool = false;
 pub const DEFAULT_VCT_STRICT_AND_MEMO_KEY: bool = true;
 pub const DEFAULT_ROOT_PROFILE: bool = false;
 pub const DEFAULT_OVERLAP_VCT_ALPHABETA: bool = false;
@@ -91,6 +92,8 @@ pub struct RuntimeOptions {
     pub compute_vct: bool,
     pub root_vct_depth: i32,
     pub vct_use_dfpn: bool,
+    pub use_nnue: bool,
+    pub nnue_dir: Option<String>,
     pub vct_strict_and_memo_key: bool,
     pub overlap_vct_alphabeta: bool,
     pub threads: usize,
@@ -181,6 +184,8 @@ fn default_runtime_options(para: &[f64]) -> RuntimeOptions {
         compute_vct: true,
         root_vct_depth: DEFAULT_ROOT_VCT_DEPTH,
         vct_use_dfpn: DEFAULT_VCT_USE_DFPN,
+        use_nnue: DEFAULT_USE_NNUE,
+        nnue_dir: None,
         vct_strict_and_memo_key: DEFAULT_VCT_STRICT_AND_MEMO_KEY,
         overlap_vct_alphabeta: DEFAULT_OVERLAP_VCT_ALPHABETA,
         threads: DEFAULT_SEARCH_THREADS,
