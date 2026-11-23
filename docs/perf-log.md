@@ -1217,4 +1217,35 @@ Verification & A/B benchmarks:
 
 Decision:
 
-- `P0 + P1b` achieves a massive dual-mode win: `+70.4 Elo` over `P0` in `1s/move` Renju (`LL=0`), `+27.9 Elo` over `P0` in `1s/move` Freestyle, `+295 Elo` over `master` in `1s/move`, and `78.57%` (`LD=0, LL=0`) while running **`2.59x` faster than classical `master`** in fixed-depth `d8/w40`. Ready for merge or next step (`P2`: VCF depth unlock + Zobrist TT, `timectl`, MT ABDADA + NNUE).
+- `P0 + P1b` achieves a massive dual-mode win: `+70.4 Elo` over `P0` in `1s/move` Renju (`LL=0`), `+27.9 Elo` over `P0` in `1s/move` Freestyle, `+295 Elo` over `master` in `1s/move`, and `78.57%` (`LD=0, LL=0`) while running **`2.59x` faster than classical `master`** in fixed-depth `d8/w40`. Merged into `master` (`27ce460`, tagged `baseline/nnue-p1b-27ce460`).
+
+### 2026-11-23 (3): `P2` (Deep Zobrist-TT Attacker VCF + Match-Clock `timectl` + 4T ABDADA+NNUE Verification) (`exp/p2-tactics-timectl`)
+
+Hotspot evidence & target:
+
+- Legacy `VCFM = 5` caps root VCF search at 5 fours, forcing alpha-beta to rediscover 6–16-four forced wins in tactical midgames; `GomocupProtocol::current_search_limits` previously passed full `time_left_ms` directly as a single-turn limit in match-clock games; multi-threaded ABDADA + NNUE had not yet been benchmarked or match-verified.
+
+Modification scope & stop-loss ablations:
+
+- **`P2-1` (`src/threats/vcf.rs`, `src/search/root.rs`)**:
+  - Added 64K-entry (1 MiB) generation-cleared Zobrist `VcfTt` and zero-allocation `search_deep_for_rule` (`max_depth = 16`, `node_limit = 20_000`, `3%` timed sub-budget) on the NNUE root attacker VCF path (`use_nnue = false` keeps `VCFM = 5` untouched).
+  - **Stop-loss #1 (reverted)**: Proof-set opponent VCF filtering (`opp_depth = 12`) scored `45-52-3` (`46.5%`, `LL = 5`) vs `P1b` in `1s/move`. Root cause proved on `case6_ply16`: Black's winning move `(9, 7)` was neither in White's VCF proof set nor an immediate `Win5/A4/B4`, yet it turned Black's forced reply `(10, 8)` into a Black counter-four refuting White's VCF — proving proof-set filtering is unsound in Gomoku/Renju. Full-window `opp_depth = 6` filtering fixed `case6`/`case40` but added `+21 ms/move` overhead (`39-51-10`, `44.0%`). Reverted opponent VCF filter and VCT verify depth to `P1b` (`< 0.5 ms`).
+- **`P2-2` (`src/protocol/gomocup.rs`)**:
+  - Added dynamic match-clock pacing in `current_search_limits` when `use_nnue` is active and `time_left_ms < 50_000_000.0` (leaving pure `timeout_turn` and classical `base` protocol alignment 100% unchanged).
+  - **Stop-loss #2 (reverted)**: Partial last-depth adoption on timeout dropped `1s/move` score from `46.5%` to `44.5%` (`41-52-7`, `LL = 6`) because adopting a partial fail-low move before remaining root candidates finish is unsound. Reverted.
+- **`P2-3` (ABDADA + NNUE verification)**:
+  - Confirmed `OnceLock<Arc<Mix9svqWeight>>` shares weights zero-copy across worker threads and `sync_worker_state` hot-reloads NNUE properly.
+
+Verification & A/B benchmarks (vs `P1b` `27ce460`, `center_50_prefixes.jsonl`):
+
+- Gates: `cargo fmt --check`, `git diff --check`, full `cargo test` (zero warnings), `android/rust_bridge` 6/6, and `run_diff.py --profile all --check-baselines --jobs 8` (**13/13 passed**).
+- **`P2` (`1T`) vs `P1b` (`1T`) Renju `1s/move` (100 games, `--jobs 16 --reuse-engine-state`)**:
+  - **`48-43-9` (`52.5%`, `+17.39 Elo`, 95% CI `[-17.51, +52.64]`, `WW=4, WD=2, WL/DD=39, LD=5, LL=0`)**, `0` errors / `0` timeouts; avg **`542.3 ms`** vs `P1b` `562.9 ms` (`-20.6 ms/move`, 91 fewer alpha-beta entries).
+- **`P2` (`4T`) vs `P2` (`1T`) Renju `1s/move` (100 games, `--jobs 4 --reuse-engine-state`)**:
+  - **`56-39-5` (`58.5%`, `+59.64 Elo`, 95% CI `[+9.12, +112.82]`, `WW=11, WD=2, WL/DD=32, LD=3, LL=2`)**, `0` errors / `0` timeouts; 4T avg **`488.2 ms`** / median **`56.2 ms`** vs 1T avg `523.9 ms` / median `1000.1 ms` (`2.29x` effective TT throughput).
+- Single-move scaling (`cases/renju/vct_dense_ply78.json`, Renju `d8/w40`, NNUE):
+  - 1T: `94,218,254 nodes` / `120.03s` (`move=[13,5]`, `score=754`) → 4T: `22,534,665 nodes` / `11.22s` (**`10.70x` speedup**, exact same move & score).
+
+Decision:
+
+- Keep attacker deep Zobrist-TT VCF (`depth=16`, `20k` nodes, `3%` timed sub-budget), match-clock `timectl`, and verified 4T ABDADA+NNUE. Ready to commit on `exp/p2-tactics-timectl` and merge into `master` upon user approval.

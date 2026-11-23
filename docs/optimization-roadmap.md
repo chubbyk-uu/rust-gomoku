@@ -332,16 +332,23 @@ flowchart TD
     - **vs `P0` Freestyle `1s/move`**：**`50-42-8` (`54.0%`, `+27.85 Elo`, `WW=4, WD=7, LD=1, LL=3`)**，0 错误 / 0 超时。
   - 后续可选增量消融：去掉跨层 `running_downf` 余数 + `extend_ratio` 延伸上限、浅层 Razoring / Singular Extension。
 
-### P2（实战与战术能力短板 — 长杀深度、局时赛与多线程）
-- [ ] **`P2-1` 解锁 VCF 深度上限（移除 `VCFM = 5`）+ Zobrist VCF TT + 证明集对手 VCF 过滤**
-  - 位置：`src/threats/vcf.rs`、`src/search/root.rs:569-627`
-  - 目标：支持 14–20 ply 实战长冲四杀（带安全节点上限），对手 VCF 过滤从最多 225 次克隆盘面降至证明集子集 `play/undo`（提速 10×+）。
-- [ ] **`P2-2` 现代自适应时间管理 `timectl` + 安全复用末层未完搜索**
-  - 位置：`src/protocol/gomocup.rs:454-479`、`src/search/root.rs:691-884`
-  - 目标：修复局时赛（`timeout_match`/`time_left`）单步耗光问题；迭代加深超时时安全保留已验证改善的末层首着（减少 40%–60% 末层浪费）；纯 `timeout_turn` 严格禁用软早停。
-- [ ] **`P2-3` 多线程 ABDADA + NNUE 实测调优与去强屏障升级**
-  - 位置：`src/search/abdada.rs`、`src/search/root.rs:708-820`
-  - 目标：建立 4T/8T + NNUE 扩展率与对弈基线；消除 `DepthJob` 每层克隆与硬同步屏障；让 `overlap_vct_alphabeta` 复用线程池并移除整表 TT 拷贝。
+### P2（实战与战术能力短板 — 长杀深度、局时赛与多线程 — **第三批已完成并验证**）
+- [x] **`P2-1` 解锁进攻侧 VCF 深度上限（移除 `VCFM = 5`）+ Zobrist VCF TT**
+  - 位置：`src/threats/vcf.rs`、`src/search/root.rs`
+  - 实现与止损结论：
+    - 新增 64K 槽（1 MiB）世代免清零 `VcfTt` 与零分配 `search_deep_for_rule`（`max_depth=16`、`20k` 节点、`3%` 限时子预算），仅对 `use_nnue` 路径启用，古典 `base` 保持 `VCFM=5` 与 `run_diff.py` 13/13 零回归；
+    - **重要止损**：实测发现防守侧 proof-set 过滤在连珠中**不完备**（如 `case6_ply16` 的胜着 `(9,7)` 既不在白棋 VCF proof-set 内也不是当手反冲四，却把白棋逼迫黑棋必应的 `(10,8)` 变成黑棋反冲四从而反杀），导致 `1s/手` 退步（`46.5%`）；改为全窗口 `opp_depth=6` 又因每手额外耗时 `+21ms` 导致 `44.0%`。因此回退防守侧过滤到 `P1b`（`<0.5ms`），只保留 100% 完备的进攻侧深层 VCF。
+    - 验收数据（100 局 Renju `1s/move` vs `P1b`）：**`48-43-9` (`52.5%`, `+17.39 Elo`, `WW=4, WD=2, WL/DD=39, LD=5, LL=0`)**，均耗 `542.3ms` vs `562.9ms`（快 `20.6ms/手`，少进 Alpha-Beta `91` 手），0 错误 / 0 超时。
+- [x] **`P2-2` 局时赛动态时间分配 `timectl`（止损回退末层部分采用）**
+  - 位置：`src/protocol/gomocup.rs`
+  - 实现与止损结论：
+    - 为 NNUE 模式在局时赛（`time_left < 50_000_000ms`）下按剩余手数估算动态分配单步预算，彻底修复局时赛单步耗光问题；纯 `timeout_turn` 与古典 `base` 协议对齐 `51/51` 零变更；
+    - **止损**：实测末层未搜完即采用新 best move 会在第 0 手 fail-low、后续候选被截断时引入残缺选点（对 `P1b` 从 `46.5%` 降至 `44.5%`），已回退。
+- [x] **`P2-3` 多线程 ABDADA + NNUE 实测验收**
+  - 位置：`src/search/abdada.rs`、`src/nnue/mod.rs`
+  - 验收数据：确认全局 `OnceLock<Arc<Mix9svqWeight>>` 零重复解压、worker 热同步 `sync_config` 正常工作；
+    - `vct_dense_ply78.json`（Renju `d8/w40`，NNUE）：1T `94.22M nodes / 120.03s` → 4T `22.53M nodes / 11.22s`（**`10.70×` 加速**，着法 `[13,5]` 与分值 `754` 完全一致）；
+    - **4T vs 1T 实战对弈**（100 局 Renju `1s/move`，`--jobs 4`）：**`56-39-5` (`58.5%`, `+59.64 Elo`, 95% CI `[+9.12, +112.82]`, `WW=11, WD=2, WL/DD=32, LD=3, LL=2`)**，4T 均耗 `488.2ms` / 中位 **`56.2ms`** vs 1T `523.9ms` / 中位 `1000.1ms`，有效吞吐 `2.29×`，0 错误 / 0 超时。
 
 ### P3（全平台产品落地、架构简化与外部标定）
 - [ ] **`P3-1` `aarch64` ARM64 NEON SIMD 内核**（`src/nnue/simd.rs`）：打通 Android 端实用化性能（替代慢 ~20× 的标量路径）。

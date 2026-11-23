@@ -543,6 +543,7 @@ impl VCFSearcher {
     /// Deep Zobrist-TT VCF solver that also collects the winning proof-set
     /// squares (all attacker moves, defender replies, and terminal open-four
     /// endpoints) when a VCF is found.
+    #[cfg(test)]
     pub(crate) fn search_deep_with_proof_set(
         &mut self,
         board: &Board,

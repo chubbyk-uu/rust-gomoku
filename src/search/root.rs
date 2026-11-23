@@ -489,32 +489,19 @@ impl RootSearcher {
         if !view.forcing_threat_moves(-side).is_empty() {
             return (false, Some("opponent_forcing"));
         }
-        if self.config.runtime.compute_vcf {
-            let opp_vcf_found = if self.config.runtime.use_nnue {
-                self.vcf
-                    .search_deep_for_rule(
-                        &trial,
-                        -side,
-                        self.config.runtime.vct_verify_opponent_vcf_depth.max(8),
-                        self.config.runtime.vcf_multi_reply,
-                        self.config.rule_set,
-                        30_000,
-                    )
-                    .found
-            } else {
-                self.vcf
-                    .search_with_multi_reply_for_rule(
-                        &trial,
-                        -side,
-                        self.config.runtime.vct_verify_opponent_vcf_depth,
-                        self.config.runtime.vcf_multi_reply,
-                        self.config.rule_set,
-                    )
-                    .found
-            };
-            if opp_vcf_found {
-                return (false, Some("opponent_vcf"));
-            }
+        if self.config.runtime.compute_vcf
+            && self
+                .vcf
+                .search_with_multi_reply_for_rule(
+                    &trial,
+                    -side,
+                    self.config.runtime.vct_verify_opponent_vcf_depth,
+                    self.config.runtime.vcf_multi_reply,
+                    self.config.rule_set,
+                )
+                .found
+        {
+            return (false, Some("opponent_vcf"));
         }
         if self.vcf.budget.stopped() {
             return (false, Some("budget"));
@@ -592,70 +579,6 @@ impl RootSearcher {
         if !self.config.runtime.compute_vcf {
             return allowed_moves;
         }
-        if self.config.runtime.use_nnue {
-            let opp_depth = self
-                .config
-                .runtime
-                .opponent_vcf_depth
-                .max(crate::threats::vcf::DEFAULT_DEEP_OPPONENT_VCF_DEPTH);
-            let (opponent_vcf, mut relevant) = self.vcf.search_deep_with_proof_set(
-                board,
-                -side,
-                opp_depth,
-                self.config.runtime.vcf_multi_reply,
-                self.config.rule_set,
-                60_000,
-            );
-            if !opponent_vcf.found {
-                return allowed_moves;
-            }
-            // Any move in the opponent's VCF proof tree OR any immediate counter-forcing
-            // move (`Win5`/`A4`/`B4`) by `side` can potentially refute the opponent's VCF.
-            let mut view =
-                ThreatBoardView::from_board_with_rule(board.clone(), self.config.rule_set);
-            let counter_bits = view
-                .pat4
-                .win5_bits(side)
-                .union(view.pat4.a4_bits(side))
-                .union(view.pat4.b4_bits(side));
-            for idx in counter_bits.iter_indices() {
-                relevant.insert(crate::threats::pattern4::idx_to_move(idx));
-            }
-
-            let mut filtered = HashSet::new();
-            for move_ in relevant.iter() {
-                if self.vcf.budget.stopped() {
-                    return None;
-                }
-                if allowed_moves
-                    .as_ref()
-                    .is_some_and(|allowed| !allowed.contains(&move_))
-                {
-                    continue;
-                }
-                if !view.is_rule_legal(move_, side) {
-                    continue;
-                }
-                view.play(move_, side);
-                let still_loses = self
-                    .vcf
-                    .search_deep_on_view(
-                        &mut view,
-                        -side,
-                        opp_depth,
-                        self.config.runtime.vcf_multi_reply,
-                        30_000,
-                        None,
-                    )
-                    .found;
-                view.undo();
-                if !still_loses {
-                    filtered.insert(move_);
-                }
-            }
-            return Some(filtered);
-        }
-
         let opponent_vcf = self.vcf.search_with_multi_reply_for_rule(
             board,
             -side,
@@ -1181,7 +1104,7 @@ impl RootSearcher {
                     .runtime
                     .root_vcf_depth
                     .max(crate::threats::vcf::DEFAULT_DEEP_VCF_DEPTH);
-                const TIMED_DEEP_VCF_BUDGET_FRACTION: f64 = 0.15;
+                const TIMED_DEEP_VCF_BUDGET_FRACTION: f64 = 0.03;
                 let vcf_sub_budget = self
                     .vcf
                     .budget
@@ -1195,7 +1118,7 @@ impl RootSearcher {
                     deep_depth,
                     self.config.runtime.vcf_multi_reply,
                     self.config.rule_set,
-                    crate::threats::vcf::DEFAULT_DEEP_VCF_NODE_LIMIT,
+                    20_000,
                 );
                 if let (Some(sub), Some(parent)) = (vcf_sub_budget, parent_budget) {
                     self.vcf.budget = parent;

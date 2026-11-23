@@ -466,9 +466,24 @@ impl GomocupProtocol {
     }
 
     pub fn current_search_limits(&self) -> SearchLimits {
-        let time_budget = match (self.timeout_turn_ms, self.time_left_ms) {
-            (Some(turn), Some(left)) => Some(turn.min(left)),
-            (turn, left) => turn.or(left),
+        let match_budget = self.time_left_ms.map(|left| {
+            // Keep classical base protocol alignment 100% exact; enable dynamic
+            // match-clock pacing when NNUE mode is active and a real match clock
+            // (below the timeout_match=0 sentinel) is in effect.
+            if !self.config.runtime.use_nnue || left >= 50_000_000.0 {
+                return left;
+            }
+            let plies = self.board.move_count();
+            let expected_moves_left = (40_usize.saturating_sub(plies / 4)).max(12) as f64;
+            let reserve = (left * 0.05).min(50.0);
+            let slice = ((left - reserve).max(1.0) / expected_moves_left).max(10.0);
+            slice.min(left)
+        });
+        let time_budget = match (self.timeout_turn_ms, match_budget) {
+            (Some(turn), Some(match_ms)) => Some(turn.min(match_ms)),
+            (Some(turn), None) => Some(turn),
+            (None, Some(match_ms)) => Some(match_ms),
+            (None, None) => None,
         };
         if let Some(default_limits) = self.default_limits {
             SearchLimits {
@@ -781,5 +796,35 @@ mod tests {
         protocol.handle_line("INFO nnue_dir");
         assert!(!protocol.config.runtime.use_nnue);
         assert_eq!(protocol.config.runtime.nnue_dir, None);
+    }
+
+    #[test]
+    fn gomocup_match_time_control_paces_time_left_without_altering_pure_turn_limit() {
+        let mut turn_only = GomocupProtocol::default();
+        turn_only.handle_line("INFO timeout_turn 1000");
+        assert_eq!(
+            turn_only.current_search_limits().time_limit_ms,
+            Some(1000.0)
+        );
+
+        let mut match_only = GomocupProtocol::default();
+        match_only.config.runtime.use_nnue = true;
+        match_only.handle_line("INFO timeout_match 60000");
+        let slice = match_only
+            .current_search_limits()
+            .time_limit_ms
+            .expect("match budget computed");
+        assert!(
+            slice >= 1000.0 && slice <= 2500.0,
+            "60s match clock should pace opening move around 1.5s, got {slice}"
+        );
+
+        let mut unlimited_match = GomocupProtocol::default();
+        unlimited_match.handle_line("INFO timeout_turn 1000");
+        unlimited_match.handle_line("INFO timeout_match 0");
+        assert_eq!(
+            unlimited_match.current_search_limits().time_limit_ms,
+            Some(1000.0)
+        );
     }
 }
