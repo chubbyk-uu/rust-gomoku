@@ -1,5 +1,7 @@
 //! Gomocup protocol adapter aligned with the reference implementation.
 
+use std::sync::{Arc, Condvar, Mutex};
+
 use crate::board::{move_to_xy, xy_to_move, Board};
 use crate::config::{
     default_tt_bits_for_search, load_default_config, EngineConfig, MAX_SEARCH_THREADS,
@@ -9,6 +11,16 @@ use crate::rules::RuleSet;
 use crate::search::{RootSearcher, SearchLimits, TranspositionTable, MAX_TT_BUCKET_BITS};
 
 const MAX_PROTOCOL_TIME_MS: f64 = i32::MAX as f64;
+const PREWARM_LOADING: u8 = 0;
+const PREWARM_READY: u8 = 1;
+const PREWARM_FAILED: u8 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrewarmStatus {
+    Loading,
+    Ready,
+    Failed,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PendingProtocolError {
@@ -44,6 +56,7 @@ pub struct GomocupProtocol {
     pending_error: Option<PendingProtocolError>,
     searcher: Option<RootSearcher>,
     auto_tt_max_bits: u32,
+    nnue_prewarm: Option<(std::path::PathBuf, RuleSet, Arc<(Mutex<u8>, Condvar)>)>,
 }
 
 impl Default for GomocupProtocol {
@@ -68,6 +81,7 @@ impl GomocupProtocol {
             pending_error: None,
             searcher: None,
             auto_tt_max_bits: MAX_TT_BUCKET_BITS,
+            nnue_prewarm: None,
         }
     }
 
@@ -145,6 +159,7 @@ impl GomocupProtocol {
             return vec!["ERROR Size error.".to_string()];
         }
         self.reset_engine();
+        self.prewarm_nnue_weights();
         vec!["OK".to_string()]
     }
 
@@ -163,6 +178,7 @@ impl GomocupProtocol {
             return vec!["ERROR Size error.".to_string()];
         }
         self.reset_engine();
+        self.prewarm_nnue_weights();
         vec!["OK".to_string()]
     }
 
@@ -309,6 +325,8 @@ impl GomocupProtocol {
                 self.config.runtime.use_nnue = true;
             }
             self.searcher = None;
+            self.nnue_prewarm = None;
+            let _ = self.ensure_prewarm_status();
             return;
         }
         if args.len() < 2 {
@@ -353,7 +371,7 @@ impl GomocupProtocol {
             }
             "root_vcf_depth" => {
                 if let Some(parsed) = parse_one::<i32>(value) {
-                    self.config.runtime.root_vcf_depth = parsed.max(0);
+                    self.config.runtime.set_root_vcf_depth(parsed.max(0));
                     self.searcher = None;
                 }
             }
@@ -403,6 +421,7 @@ impl GomocupProtocol {
                 if let Some(parsed) = parse_one::<i32>(value) {
                     self.config.runtime.use_nnue = parsed != 0;
                     self.searcher = None;
+                    let _ = self.ensure_prewarm_status();
                 }
             }
             "vct_strict_and_memo_key" => {
@@ -440,6 +459,7 @@ impl GomocupProtocol {
                         if self.config.rule_set != parsed {
                             self.config.rule_set = parsed;
                             self.searcher = None;
+                            let _ = self.ensure_prewarm_status();
                         }
                     }
                 }
@@ -465,12 +485,167 @@ impl GomocupProtocol {
         }
     }
 
+    fn prewarm_nnue_weights(&mut self) {
+        if !self.config.runtime.use_nnue {
+            self.nnue_prewarm = None;
+            return;
+        }
+        if let Some(dir) = self.config.runtime.nnue_dir.clone() {
+            let path = std::path::Path::new(&dir);
+            let canonical_dir = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            let res = crate::nnue::load_mix9svq_evaluator_for_rule(path, self.config.rule_set);
+            let code = if res.is_ok() {
+                PREWARM_READY
+            } else {
+                PREWARM_FAILED
+            };
+            self.nnue_prewarm = Some((
+                canonical_dir,
+                self.config.rule_set,
+                Arc::new((Mutex::new(code), Condvar::new())),
+            ));
+            let other = match self.config.rule_set {
+                RuleSet::Freestyle => RuleSet::Renju,
+                RuleSet::Renju => RuleSet::Freestyle,
+            };
+            let _ = crate::nnue::load_mix9svq_evaluator_for_rule(path, other);
+        }
+    }
+
+    /// Deduplicated, non-blocking prewarm state machine for `(canonical_dir, rule_set)`.
+    /// Spawns at most one background loader per `(canonical_dir, rule)` and caches
+    /// `Failed` until the NNUE config or symlink target changes.
+    fn ensure_prewarm_status(&mut self) -> Option<PrewarmStatus> {
+        if !self.config.runtime.use_nnue {
+            self.nnue_prewarm = None;
+            return None;
+        }
+        let Some(dir) = self.config.runtime.nnue_dir.clone() else {
+            self.nnue_prewarm = None;
+            return Some(PrewarmStatus::Failed);
+        };
+        let rule = self.config.rule_set;
+        let path = std::path::Path::new(&dir);
+        let canonical_dir = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if crate::nnue::is_mix9svq_cached_for_rule(&canonical_dir, rule) {
+            self.nnue_prewarm = Some((
+                canonical_dir,
+                rule,
+                Arc::new((Mutex::new(PREWARM_READY), Condvar::new())),
+            ));
+            return Some(PrewarmStatus::Ready);
+        }
+        if let Some((prev_dir, prev_rule, pair)) = &self.nnue_prewarm {
+            if prev_dir == &canonical_dir && *prev_rule == rule {
+                let state = *pair.0.lock().expect("nnue prewarm state lock");
+                match state {
+                    PREWARM_FAILED => return Some(PrewarmStatus::Failed),
+                    PREWARM_LOADING => return Some(PrewarmStatus::Loading),
+                    // `PREWARM_READY` but not present in `WEIGHT_CACHE` means the
+                    // underlying target changed; fall through to re-warm.
+                    _ => {}
+                }
+            }
+        }
+        // Fail fast without spawning a thread when the weight files do not exist.
+        if !crate::nnue::mix9svq_files_exist_for_rule(&canonical_dir, rule) {
+            self.nnue_prewarm = Some((
+                canonical_dir,
+                rule,
+                Arc::new((Mutex::new(PREWARM_FAILED), Condvar::new())),
+            ));
+            return Some(PrewarmStatus::Failed);
+        }
+        let pair = Arc::new((Mutex::new(PREWARM_LOADING), Condvar::new()));
+        self.nnue_prewarm = Some((canonical_dir.clone(), rule, Arc::clone(&pair)));
+        let pair_bg = Arc::clone(&pair);
+        let spawn_res = std::thread::Builder::new()
+            .name("gomoku-nnue-prewarm".to_string())
+            .spawn(move || {
+                let code = match crate::nnue::load_mix9svq_evaluator_for_rule(&canonical_dir, rule)
+                {
+                    Ok(_) => PREWARM_READY,
+                    Err(_) => PREWARM_FAILED,
+                };
+                let (lock, cvar) = &*pair_bg;
+                let mut guard = lock.lock().expect("nnue prewarm state lock");
+                *guard = code;
+                cvar.notify_all();
+            });
+        if spawn_res.is_err() {
+            let (lock, cvar) = &*pair;
+            let mut guard = lock.lock().expect("nnue prewarm state lock");
+            *guard = PREWARM_FAILED;
+            cvar.notify_all();
+            return Some(PrewarmStatus::Failed);
+        }
+        Some(PrewarmStatus::Loading)
+    }
+
+    /// Wait up to `max_wait` for an in-flight prewarm to finish, returning the
+    /// latest `PrewarmStatus`. Never blocks beyond `max_wait`.
+    fn wait_prewarm_bounded(&self, max_wait: std::time::Duration) -> PrewarmStatus {
+        let Some((_, _, pair)) = &self.nnue_prewarm else {
+            return PrewarmStatus::Failed;
+        };
+        let (lock, cvar) = &**pair;
+        let mut guard = lock.lock().expect("nnue prewarm state lock");
+        let deadline = std::time::Instant::now() + max_wait;
+        while *guard == PREWARM_LOADING {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                break;
+            };
+            if remaining.is_zero() {
+                break;
+            }
+            let (next_guard, timeout_res) = cvar
+                .wait_timeout(guard, remaining)
+                .expect("nnue prewarm cvar wait");
+            guard = next_guard;
+            if timeout_res.timed_out() {
+                break;
+            }
+        }
+        match *guard {
+            PREWARM_READY => PrewarmStatus::Ready,
+            PREWARM_FAILED => PrewarmStatus::Failed,
+            _ => PrewarmStatus::Loading,
+        }
+    }
+
+    /// Strictly non-blocking check whether match-clock pacing should apply.
+    /// Returns `true` during both `Loading` and `Ready` states so a cold-start
+    /// move in a match-clock game never consumes the entire `time_left`; returns
+    /// `false` once `Failed` (or classical mode) so classical semantics apply.
+    fn should_pace_match_clock(&self) -> bool {
+        if !self.config.runtime.use_nnue {
+            return false;
+        }
+        if let Some(searcher) = &self.searcher {
+            return searcher.has_nnue();
+        }
+        let Some(dir) = self.config.runtime.nnue_dir.as_deref() else {
+            return false;
+        };
+        let rule = self.config.rule_set;
+        let path = std::path::Path::new(dir);
+        let canonical_dir = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if let Some((prev_dir, prev_rule, pair)) = &self.nnue_prewarm {
+            if prev_dir == &canonical_dir && *prev_rule == rule {
+                let state = *pair.0.lock().expect("nnue prewarm state lock");
+                return state != PREWARM_FAILED;
+            }
+        }
+        crate::nnue::is_mix9svq_cached_for_rule(&canonical_dir, rule)
+            || crate::nnue::mix9svq_files_exist_for_rule(&canonical_dir, rule)
+    }
+
     pub fn current_search_limits(&self) -> SearchLimits {
         let match_budget = self.time_left_ms.map(|left| {
             // Keep classical base protocol alignment 100% exact; enable dynamic
-            // match-clock pacing when NNUE mode is active and a real match clock
-            // (below the timeout_match=0 sentinel) is in effect.
-            if !self.config.runtime.use_nnue || left >= 50_000_000.0 {
+            // match-clock pacing when NNUE mode is ready or loading and a real
+            // match clock (below the timeout_match=0 sentinel) is in effect.
+            if left >= 50_000_000.0 || !self.should_pace_match_clock() {
                 return left;
             }
             let plies = self.board.move_count();
@@ -509,6 +684,7 @@ impl GomocupProtocol {
     }
 
     fn search_move(&mut self) -> Vec<String> {
+        let cmd_start = std::time::Instant::now();
         if let Some(error) = self.pending_error.take() {
             return vec![format!("ERROR {}.", error.message())];
         }
@@ -518,7 +694,7 @@ impl GomocupProtocol {
         if self.board.winner() != 0 {
             return vec!["ERROR Board is terminal.".to_string()];
         }
-        let limits = self.current_search_limits();
+        let mut limits = self.current_search_limits();
         let expected_auto_bits = self.tt_bits.is_none().then(|| {
             let effective_threads = if limits.node_limit.is_some() {
                 1
@@ -528,40 +704,119 @@ impl GomocupProtocol {
             default_tt_bits_for_search(effective_threads, limits.max_depth)
                 .min(self.auto_tt_max_bits)
         });
-        let cached_searcher = self.searcher.take().filter(|searcher| {
-            expected_auto_bits.is_none_or(|bits| searcher.tt.bucket_count() == (1_usize << bits))
-        });
+        // Check deduplicated prewarm state for NNUE weights:
+        // - Under ANY timed budget, never wait unboundedly for slow storage:
+        //   wait at most a bounded fraction of the turn budget (`min(budget*0.4,
+        //   budget-30ms)`) for an in-flight prewarm. If still `Loading` when
+        //   that wait cap expires, play this single move with classical fallback
+        //   inside the remaining turn budget (without caching the temporary
+        //   searcher so the next move switches to NNUE once ready).
+        // - `Failed`: reuse and cache a normal classical searcher with the
+        //   exact requested `tt_bits` until NNUE config changes.
+        let mut prewarm_status = self.ensure_prewarm_status();
+        if prewarm_status == Some(PrewarmStatus::Loading) {
+            if let Some(budget_ms) = limits.time_limit_ms {
+                let elapsed_ms = cmd_start.elapsed().as_secs_f64() * 1000.0;
+                let remaining_ms = (budget_ms - elapsed_ms).max(0.0);
+                let wait_cap_ms = (remaining_ms * 0.4).min(remaining_ms - 30.0).max(0.0);
+                if wait_cap_ms > 0.0 {
+                    prewarm_status = Some(self.wait_prewarm_bounded(
+                        std::time::Duration::from_secs_f64(wait_cap_ms / 1000.0),
+                    ));
+                }
+            }
+        }
+        let cold_nnue_timed_fallback =
+            prewarm_status == Some(PrewarmStatus::Loading) && limits.time_limit_ms.is_some();
+        let nnue_failed = prewarm_status == Some(PrewarmStatus::Failed);
+
+        let mut effective_config = self.config.clone();
+        if cold_nnue_timed_fallback || nnue_failed {
+            effective_config.runtime.use_nnue = false;
+        }
+        let cached_searcher = if cold_nnue_timed_fallback {
+            None
+        } else {
+            self.searcher.take().filter(|searcher| {
+                expected_auto_bits
+                    .is_none_or(|bits| searcher.tt.bucket_count() == (1_usize << bits))
+            })
+        };
         let mut searcher = match cached_searcher {
             Some(searcher) => searcher,
-            None => match self.tt_bits {
-                Some(bits) => match TranspositionTable::try_new(bits) {
-                    Ok(tt) => RootSearcher::with_tt(self.config.clone(), tt),
+            None => {
+                // Resolve NNUE weights BEFORE allocating the TT so missing weights
+                // allocate only the classical 2-way plane instead of 4-way + 2-way.
+                let nnue = crate::search::alphabeta::load_nnue_for_config(&effective_config);
+                if effective_config.runtime.use_nnue {
+                    let final_code = if nnue.is_some() {
+                        PREWARM_READY
+                    } else {
+                        PREWARM_FAILED
+                    };
+                    if let Some(dir) = effective_config.runtime.nnue_dir.as_deref() {
+                        let p = std::path::Path::new(dir);
+                        let canonical_dir =
+                            std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+                        self.nnue_prewarm = Some((
+                            canonical_dir,
+                            effective_config.rule_set,
+                            Arc::new((Mutex::new(final_code), Condvar::new())),
+                        ));
+                    }
+                    if nnue.is_none() {
+                        effective_config.runtime.use_nnue = false;
+                    }
+                }
+                let prefer_four_way_tt = nnue.is_some();
+                let tt_result = if cold_nnue_timed_fallback {
+                    let bits = self.tt_bits.map(|b| b.min(16)).unwrap_or(16);
+                    TranspositionTable::try_new_with_layout(bits, false).map(|tt| (tt, None))
+                } else {
+                    match self.tt_bits {
+                        Some(bits) => {
+                            TranspositionTable::try_new_with_layout(bits, prefer_four_way_tt)
+                                .map(|tt| (tt, None))
+                        }
+                        None => {
+                            let preferred_bits = expected_auto_bits.expect("auto bits computed");
+                            TranspositionTable::try_new_with_fallback_layout(
+                                preferred_bits,
+                                16,
+                                prefer_four_way_tt,
+                            )
+                            .map(|(tt, actual_bits)| {
+                                let clamped = (actual_bits < preferred_bits).then_some(actual_bits);
+                                (tt, clamped)
+                            })
+                        }
+                    }
+                };
+                match tt_result {
+                    Ok((tt, clamped_bits)) => {
+                        if let Some(actual_bits) = clamped_bits {
+                            self.auto_tt_max_bits = actual_bits;
+                        }
+                        RootSearcher::with_tt_and_nnue(effective_config.clone(), tt, nnue)
+                    }
                     Err(_) => {
                         return vec!["ERROR Unable to allocate transposition table.".to_string()]
                     }
-                },
-                None => {
-                    let preferred_bits = expected_auto_bits.expect("auto bits computed");
-                    match TranspositionTable::try_new_with_fallback(preferred_bits, 16) {
-                        Ok((tt, actual_bits)) => {
-                            if actual_bits < preferred_bits {
-                                self.auto_tt_max_bits = actual_bits;
-                            }
-                            RootSearcher::with_tt(self.config.clone(), tt)
-                        }
-                        Err(_) => {
-                            return vec!["ERROR Unable to allocate transposition table.".to_string()]
-                        }
-                    }
                 }
-            },
+            }
         };
-        searcher.config = self.config.clone();
+        searcher.config = effective_config;
+        if let Some(budget_ms) = limits.time_limit_ms.as_mut() {
+            let setup_ms = cmd_start.elapsed().as_secs_f64() * 1000.0;
+            *budget_ms = (*budget_ms - setup_ms).max(1.0);
+        }
         let result = searcher
             .try_search(&mut self.board, Some(limits))
             .expect("protocol checked the board is non-terminal");
         let trace = searcher.last_trace.clone();
-        self.searcher = Some(searcher);
+        if !cold_nnue_timed_fallback {
+            self.searcher = Some(searcher);
+        }
 
         let mut move_ = result.move_;
         if !self.board.is_legal_move_for_rule(
@@ -807,17 +1062,32 @@ mod tests {
             Some(1000.0)
         );
 
-        let mut match_only = GomocupProtocol::default();
-        match_only.config.runtime.use_nnue = true;
-        match_only.handle_line("INFO timeout_match 60000");
-        let slice = match_only
-            .current_search_limits()
-            .time_limit_ms
-            .expect("match budget computed");
-        assert!(
-            slice >= 1000.0 && slice <= 2500.0,
-            "60s match clock should pace opening move around 1.5s, got {slice}"
+        // Missing weights with use_nnue=true must fall back to classical match-clock
+        // behavior instead of pacing as if NNUE were active.
+        let mut missing_nnue = GomocupProtocol::default();
+        missing_nnue.config.runtime.use_nnue = true;
+        missing_nnue.config.runtime.nnue_dir = Some("nonexistent/weights".to_string());
+        missing_nnue.handle_line("INFO timeout_match 60000");
+        assert_eq!(
+            missing_nnue.current_search_limits().time_limit_ms,
+            Some(60000.0)
         );
+
+        let local_weights = std::path::Path::new("opponent/rapfi-networks/mix9svq");
+        if local_weights.exists() {
+            let mut match_only = GomocupProtocol::default();
+            match_only.handle_line(&format!("INFO nnue_dir {}", local_weights.display()));
+            match_only.handle_line("START 15");
+            match_only.handle_line("INFO timeout_match 60000");
+            let slice = match_only
+                .current_search_limits()
+                .time_limit_ms
+                .expect("match budget computed");
+            assert!(
+                (1000.0..=2500.0).contains(&slice),
+                "60s match clock should pace opening move around 1.5s, got {slice}"
+            );
+        }
 
         let mut unlimited_match = GomocupProtocol::default();
         unlimited_match.handle_line("INFO timeout_turn 1000");

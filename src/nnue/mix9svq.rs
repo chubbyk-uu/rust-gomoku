@@ -80,44 +80,97 @@ impl StandardHeader {
 
 #[derive(Clone, Debug)]
 pub struct FcWeight<const OUT: usize, const IN: usize> {
-    pub weight: Vec<i8>,
-    pub bias: Vec<i32>,
+    weight: Vec<i8>,
+    bias: Vec<i32>,
     /// Precomputed `bias[o] - 128 * sum_j weight[o][j]` for AVX-VNNI signed-i8 inputs.
-    pub signed_bias: Vec<i32>,
+    signed_bias: Vec<i32>,
+}
+
+impl<const OUT: usize, const IN: usize> FcWeight<OUT, IN> {
+    /// Construct a shape-validated fully-connected layer weight.
+    /// Enforces `weight.len() == OUT * IN` and `bias.len() == OUT` at the
+    /// construction boundary so SIMD kernels can rely on exact dimensions
+    /// without per-evaluation bounds overhead.
+    pub fn new(weight: Vec<i8>, bias: Vec<i32>) -> io::Result<Self> {
+        if weight.len() != OUT * IN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "FcWeight<{OUT}, {IN}> weight length mismatch: got {}, expected {}",
+                    weight.len(),
+                    OUT * IN
+                ),
+            ));
+        }
+        if bias.len() != OUT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "FcWeight<{OUT}, {IN}> bias length mismatch: got {}, expected {OUT}",
+                    bias.len()
+                ),
+            ));
+        }
+        let signed_bias = compute_signed_input_bias::<OUT, IN>(&weight, &bias);
+        Ok(Self {
+            weight,
+            bias,
+            signed_bias,
+        })
+    }
+
+    #[inline(always)]
+    pub fn weight(&self) -> &[i8] {
+        &self.weight
+    }
+
+    #[inline(always)]
+    pub fn bias(&self) -> &[i32] {
+        &self.bias
+    }
+
+    #[inline(always)]
+    pub fn signed_bias(&self) -> &[i32] {
+        &self.signed_bias
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct StarBlockWeight<const OUT: usize, const IN: usize> {
-    pub up1: FcWeight<{ VALUE_DIM * 2 }, IN>,
-    pub up2: FcWeight<{ VALUE_DIM * 2 }, IN>,
-    pub down: FcWeight<OUT, OUT>,
+    up1: FcWeight<{ VALUE_DIM * 2 }, IN>,
+    up2: FcWeight<{ VALUE_DIM * 2 }, IN>,
+    down: FcWeight<OUT, OUT>,
 }
 
 #[derive(Clone, Debug)]
 pub struct HeadBucket {
-    pub policy_pwconv_l1: FcWeight<{ POLICY_DIM * 2 }, FEATURE_DIM>,
-    pub policy_pwconv_l2:
+    policy_pwconv_l1: FcWeight<{ POLICY_DIM * 2 }, FEATURE_DIM>,
+    policy_pwconv_l2:
         FcWeight<{ POLICY_PWCONV_DIM * POLICY_DIM + POLICY_PWCONV_DIM }, { POLICY_DIM * 2 }>,
-    pub value_corner: StarBlockWeight<VALUE_DIM, FEATURE_DIM>,
-    pub value_edge: StarBlockWeight<VALUE_DIM, FEATURE_DIM>,
-    pub value_center: StarBlockWeight<VALUE_DIM, FEATURE_DIM>,
-    pub value_quad: StarBlockWeight<VALUE_DIM, VALUE_DIM>,
-    pub value_l1: FcWeight<VALUE_DIM, { FEATURE_DIM + VALUE_DIM * 4 }>,
-    pub value_l2: FcWeight<VALUE_DIM, VALUE_DIM>,
-    pub value_l3: FcWeight<4, VALUE_DIM>,
-    pub policy_output_weight: [f32; 16],
-    pub policy_output_bias: f32,
+    value_corner: StarBlockWeight<VALUE_DIM, FEATURE_DIM>,
+    value_edge: StarBlockWeight<VALUE_DIM, FEATURE_DIM>,
+    value_center: StarBlockWeight<VALUE_DIM, FEATURE_DIM>,
+    value_quad: StarBlockWeight<VALUE_DIM, VALUE_DIM>,
+    value_l1: FcWeight<VALUE_DIM, { FEATURE_DIM + VALUE_DIM * 4 }>,
+    value_l2: FcWeight<VALUE_DIM, VALUE_DIM>,
+    value_l3: FcWeight<4, VALUE_DIM>,
+    policy_output_weight: [f32; 16],
+    policy_output_bias: f32,
 }
 
 /// Shared read-only `Mix9svq` weights (~18 MiB per side).
+///
+/// All tensor buffers are private and shape-validated at load/construction time
+/// so safe evaluation entry points always pass exact-dimension slices to SIMD
+/// kernels.
 #[derive(Debug)]
 pub struct Mix9svqWeight {
     pub header: StandardHeader,
-    pub codebook: [Box<[[i16; FEATURE_DIM]; CODEBOOK_SIZE]>; 2],
-    pub mapping_index: [Box<[u16; SHAPE_NUM]>; 2],
-    pub feature_dwconv_weight: [[i16; FEAT_DWCONV_DIM]; 9],
-    pub feature_dwconv_bias: [i16; FEAT_DWCONV_DIM],
-    pub bucket: HeadBucket,
+    codebook: [Box<[[i16; FEATURE_DIM]; CODEBOOK_SIZE]>; 2],
+    mapping_index: [Box<[u16; SHAPE_NUM]>; 2],
+    feature_dwconv_weight: [[i16; FEAT_DWCONV_DIM]; 9],
+    feature_dwconv_bias: [i16; FEAT_DWCONV_DIM],
+    bucket: HeadBucket,
 }
 
 struct ByteCursor<'a> {
@@ -176,11 +229,7 @@ impl<'a> ByteCursor<'a> {
     fn read_fc<const OUT: usize, const IN: usize>(&mut self) -> io::Result<FcWeight<OUT, IN>> {
         let weight = self.read_i8_vec(OUT * IN)?;
         let bias = self.read_i32_vec(OUT)?;
-        Ok(FcWeight {
-            weight,
-            bias,
-            signed_bias: Vec::new(),
-        })
+        FcWeight::new(weight, bias)
     }
 
     fn read_star_block<const OUT: usize, const IN: usize>(
@@ -1738,6 +1787,27 @@ impl Mix9svqEvaluator {
         self.accumulator[1].clear(&self.weight[1]);
         self.synced_history = Some(Vec::new());
         self.pending_balance = 0;
+    }
+
+    /// Stable identity hash of the currently loaded black/white weight pair,
+    /// used by `AlphaBetaSearcher` to isolate TT keys across weight switches.
+    pub fn weight_identity_hash(&self) -> u64 {
+        fn mix64(mut x: u64) -> u64 {
+            x ^= x >> 30;
+            x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            x ^= x >> 27;
+            x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+            x ^ (x >> 31)
+        }
+        let mut h = 0x243F_6A88_85A3_08D3_u64;
+        for w in &self.weight {
+            let ptr = Arc::as_ptr(w) as usize as u64;
+            h = mix64(h ^ ptr);
+            h = mix64(h ^ u64::from(w.header.arch_hash));
+            h = mix64(h ^ u64::from(w.header.rule_mask));
+            h = mix64(h ^ u64::from(w.header.boardsize_mask));
+        }
+        h
     }
 
     pub fn sync_with_board(&mut self, board: &Board) {

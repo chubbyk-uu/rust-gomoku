@@ -7,13 +7,18 @@ pub mod simd;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use crate::rules::RuleSet;
 
 pub use mix9svq::{Mix9svqEvaluator, Mix9svqWeight, NNUE_SCALING_FACTOR, NNUE_VALUE_CLAMP};
 
-static WEIGHT_CACHE: OnceLock<Mutex<HashMap<(PathBuf, u8), Arc<Mix9svqWeight>>>> = OnceLock::new();
+enum WeightCacheEntry {
+    Loading(Arc<(Mutex<bool>, Condvar)>),
+    Ready(Arc<Mix9svqWeight>),
+}
+
+static WEIGHT_CACHE: OnceLock<Mutex<HashMap<(PathBuf, u8), WeightCacheEntry>>> = OnceLock::new();
 
 fn rule_key(rule: RuleSet) -> u8 {
     match rule {
@@ -22,22 +27,93 @@ fn rule_key(rule: RuleSet) -> u8 {
     }
 }
 
+/// Deduplicated, process-wide cached weight loader: concurrent callers requesting
+/// the same `(canonical_path, rule)` wait on the single in-flight loader instead
+/// of decoding the same `.bin.lz4` file multiple times in parallel.
 fn load_cached_weight(path: &Path, rule: RuleSet) -> io::Result<Arc<Mix9svqWeight>> {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let key = (canonical.clone(), rule_key(rule));
     let cache = WEIGHT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(existing) = cache
-        .lock()
-        .expect("nnue weight cache lock")
-        .get(&key)
-        .cloned()
-    {
-        return Ok(existing);
+
+    loop {
+        let waiter = {
+            let mut guard = cache.lock().expect("nnue weight cache lock");
+            match guard.get(&key) {
+                Some(WeightCacheEntry::Ready(existing)) => return Ok(existing.clone()),
+                Some(WeightCacheEntry::Loading(pair)) => Some(pair.clone()),
+                None => {
+                    let pair = Arc::new((Mutex::new(false), Condvar::new()));
+                    guard.insert(key.clone(), WeightCacheEntry::Loading(pair));
+                    None
+                }
+            }
+        };
+
+        if let Some(pair) = waiter {
+            let (lock, cvar) = &*pair;
+            let mut done = lock.lock().expect("nnue weight waiter lock");
+            while !*done {
+                done = cvar.wait(done).expect("nnue weight waiter cvar");
+            }
+            continue;
+        }
+
+        // We own the in-flight slot for `key`.
+        let load_res = Mix9svqWeight::load_from_lz4_file(&canonical, rule).map(Arc::new);
+        let pair = {
+            let mut guard = cache.lock().expect("nnue weight cache lock");
+            let prev = match &load_res {
+                Ok(loaded) => guard.insert(key.clone(), WeightCacheEntry::Ready(loaded.clone())),
+                Err(_) => guard.remove(&key),
+            };
+            match prev {
+                Some(WeightCacheEntry::Loading(p)) => Some(p),
+                _ => None,
+            }
+        };
+        if let Some(pair) = pair {
+            let (lock, cvar) = &*pair;
+            let mut done = lock.lock().expect("nnue weight waiter lock");
+            *done = true;
+            cvar.notify_all();
+        }
+        return load_res;
     }
-    let loaded = Arc::new(Mix9svqWeight::load_from_lz4_file(&canonical, rule)?);
-    let mut guard = cache.lock().expect("nnue weight cache lock");
-    let entry = guard.entry(key).or_insert_with(|| loaded.clone());
-    Ok(entry.clone())
+}
+
+/// Fast metadata check whether the expected `.bin.lz4` weight files for
+/// `(dir, rule)` exist on disk.
+pub fn mix9svq_files_exist_for_rule(dir: &Path, rule: RuleSet) -> bool {
+    match rule {
+        RuleSet::Freestyle => dir.join("mix9svqfreestyle_bsmix.bin.lz4").exists(),
+        RuleSet::Renju => {
+            dir.join("mix9svqrenju_bs15_black.bin.lz4").exists()
+                && dir.join("mix9svqrenju_bs15_white.bin.lz4").exists()
+        }
+    }
+}
+
+/// Non-blocking check whether the `Mix9svq` weights for `(dir, rule)` are
+/// already decoded and resident in the process-wide `WEIGHT_CACHE`.
+pub fn is_mix9svq_cached_for_rule(dir: &Path, rule: RuleSet) -> bool {
+    let Some(cache) = WEIGHT_CACHE.get() else {
+        return false;
+    };
+    let guard = cache.lock().expect("nnue weight cache lock");
+    let has_path = |path: PathBuf| {
+        let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+        matches!(
+            guard.get(&(canonical, rule_key(rule))),
+            Some(WeightCacheEntry::Ready(_))
+        )
+    };
+    match rule {
+        RuleSet::Freestyle => has_path(dir.join("mix9svqfreestyle_bsmix.bin.lz4")),
+        RuleSet::Renju => {
+            has_path(dir.join("mix9svqrenju_bs15_black.bin.lz4"))
+                && has_path(dir.join("mix9svqrenju_bs15_white.bin.lz4"))
+        }
+    }
 }
 
 /// Load a `Mix9svqEvaluator` for `rule` from a directory containing Rapfi's

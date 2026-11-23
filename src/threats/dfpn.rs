@@ -338,12 +338,28 @@ impl DfpnSearcher {
                     return (0, DFPN_INF, Some(mv));
                 }
             }
-            if view.pat4.win5_bits(-attacker).is_empty() {
+            let opp_win5 = view.pat4.win5_bits(-attacker);
+            if opp_win5.is_empty() {
                 for idx in view.pat4.a4_bits(attacker).iter_indices() {
                     let mv = crate::threats::pattern4::idx_to_move(idx);
                     if view.fast_rule_legal_empty(mv, idx, attacker) {
                         self.tt_store(key, 0, DFPN_INF, Some(mv));
                         return (0, DFPN_INF, Some(mv));
+                    }
+                }
+            } else if opp_win5.count() == 1 {
+                if let Some(idx) = opp_win5.iter_indices().next() {
+                    if view.pat4.a4_bits(attacker).contains(idx) {
+                        let mv = crate::threats::pattern4::idx_to_move(idx);
+                        if view.fast_rule_legal_empty(mv, idx, attacker) {
+                            view.play(mv, attacker);
+                            let opp_still_has_win5 = !view.pat4.win5_bits(-attacker).is_empty();
+                            view.undo();
+                            if !opp_still_has_win5 {
+                                self.tt_store(key, 0, DFPN_INF, Some(mv));
+                                return (0, DFPN_INF, Some(mv));
+                            }
+                        }
                     }
                 }
             }

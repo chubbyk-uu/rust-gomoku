@@ -83,6 +83,11 @@ pub struct RuntimeOptions {
     pub read_config_each_move: bool,
     pub compute_vcf: bool,
     pub root_vcf_depth: i32,
+    /// Explicit root VCF depth override (`Some(d)` distinguishes an explicit
+    /// `8` from the unset default `DEFAULT_ROOT_VCF_DEPTH = 8` when NNUE mode
+    /// automatically deepens root VCF to `DEFAULT_DEEP_VCF_DEPTH = 16`).
+    /// Private so callers must go through `set_root_vcf_depth` or `root_vcf_depth`.
+    root_vcf_depth_override: Option<i32>,
     pub opponent_vcf_depth: i32,
     pub vct_verify_opponent_vcf_depth: i32,
     pub vcf_multi_reply: bool,
@@ -100,6 +105,35 @@ pub struct RuntimeOptions {
     /// Optional root candidate timing probe. Defaults to off and must not
     /// affect search decisions.
     pub root_profile: bool,
+}
+
+impl RuntimeOptions {
+    /// Set an explicit root VCF depth (disabling automatic NNUE deepening even
+    /// when `depth == DEFAULT_ROOT_VCF_DEPTH`).
+    pub fn set_root_vcf_depth(&mut self, depth: i32) {
+        let clamped = depth.max(0);
+        self.root_vcf_depth = clamped;
+        self.root_vcf_depth_override = Some(clamped);
+    }
+
+    /// Resolve the effective root VCF depth for the current evaluator mode.
+    pub fn effective_root_vcf_depth(&self, nnue_active: bool) -> i32 {
+        if let Some(explicit) = self.root_vcf_depth_override {
+            if self.root_vcf_depth == explicit {
+                return explicit.max(0);
+            }
+            // Caller directly mutated `root_vcf_depth` after `set_root_vcf_depth`.
+            return self.root_vcf_depth.max(0);
+        }
+        if self.root_vcf_depth != DEFAULT_ROOT_VCF_DEPTH {
+            return self.root_vcf_depth.max(0);
+        }
+        if nnue_active {
+            crate::threats::vcf::DEFAULT_DEEP_VCF_DEPTH
+        } else {
+            DEFAULT_ROOT_VCF_DEPTH
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,6 +209,7 @@ fn default_runtime_options(para: &[f64]) -> RuntimeOptions {
         read_config_each_move: para[offset + 5] != 0.0,
         compute_vcf: true,
         root_vcf_depth: DEFAULT_ROOT_VCF_DEPTH,
+        root_vcf_depth_override: None,
         opponent_vcf_depth: DEFAULT_OPPONENT_VCF_DEPTH,
         vct_verify_opponent_vcf_depth: DEFAULT_VCT_VERIFY_OPPONENT_VCF_DEPTH,
         vcf_multi_reply: DEFAULT_VCF_MULTI_REPLY,

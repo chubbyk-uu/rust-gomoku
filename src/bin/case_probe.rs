@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use rust_gomoku::{
     load_default_config, move_to_xy, xy_to_move, Board, RootSearcher, SearchLimits,
-    TranspositionTable, VCTAndMemoCollisionSample, VCTDepthStats, VCTStats, BLACK,
-    MAX_SEARCH_THREADS, MAX_TT_BUCKET_BITS, WHITE,
+    VCTAndMemoCollisionSample, VCTDepthStats, VCTStats, BLACK, MAX_SEARCH_THREADS,
+    MAX_TT_BUCKET_BITS, WHITE,
 };
 
 #[derive(Debug, Deserialize)]
@@ -496,10 +496,8 @@ fn run_case(case: MatchCase, args: &ProbeArgs) -> Result<ProbeOutput, String> {
         ..SearchLimits::default()
     };
     let mut searcher = if let Some(bits) = args.tt_bits {
-        RootSearcher::with_tt(
-            config,
-            TranspositionTable::try_new(bits).map_err(|err| format!("invalid TT: {err:?}"))?,
-        )
+        RootSearcher::try_with_tt_bits(config, bits)
+            .map_err(|err| format!("invalid TT: {err:?}"))?
     } else {
         RootSearcher::new_for_limits(config, limits)
     };

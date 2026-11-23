@@ -214,7 +214,7 @@ pub struct AlphaBetaSearcher {
     nnue: Option<Mix9svqEvaluator>,
 }
 
-fn load_nnue_for_config(config: &EngineConfig) -> Option<Mix9svqEvaluator> {
+pub(crate) fn load_nnue_for_config(config: &EngineConfig) -> Option<Mix9svqEvaluator> {
     if !config.runtime.use_nnue {
         return None;
     }
@@ -238,9 +238,10 @@ fn load_nnue_for_config(config: &EngineConfig) -> Option<Mix9svqEvaluator> {
 
 impl AlphaBetaSearcher {
     pub fn new(config: EngineConfig) -> Self {
-        let mut tt = TranspositionTable::default();
-        tt.set_subply(config.runtime.threads > 1);
         let nnue = load_nnue_for_config(&config);
+        let mut tt = TranspositionTable::try_new_with_layout(20, nnue.is_some())
+            .expect("default TT allocation succeeds");
+        tt.set_subply(config.runtime.threads > 1);
         Self {
             config,
             tt,
@@ -251,9 +252,17 @@ impl AlphaBetaSearcher {
         }
     }
 
-    pub fn with_tt(config: EngineConfig, mut tt: TranspositionTable) -> Self {
-        tt.set_subply(config.runtime.threads > 1);
+    pub fn with_tt(config: EngineConfig, tt: TranspositionTable) -> Self {
         let nnue = load_nnue_for_config(&config);
+        Self::with_tt_and_nnue(config, tt, nnue)
+    }
+
+    pub(crate) fn with_tt_and_nnue(
+        config: EngineConfig,
+        mut tt: TranspositionTable,
+        nnue: Option<Mix9svqEvaluator>,
+    ) -> Self {
+        tt.set_subply(config.runtime.threads > 1);
         Self {
             config,
             tt,
@@ -281,6 +290,21 @@ impl AlphaBetaSearcher {
 
     pub fn has_nnue(&self) -> bool {
         self.nnue.is_some()
+    }
+
+    /// Deterministic 64-bit TT key salt isolating rule set (Freestyle vs Renju)
+    /// and active evaluator / NNUE weight identity on shared transposition tables.
+    /// Classical Freestyle keeps `0` so legacy baseline keys remain bit-identical.
+    fn tt_key_salt(&self) -> u64 {
+        const RENJU_SALT: u64 = 0x9E37_79B9_7F4A_7C15;
+        let rule_salt = match self.config.rule_set {
+            crate::rules::RuleSet::Freestyle => 0,
+            crate::rules::RuleSet::Renju => RENJU_SALT,
+        };
+        match &self.nnue {
+            None => rule_salt,
+            Some(nnue) => rule_salt ^ nnue.weight_identity_hash(),
+        }
     }
 
     pub(crate) fn sync_config(&mut self, config: &EngineConfig) {
@@ -347,9 +371,14 @@ impl AlphaBetaSearcher {
     ) -> (i32, Option<Move>) {
         self.tt.set_subply(self.config.runtime.threads > 1);
         let tt = self.tt.clone();
-        let tt_view = tt.view();
+        let key_salt = self.tt_key_salt();
         let tt_view4 = if self.nnue.is_some() {
-            tt.view4()
+            tt.view4_with_salt(key_salt)
+        } else {
+            None
+        };
+        let tt_view = if tt_view4.is_none() {
+            Some(tt.view_with_salt(key_salt))
         } else {
             None
         };
@@ -390,12 +419,15 @@ impl AlphaBetaSearcher {
         coverage: &mut CoverageTracker,
         pending_cache: Option<((usize, usize), &mut Option<EvalSnapshot>)>,
         abdada: Option<&AbdadaContext>,
-        tt_view: TTTableView<'_>,
+        tt_view: Option<TTTableView<'_>>,
         tt_view4: Option<TTTableView4<'_>>,
     ) -> (i32, Option<Move>) {
         let root_depth = options.root_depth.unwrap_or(depth);
         let priority_base = options.priority_base.unwrap_or(board.move_count() as i32);
-        let subply_tt = tt_view.is_subply();
+        let subply_tt = tt_view4
+            .map(|v| v.is_subply())
+            .or_else(|| tt_view.map(|v| v.is_subply()))
+            .unwrap_or(false);
         let max_encodable_depth = if subply_tt {
             SUBPLY_TT_DEPTH_CAP
         } else {
@@ -520,8 +552,8 @@ impl AlphaBetaSearcher {
                 p4.static_eval,
                 p4.tt_pv,
             )
-        } else {
-            let p2 = tt_view.probe(
+        } else if let Some(tt2) = tt_view {
+            let p2 = tt2.probe(
                 board.zobrist_key(),
                 probe_depth,
                 score_to_tt(alpha, options.ply),
@@ -539,6 +571,10 @@ impl AlphaBetaSearcher {
                 p2.window_beta,
                 None,
                 false,
+            )
+        } else {
+            (
+                false, None, None, 0, None, None, false, alpha, beta, None, false,
             )
         };
         if let Some(best_move_hint) = probe_best_move_hint {
@@ -591,8 +627,8 @@ impl AlphaBetaSearcher {
                     tt_pv: is_pv || tt_was_pv,
                     generation: self.tt_generation,
                 });
-            } else {
-                tt_view.store(TTEntry {
+            } else if let Some(tt2) = tt_view {
+                tt2.store(TTEntry {
                     key: board.zobrist_key(),
                     value: score_to_tt(score, options.ply),
                     flag: HASHF_EXACT,
@@ -1054,8 +1090,8 @@ impl AlphaBetaSearcher {
                     .expect("ordered candidate stays legal");
                 if let Some(tt4) = tt_view4 {
                     tt4.prefetch(board.zobrist_key());
-                } else {
-                    tt_view.prefetch(board.zobrist_key());
+                } else if let Some(tt2) = tt_view {
+                    tt2.prefetch(board.zobrist_key());
                 }
                 coverage.add_move(candidate.move_);
                 if let Some(nnue) = self.nnue.as_mut() {
@@ -1333,8 +1369,8 @@ impl AlphaBetaSearcher {
                     tt_pv: is_pv || tt_was_pv,
                     generation: self.tt_generation,
                 });
-            } else {
-                tt_view.store(TTEntry {
+            } else if let Some(tt2) = tt_view {
+                tt2.store(TTEntry {
                     key: board.zobrist_key(),
                     value: score_to_tt(current, options.ply),
                     flag: hash_flag,

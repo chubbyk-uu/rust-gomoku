@@ -327,7 +327,7 @@ fn run_case(case: DiffCase, root_profile: bool) -> ProbeOutput {
         config.runtime.compute_vcf = v;
     }
     if let Some(v) = case.runtime.root_vcf_depth {
-        config.runtime.root_vcf_depth = v.max(0);
+        config.runtime.set_root_vcf_depth(v.max(0));
     }
     if let Some(v) = case.runtime.opponent_vcf_depth {
         config.runtime.opponent_vcf_depth = v.max(0);

@@ -398,9 +398,10 @@ impl RootSearcher {
     pub fn new(config: EngineConfig) -> Self {
         let depth = config.root_search.depth;
         let bits = default_tt_bits_for_search(config.runtime.threads, depth);
-        let (tt, _) = TranspositionTable::try_new_with_fallback(bits, 16)
+        let nnue = super::alphabeta::load_nnue_for_config(&config);
+        let (tt, _) = TranspositionTable::try_new_with_fallback_layout(bits, 16, nnue.is_some())
             .expect("transposition table allocation succeeds");
-        Self::with_tt(config, tt)
+        Self::with_tt_and_nnue(config, tt, nnue)
     }
 
     pub fn new_for_limits(config: EngineConfig, limits: SearchLimits) -> Self {
@@ -410,14 +411,35 @@ impl RootSearcher {
             config.runtime.threads
         };
         let bits = default_tt_bits_for_search(effective_threads, limits.max_depth);
-        let (tt, _) = TranspositionTable::try_new_with_fallback(bits, 16)
+        let nnue = super::alphabeta::load_nnue_for_config(&config);
+        let (tt, _) = TranspositionTable::try_new_with_fallback_layout(bits, 16, nnue.is_some())
             .expect("transposition table allocation succeeds");
-        Self::with_tt(config, tt)
+        Self::with_tt_and_nnue(config, tt, nnue)
     }
 
-    pub fn with_tt(config: EngineConfig, mut tt: TranspositionTable) -> Self {
+    pub fn with_tt(config: EngineConfig, tt: TranspositionTable) -> Self {
+        let nnue = super::alphabeta::load_nnue_for_config(&config);
+        Self::with_tt_and_nnue(config, tt, nnue)
+    }
+
+    /// Construct a `RootSearcher` with an explicit TT bit size, choosing the
+    /// single TT plane layout (4-way vs 2-way) from the actually loaded evaluator.
+    pub fn try_with_tt_bits(
+        config: EngineConfig,
+        bits: u32,
+    ) -> Result<Self, crate::search::TTError> {
+        let nnue = super::alphabeta::load_nnue_for_config(&config);
+        let tt = TranspositionTable::try_new_with_layout(bits, nnue.is_some())?;
+        Ok(Self::with_tt_and_nnue(config, tt, nnue))
+    }
+
+    pub(crate) fn with_tt_and_nnue(
+        config: EngineConfig,
+        mut tt: TranspositionTable,
+        nnue: Option<crate::nnue::Mix9svqEvaluator>,
+    ) -> Self {
         tt.set_subply(config.runtime.threads > 1);
-        let alphabeta = AlphaBetaSearcher::with_tt(config.clone(), tt.clone());
+        let alphabeta = AlphaBetaSearcher::with_tt_and_nnue(config.clone(), tt.clone(), nnue);
         Self {
             config,
             tt,
@@ -1091,6 +1113,7 @@ impl RootSearcher {
             };
         }
 
+        self.alphabeta.sync_config(&self.config);
         let side = board.side_to_move();
         let mut trace = RootTrace::default();
         self.last_trace = Some(trace.clone());
@@ -1098,12 +1121,12 @@ impl RootSearcher {
 
         if vcf_enabled {
             trace.used_vcf = true;
-            let vcf_result = if self.config.runtime.use_nnue {
-                let deep_depth = self
-                    .config
-                    .runtime
-                    .root_vcf_depth
-                    .max(crate::threats::vcf::DEFAULT_DEEP_VCF_DEPTH);
+            let effective_vcf_depth = self
+                .config
+                .runtime
+                .effective_root_vcf_depth(self.has_nnue());
+            let vcf_result = if self.has_nnue() && effective_vcf_depth > 0 {
+                let deep_depth = effective_vcf_depth;
                 const TIMED_DEEP_VCF_BUDGET_FRACTION: f64 = 0.03;
                 let vcf_sub_budget = self
                     .vcf
@@ -1129,7 +1152,7 @@ impl RootSearcher {
                 self.vcf.search_with_multi_reply_for_rule(
                     board,
                     side,
-                    self.config.runtime.root_vcf_depth,
+                    effective_vcf_depth,
                     self.config.runtime.vcf_multi_reply,
                     self.config.rule_set,
                 )

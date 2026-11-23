@@ -214,12 +214,17 @@ fn unpack_entry4(key: u64, data: u64) -> TTEntry4 {
     }
 }
 
+const FOUR_WAY_SUBPLY_SALT: u64 = 0xD1B5_4A32_D192_ED03;
+
 #[derive(Debug)]
 struct TTStorage {
-    buckets: Vec<[RawEntry; 2]>,
+    bucket_count: usize,
     primary_mode: AtomicU8,
+    buckets: OnceLock<Option<Vec<[RawEntry; 2]>>>,
     secondary_buckets: OnceLock<Option<Vec<[RawEntry; 2]>>>,
+    four_way_primary_mode: AtomicU8,
     four_way_buckets: OnceLock<Option<Vec<TTBucket4>>>,
+    four_way_secondary_buckets: OnceLock<Option<Vec<TTBucket4>>>,
 }
 
 impl TTStorage {
@@ -241,26 +246,69 @@ impl TTStorage {
         Ok(buckets)
     }
 
-    fn try_new(bucket_count: usize) -> Result<Self, TTError> {
-        Ok(Self {
-            buckets: Self::alloc_buckets(bucket_count)?,
-            primary_mode: AtomicU8::new(0),
-            secondary_buckets: OnceLock::new(),
-            four_way_buckets: OnceLock::new(),
-        })
+    fn four_way_bucket_count(two_way_bucket_count: usize) -> usize {
+        (two_way_bucket_count / 2).max(1)
     }
 
-    fn four_way_buckets(&self) -> Option<&[TTBucket4]> {
-        // Keep the same total memory footprint as the 2-way table (half as many
-        // 64B buckets = identical entry count and cache footprint).
-        let count = (self.buckets.len() / 2).max(1);
-        self.four_way_buckets
+    fn new_empty(bucket_count: usize) -> Self {
+        Self {
+            bucket_count,
+            primary_mode: AtomicU8::new(0),
+            buckets: OnceLock::new(),
+            secondary_buckets: OnceLock::new(),
+            four_way_primary_mode: AtomicU8::new(0),
+            four_way_buckets: OnceLock::new(),
+            four_way_secondary_buckets: OnceLock::new(),
+        }
+    }
+
+    fn try_new_with_layout(bucket_count: usize, four_way: bool) -> Result<Self, TTError> {
+        let storage = Self::new_empty(bucket_count);
+        if four_way {
+            let fw = Self::alloc_buckets4(Self::four_way_bucket_count(bucket_count))?;
+            let _ = storage.four_way_buckets.set(Some(fw));
+        } else {
+            let tw = Self::alloc_buckets(bucket_count)?;
+            let _ = storage.buckets.set(Some(tw));
+        }
+        Ok(storage)
+    }
+
+    fn four_way_buckets_for_mode(&self, subply: bool) -> Option<&[TTBucket4]> {
+        let wanted = if subply { 2_u8 } else { 1_u8 };
+        let current = match self.four_way_primary_mode.load(Ordering::Acquire) {
+            0 => match self.four_way_primary_mode.compare_exchange(
+                0,
+                wanted,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => wanted,
+                Err(actual) => actual,
+            },
+            actual => actual,
+        };
+        let count = Self::four_way_bucket_count(self.bucket_count);
+        let primary = self
+            .four_way_buckets
+            .get_or_init(|| Self::alloc_buckets4(count).ok())
+            .as_deref()?;
+        if current == wanted {
+            return Some(primary);
+        }
+        if let Some(sec) = self
+            .four_way_secondary_buckets
             .get_or_init(|| Self::alloc_buckets4(count).ok())
             .as_deref()
+        {
+            Some(sec)
+        } else {
+            Some(primary)
+        }
     }
 
     fn bucket_count(&self) -> usize {
-        self.buckets.len()
+        self.bucket_count
     }
 
     #[inline]
@@ -278,18 +326,40 @@ impl TTStorage {
             },
             actual => actual,
         };
+        let primary = self
+            .buckets
+            .get_or_init(|| Self::alloc_buckets(self.bucket_count).ok())
+            .as_deref()
+            .expect("primary 2-way TT bucket plane allocatable");
         if current == wanted {
-            return &self.buckets;
+            return primary;
         }
         if let Some(sec) = self
             .secondary_buckets
-            .get_or_init(|| Self::alloc_buckets(self.buckets.len()).ok())
-            .as_ref()
+            .get_or_init(|| Self::alloc_buckets(self.bucket_count).ok())
+            .as_deref()
         {
             sec
         } else {
-            &self.buckets
+            primary
         }
+    }
+
+    fn allocated_bucket_bytes(&self) -> usize {
+        let mut total = 0_usize;
+        if let Some(Some(b)) = self.buckets.get() {
+            total += b.len() * std::mem::size_of::<[RawEntry; 2]>();
+        }
+        if let Some(Some(b)) = self.secondary_buckets.get() {
+            total += b.len() * std::mem::size_of::<[RawEntry; 2]>();
+        }
+        if let Some(Some(b)) = self.four_way_buckets.get() {
+            total += b.len() * std::mem::size_of::<TTBucket4>();
+        }
+        if let Some(Some(b)) = self.four_way_secondary_buckets.get() {
+            total += b.len() * std::mem::size_of::<TTBucket4>();
+        }
+        total
     }
 }
 
@@ -420,7 +490,7 @@ pub struct TranspositionTable {
 }
 
 impl TranspositionTable {
-    pub fn try_new(bucket_bits: u32) -> Result<Self, TTError> {
+    pub fn try_new_with_layout(bucket_bits: u32, four_way: bool) -> Result<Self, TTError> {
         if bucket_bits > MAX_TT_BUCKET_BITS || bucket_bits >= usize::BITS {
             return Err(TTError::BucketBitsOutOfRange(bucket_bits));
         }
@@ -429,9 +499,13 @@ impl TranspositionTable {
             .ok_or(TTError::BucketBitsOutOfRange(bucket_bits))?;
         Ok(Self {
             bucket_mask: (1_u64 << bucket_bits) - 1,
-            storage: Arc::new(TTStorage::try_new(bucket_count)?),
+            storage: Arc::new(TTStorage::try_new_with_layout(bucket_count, four_way)?),
             subply: false,
         })
+    }
+
+    pub fn try_new(bucket_bits: u32) -> Result<Self, TTError> {
+        Self::try_new_with_layout(bucket_bits, false)
     }
 
     pub fn new(bucket_bits: u32) -> Self {
@@ -444,10 +518,18 @@ impl TranspositionTable {
         preferred_bits: u32,
         min_bits: u32,
     ) -> Result<(Self, u32), TTError> {
+        Self::try_new_with_fallback_layout(preferred_bits, min_bits, false)
+    }
+
+    pub fn try_new_with_fallback_layout(
+        preferred_bits: u32,
+        min_bits: u32,
+        four_way: bool,
+    ) -> Result<(Self, u32), TTError> {
         let floor = min_bits.min(preferred_bits);
         let mut bits = preferred_bits;
         loop {
-            match Self::try_new(bits) {
+            match Self::try_new_with_layout(bits, four_way) {
                 Ok(tt) => return Ok((tt, bits)),
                 Err(TTError::AllocationFailed) if bits > floor => {
                     bits -= 1;
@@ -471,10 +553,16 @@ impl TranspositionTable {
         Arc::ptr_eq(&self.storage, &other.storage)
     }
 
+    pub fn allocated_bucket_bytes(&self) -> usize {
+        self.storage.allocated_bucket_bytes()
+    }
+
     pub fn clear(&self) {
-        for bucket in &self.storage.buckets {
-            for entry in bucket {
-                entry.store_words(0, 0);
+        if let Some(Some(buckets)) = self.storage.buckets.get() {
+            for bucket in buckets {
+                for entry in bucket {
+                    entry.store_words(0, 0);
+                }
             }
         }
         if let Some(Some(sec)) = self.storage.secondary_buckets.get() {
@@ -491,13 +579,21 @@ impl TranspositionTable {
                 }
             }
         }
+        if let Some(Some(fw_sec)) = self.storage.four_way_secondary_buckets.get() {
+            for bucket in fw_sec {
+                for entry in &bucket.entries {
+                    entry.store_words(0, 0);
+                }
+            }
+        }
     }
 
     /// Selects the depth encoding partition (`false` = integer-ply 1T mode,
     /// `true` = 1/64-ply multi-threaded mode) on this table handle.
     /// The first mode used claims the primary bucket array; if the other mode
     /// is also used on the same `Arc<TTStorage>`, it automatically routes to
-    /// an isolated secondary bucket array (plus per-entry mode-bit tagging).
+    /// an isolated secondary bucket array (plus per-entry mode-bit / key-salt
+    /// tagging).
     pub fn set_subply(&mut self, subply: bool) {
         self.subply = subply;
     }
@@ -515,40 +611,77 @@ impl TranspositionTable {
     }
 
     pub fn fork_snapshot(&self) -> Self {
+        let storage = TTStorage::new_empty(self.storage.bucket_count());
+        let has_two_way = self.storage.buckets.get().is_some_and(Option::is_some);
+        let has_four_way = self
+            .storage
+            .four_way_buckets
+            .get()
+            .is_some_and(Option::is_some);
+
         let snapshot = Self {
             bucket_mask: self.bucket_mask,
-            storage: Arc::new(
-                TTStorage::try_new(self.storage.bucket_count())
-                    .expect("existing TT capacity remains allocatable for snapshot"),
-            ),
+            storage: Arc::new(storage),
             subply: self.subply,
         };
-        let src_buckets = self.storage.buckets_for_mode(self.subply);
-        let dst_buckets = snapshot.storage.buckets_for_mode(self.subply);
-        for (src_bucket, dst_bucket) in src_buckets.iter().zip(dst_buckets.iter()) {
-            for (src, dst) in src_bucket.iter().zip(dst_bucket.iter()) {
-                let (key_check, data) = src.load_words();
-                dst.store_words(key_check, data);
+
+        if has_two_way {
+            let src_buckets = self.storage.buckets_for_mode(self.subply);
+            let dst_buckets = snapshot.storage.buckets_for_mode(self.subply);
+            for (src_bucket, dst_bucket) in src_buckets.iter().zip(dst_buckets.iter()) {
+                for (src, dst) in src_bucket.iter().zip(dst_bucket.iter()) {
+                    let (key_check, data) = src.load_words();
+                    dst.store_words(key_check, data);
+                }
+            }
+        }
+        if has_four_way {
+            if let (Some(src_buckets), Some(dst_buckets)) = (
+                self.storage.four_way_buckets_for_mode(self.subply),
+                snapshot.storage.four_way_buckets_for_mode(self.subply),
+            ) {
+                for (src_bucket, dst_bucket) in src_buckets.iter().zip(dst_buckets.iter()) {
+                    for (src, dst) in src_bucket.entries.iter().zip(dst_bucket.entries.iter()) {
+                        let (key_check, data) = src.load_words();
+                        dst.store_words(key_check, data);
+                    }
+                }
             }
         }
         snapshot
     }
 
     pub(crate) fn view(&self) -> TTTableView<'_> {
+        self.view_with_salt(0)
+    }
+
+    pub(crate) fn view_with_salt(&self, key_salt: u64) -> TTTableView<'_> {
         TTTableView {
             buckets: self.storage.buckets_for_mode(self.subply),
             bucket_mask: self.bucket_mask,
             subply: self.subply,
+            key_salt,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn view4(&self) -> Option<TTTableView4<'_>> {
-        let buckets = self.storage.four_way_buckets()?;
+        self.view4_with_salt(0)
+    }
+
+    pub(crate) fn view4_with_salt(&self, key_salt: u64) -> Option<TTTableView4<'_>> {
+        let buckets = self.storage.four_way_buckets_for_mode(self.subply)?;
         let mask = (buckets.len() as u64) - 1;
+        let effective_salt = if self.subply {
+            key_salt ^ FOUR_WAY_SUBPLY_SALT
+        } else {
+            key_salt
+        };
         Some(TTTableView4 {
             buckets,
             bucket_mask: mask,
             subply: self.subply,
+            key_salt: effective_salt,
         })
     }
 
@@ -573,9 +706,15 @@ pub(crate) struct TTTableView<'a> {
     buckets: &'a [[RawEntry; 2]],
     bucket_mask: u64,
     subply: bool,
+    key_salt: u64,
 }
 
 impl<'a> TTTableView<'a> {
+    #[inline(always)]
+    fn salted_key(&self, key: u64) -> u64 {
+        key ^ self.key_salt
+    }
+
     #[inline(always)]
     fn bucket_index(&self, key: u64) -> usize {
         (key & self.bucket_mask) as usize
@@ -588,6 +727,7 @@ impl<'a> TTTableView<'a> {
 
     #[inline(always)]
     pub(crate) fn prefetch(&self, key: u64) {
+        let key = self.salted_key(key);
         #[cfg(target_arch = "x86_64")]
         {
             let ptr = self.buckets.as_ptr().wrapping_add(self.bucket_index(key)) as *const i8;
@@ -604,7 +744,8 @@ impl<'a> TTTableView<'a> {
     }
 
     #[inline]
-    pub(crate) fn store(&self, entry: TTEntry) {
+    pub(crate) fn store(&self, mut entry: TTEntry) {
+        entry.key = self.salted_key(entry.key);
         let bucket = &self.buckets[self.bucket_index(entry.key)];
         let (first, first_subply) = bucket[0].load_raw_with_mode();
         let mut slot = 0_usize;
@@ -618,6 +759,7 @@ impl<'a> TTTableView<'a> {
 
     #[inline]
     pub(crate) fn probe(&self, key: u64, depth: i32, alpha: i32, beta: i32) -> ProbeResult {
+        let key = self.salted_key(key);
         let mut fallback_best_move = None;
         let mut fallback_best_move_hint = None;
         let raw_bucket = &self.buckets[self.bucket_index(key)];
@@ -697,9 +839,20 @@ pub(crate) struct TTTableView4<'a> {
     buckets: &'a [TTBucket4],
     bucket_mask: u64,
     subply: bool,
+    key_salt: u64,
 }
 
 impl<'a> TTTableView4<'a> {
+    #[inline(always)]
+    fn salted_key(&self, key: u64) -> u64 {
+        key ^ self.key_salt
+    }
+
+    #[inline(always)]
+    pub(crate) fn is_subply(&self) -> bool {
+        self.subply
+    }
+
     #[inline(always)]
     fn bucket_index(&self, key: u64) -> usize {
         (key & self.bucket_mask) as usize
@@ -707,6 +860,7 @@ impl<'a> TTTableView4<'a> {
 
     #[inline(always)]
     pub(crate) fn prefetch(&self, key: u64) {
+        let key = self.salted_key(key);
         #[cfg(target_arch = "x86_64")]
         {
             let ptr = self.buckets.as_ptr().wrapping_add(self.bucket_index(key)) as *const i8;
@@ -722,6 +876,7 @@ impl<'a> TTTableView4<'a> {
 
     #[inline]
     pub(crate) fn probe(&self, key: u64, depth: i32, alpha: i32, beta: i32) -> ProbeResult4 {
+        let key = self.salted_key(key);
         let bucket = &self.buckets[self.bucket_index(key)];
         for raw_entry in &bucket.entries {
             let data = raw_entry.data.load(Ordering::Relaxed);
@@ -783,6 +938,7 @@ impl<'a> TTTableView4<'a> {
 
     #[inline]
     pub(crate) fn store(&self, mut entry: TTEntry4) {
+        entry.key = self.salted_key(entry.key);
         let bucket = &self.buckets[self.bucket_index(entry.key)];
         let depth_unit = if self.subply { 64 } else { 1 };
         let mut replace_idx = 0_usize;
