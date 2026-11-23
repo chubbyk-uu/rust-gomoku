@@ -541,12 +541,17 @@ fn update_line_neighbor_point(
         for (player, changed) in changed_player.into_iter().enumerate() {
             if changed {
                 let old_bucket = caches.value_cache[player][x][y] as usize;
+                let old_attack = caches.attack_cache[player][x][y];
                 let is_dt3 = update_bucket_attack(board, caches, x, y, player, rule);
                 if was_empty {
                     let new_bucket = caches.value_cache[player][x][y] as usize;
                     if old_bucket != new_bucket {
                         caches.dec_empty_bucket(player, old_bucket);
                         caches.inc_empty_bucket(player, new_bucket);
+                    }
+                    let new_attack = caches.attack_cache[player][x][y];
+                    if old_attack != new_attack && (old_attack >= 4 || new_attack >= 4) {
+                        caches.set_attack_masks(player, y * BOARD_SIZE + x, new_attack);
                     }
                 }
                 if renju && player == 0 {
@@ -613,6 +618,8 @@ fn side_index(side: i8) -> usize {
 fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
     caches.empty_bucket_counts = [[0; DSHAPE_SIZE]; 2];
     caches.nonzero_bucket_mask = [[0; 3]; 2];
+    caches.attack4_mask = [[0; 4]; 2];
+    caches.l5_mask = [[0; 4]; 2];
     caches.dgn_sum = [0; 2];
     let preserve_snapshot = caches.active_snapshot_count > 0;
     if !preserve_snapshot {
@@ -640,9 +647,14 @@ fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
                 if preserve_snapshot {
                     caches.set_dgn_cc(x, y, 0);
                 }
+                let move_idx = y * BOARD_SIZE + x;
                 for player in 0..2 {
                     let bucket = caches.value_cache[player][x][y] as usize;
                     caches.inc_empty_bucket(player, bucket);
+                    let attack = caches.attack_cache[player][x][y];
+                    if attack >= 4 {
+                        caches.set_attack_masks(player, move_idx, attack);
+                    }
                 }
             } else {
                 let player = side_index(cell);
@@ -663,9 +675,13 @@ fn remove_empty_bucket_contribution(caches: &mut EvalCaches, x: usize, y: usize)
     if caches.board_shadow[x][y] != EMPTY {
         return;
     }
+    let move_idx = y * BOARD_SIZE + x;
     for player in 0..2 {
         let bucket = caches.value_cache[player][x][y] as usize;
         caches.dec_empty_bucket(player, bucket);
+        if caches.attack_cache[player][x][y] >= 4 {
+            caches.clear_attack_masks(player, move_idx);
+        }
     }
 }
 
@@ -673,9 +689,14 @@ fn add_empty_bucket_contribution(board: &Board, caches: &mut EvalCaches, x: usiz
     if board.grid_rows()[y][x] != EMPTY {
         return;
     }
+    let move_idx = y * BOARD_SIZE + x;
     for player in 0..2 {
         let bucket = caches.value_cache[player][x][y] as usize;
         caches.inc_empty_bucket(player, bucket);
+        let attack = caches.attack_cache[player][x][y];
+        if attack >= 4 {
+            caches.set_attack_masks(player, move_idx, attack);
+        }
     }
 }
 
@@ -878,6 +899,9 @@ fn refresh_renju_apparent_double_three_points(
         let new_bucket_index = bucket as usize;
         caches.dec_empty_bucket(player, old_bucket_index);
         caches.inc_empty_bucket(player, new_bucket_index);
+        if old_attack >= 4 || attack >= 4 {
+            caches.set_attack_masks(player, move_, attack);
+        }
         set_bucket_attack(caches, x, y, player, bucket, attack);
     }
 }
@@ -1251,6 +1275,70 @@ mod tests {
                     cached, scan,
                     "{rule:?} side={side}: incremental dgn must match scan after snapshot + recompute_all"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn attack4_and_l5_bitboards_stay_exact_across_play_and_snapshot_restore() {
+        use crate::board::xy_to_move;
+
+        fn assert_masks_exact(board: &Board, caches: &EvalCaches, label: &str) {
+            let mut expected_a4 = [[0_u64; 4]; 2];
+            let mut expected_l5 = [[0_u64; 4]; 2];
+            for y in 0..BOARD_SIZE {
+                for x in 0..BOARD_SIZE {
+                    if board.grid_rows()[y][x] != EMPTY {
+                        continue;
+                    }
+                    let idx = y * BOARD_SIZE + x;
+                    let word = idx >> 6;
+                    let bit = 1_u64 << (idx & 63);
+                    for player in 0..2 {
+                        let att = caches.attack_cache[player][x][y];
+                        if att >= 4 {
+                            expected_a4[player][word] |= bit;
+                            if att == 6 {
+                                expected_l5[player][word] |= bit;
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                caches.attack4_mask, expected_a4,
+                "{label}: attack4_mask mismatch"
+            );
+            assert_eq!(caches.l5_mask, expected_l5, "{label}: l5_mask mismatch");
+        }
+
+        for rule in [RuleSet::Freestyle, RuleSet::Renju] {
+            let mut board = Board::new();
+            let mut caches = EvalCaches::new();
+            recompute_all_for_rule(&mut board, &mut caches, rule);
+            let moves = [
+                (7, 7, BLACK),
+                (7, 8, WHITE),
+                (8, 7, BLACK),
+                (8, 8, WHITE),
+                (9, 7, BLACK),
+                (9, 8, WHITE),
+                (6, 7, BLACK),
+                (10, 7, WHITE),
+                (10, 8, BLACK),
+                (5, 7, WHITE),
+            ];
+            let mut snaps = Vec::new();
+            for (step, &(x, y, side)) in moves.iter().enumerate() {
+                snaps.push(caches.snapshot());
+                board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
+                value_wide_compute_for_rule(&mut board, &mut caches, (x, y), rule);
+                assert_masks_exact(&board, &caches, &format!("{rule:?} play step {step}"));
+            }
+            for (step, snap) in snaps.iter().enumerate().rev() {
+                board.undo().unwrap();
+                caches.restore_snapshot(snap);
+                assert_masks_exact(&board, &caches, &format!("{rule:?} undo step {step}"));
             }
         }
     }

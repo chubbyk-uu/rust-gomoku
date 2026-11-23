@@ -3,15 +3,19 @@
 use std::collections::HashSet;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, LazyLock,
 };
 use std::time::Instant;
 
 use crate::board::{move_to_xy, Board};
 use crate::config::EngineConfig;
-use crate::constants::{BOARD_AREA, HASHF_ALPHA, HASHF_BETA, HASHF_EXACT, INF, WIN};
+use crate::constants::{
+    BLACK, BOARD_AREA, BOARD_SIZE, EMPTY, HASHF_ALPHA, HASHF_BETA, HASHF_EMPTY, HASHF_EXACT, INF,
+    WIN,
+};
 use crate::eval::{evaluate_board, value_wide_compute_for_rule, EvalCaches, EvalSnapshot};
 use crate::nnue::{load_mix9svq_evaluator_for_rule, Mix9svqEvaluator};
+use crate::rules::RuleSet;
 use crate::search::abdada::{AbdadaContext, ABDADA_MIN_DEPTH};
 use crate::search::movegen::{
     generate_candidates_with_coverage_scratch, is_rule_legal_for_movegen, Candidate,
@@ -30,6 +34,65 @@ const SUBPLY_TT_SCALE_F64: f64 = 64.0;
 const SUBPLY_TT_DEPTH_CAP: i32 = 3200;
 const SUBPLY_TT_WIN_BONUS: i32 = 640;
 const INTEGER_TT_DEPTH_CAP: i32 = crate::search::tt::DEPTH_MAX - 10;
+const QVCF_MAX_STEPS: i32 = 8;
+const QVCF_MAX_PLY: i32 = 96;
+/// TT4 depth bands in NNUE subply mode:
+/// - `0`: static-eval-only (`HASHF_EMPTY`)
+/// - `1`: QVCF combo-only (`qdepth <= -2`)
+/// - `2`: QVCF full local B4 (`qdepth >= -1`)
+/// - `>= 3`: main alpha-beta search (`depth > 0.0`, shifted by `NNUE_MAIN_TT_DEPTH_OFFSET`)
+const QVCF_TT_DEPTH_COMB: i32 = 1;
+const QVCF_TT_DEPTH_FULL: i32 = 2;
+const NNUE_MAIN_TT_DEPTH_OFFSET: i32 = 3;
+/// Minimum `value_cache` bucket for a combo B4 (`B4 + L2` or stronger: `L4S` top1=10, top2>=6 -> bucket >= 62).
+const QVCF_COMB_MIN_BUCKET: i32 = 62;
+
+/// Precomputed `RANGE_SQUARE2_LINE4` neighborhood bitboards for each board square
+/// (all cells within Chebyshev distance <= 2 plus distance 3..=4 along the 4 lines).
+static QVCF_NEIGHBOR_MASKS: LazyLock<[[u64; 4]; BOARD_AREA]> = LazyLock::new(|| {
+    let mut table = [[0_u64; 4]; BOARD_AREA];
+    for idx in 0..BOARD_AREA {
+        let cx = (idx % BOARD_SIZE) as isize;
+        let cy = (idx / BOARD_SIZE) as isize;
+        let mut mask = [0_u64; 4];
+        for dy in -2_isize..=2 {
+            for dx in -2_isize..=2 {
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+                let nx = cx + dx;
+                let ny = cy + dy;
+                if (0..BOARD_SIZE as isize).contains(&nx) && (0..BOARD_SIZE as isize).contains(&ny)
+                {
+                    let nidx = ny as usize * BOARD_SIZE + nx as usize;
+                    mask[nidx >> 6] |= 1_u64 << (nidx & 63);
+                }
+            }
+        }
+        for &(dx, dy) in &[
+            (1_isize, 0_isize),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+            (1, 1),
+            (-1, -1),
+            (1, -1),
+            (-1, 1),
+        ] {
+            for dist in 3_isize..=4 {
+                let nx = cx + dx * dist;
+                let ny = cy + dy * dist;
+                if (0..BOARD_SIZE as isize).contains(&nx) && (0..BOARD_SIZE as isize).contains(&ny)
+                {
+                    let nidx = ny as usize * BOARD_SIZE + nx as usize;
+                    mask[nidx >> 6] |= 1_u64 << (nidx & 63);
+                }
+            }
+        }
+        table[idx] = mask;
+    }
+    table
+});
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RootCandidateProfile {
@@ -436,18 +499,29 @@ impl AlphaBetaSearcher {
         } else {
             INTEGER_TT_DEPTH_CAP
         };
+        let nnue_depth_offset = if tt_view4.is_some() && subply_tt {
+            NNUE_MAIN_TT_DEPTH_OFFSET
+        } else {
+            0
+        };
         let raw_hash_depth = if depth <= 0.0 {
             0
         } else if subply_tt {
             ((depth * SUBPLY_TT_SCALE_F64).floor() as i64).clamp(0, i64::from(i32::MAX)) as i32
+                + nnue_depth_offset
         } else {
             (depth.floor() as i64).clamp(0, i64::from(i32::MAX)) as i32
         };
         let hash_depth = raw_hash_depth.min(max_encodable_depth);
         let raw_probe_depth = if depth <= 0.0 {
-            0
+            if nnue_depth_offset > 0 {
+                QVCF_TT_DEPTH_FULL
+            } else {
+                0
+            }
         } else if subply_tt {
             ((depth * SUBPLY_TT_SCALE_F64).ceil() as i64).clamp(1, i64::from(i32::MAX)) as i32
+                + nnue_depth_offset
         } else {
             (depth.ceil() as i64).clamp(1, i64::from(i32::MAX)) as i32
         };
@@ -608,6 +682,48 @@ impl AlphaBetaSearcher {
 
         if depth <= 0.0 {
             stats.leaf_nodes += 1;
+            if self.nnue.is_some() && caches.initialized && caches.rule_set == self.config.rule_set
+            {
+                let score = if caches.has_l5(side) {
+                    INF - options.ply
+                } else if caches.has_l5(-side) {
+                    self.vcfdefend(
+                        board,
+                        caches,
+                        side,
+                        alpha,
+                        beta,
+                        0,
+                        options.ply,
+                        stats,
+                        coverage,
+                        abdada,
+                        tt_view4,
+                    )
+                } else {
+                    self.vcfsearch(
+                        board,
+                        caches,
+                        side,
+                        alpha,
+                        beta,
+                        0,
+                        options.ply,
+                        stats,
+                        coverage,
+                        abdada,
+                        tt_view4,
+                        Some((
+                            probe_hit,
+                            probe_tt_value,
+                            probe_tt_flag,
+                            probe_best_move,
+                            tt_static_eval,
+                        )),
+                    )
+                };
+                return (score, None);
+            }
             let mut score =
                 (-evaluate_board(board, caches, -side, options.opo, &self.config)) as i32;
             let mut leaf_static_eval = TT_VALUE_NONE;
@@ -1517,6 +1633,488 @@ impl AlphaBetaSearcher {
             }
         }
         (current, best_move)
+    }
+
+    #[inline(always)]
+    fn qvcf_check_stop(&mut self, stats: &mut SearchStats, abdada: Option<&AbdadaContext>) -> bool {
+        let next_node = stats.nodes + 1;
+        if stats
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+        {
+            stats.stop = true;
+            return true;
+        }
+        if (next_node & 0x3F) == 0 && abdada.is_some_and(AbdadaContext::is_stopped) {
+            stats.stop = true;
+            return true;
+        }
+        if stats.node_limit.is_some_and(|limit| stats.nodes >= limit) {
+            stats.stop = true;
+            return true;
+        }
+        if stats.deadline.is_some_and(|deadline| {
+            (next_node == 1 || (next_node & stats.time_check_mask) == 0)
+                && Instant::now() >= deadline
+        }) {
+            stats.stop = true;
+            return true;
+        }
+        if !self.vcf.budget.enter() {
+            stats.stop = true;
+            return true;
+        }
+        stats.nodes = next_node;
+        false
+    }
+
+    #[inline(always)]
+    fn qvcf_delta_margin(&self, qdepth: i32) -> i32 {
+        match self.config.rule_set {
+            RuleSet::Renju => (2154 + 53 * qdepth).max(768),
+            RuleSet::Freestyle => (2084 + 62 * qdepth).max(768),
+        }
+    }
+
+    /// Attack-side leaf quiescence VCF search (`vcfsearch`) for NNUE mode.
+    /// Evaluates stand-pat NNUE value and extends forcing B4 sequences so leaf
+    /// horizons do not miss tactical wins or counter-VCFs.
+    #[allow(clippy::too_many_arguments)]
+    fn vcfsearch(
+        &mut self,
+        board: &mut Board,
+        caches: &mut EvalCaches,
+        side: Side,
+        mut alpha: i32,
+        mut beta: i32,
+        qdepth: i32,
+        ply: i32,
+        stats: &mut SearchStats,
+        coverage: &mut CoverageTracker,
+        abdada: Option<&AbdadaContext>,
+        tt_view4: Option<TTTableView4<'_>>,
+        pre_probe: Option<(bool, Option<i32>, u8, Option<Move>, Option<i32>)>,
+    ) -> i32 {
+        if pre_probe.is_none() {
+            if self.qvcf_check_stop(stats, abdada) {
+                return 0;
+            }
+            if let Some(score) = terminal_score(board, side, ply) {
+                return score;
+            }
+            if board.move_count() >= BOARD_AREA {
+                return 0;
+            }
+        }
+        if ply >= QVCF_MAX_PLY {
+            return self
+                .nnue
+                .as_mut()
+                .expect("vcfsearch requires NNUE")
+                .evaluate_value(side);
+        }
+
+        // O(1) immediate win / counter-four defense check.
+        if caches.has_l5(side) {
+            return INF - ply;
+        }
+        if caches.has_l5(-side) {
+            return self.vcfdefend(
+                board,
+                caches,
+                side,
+                alpha,
+                beta,
+                qdepth - 1,
+                ply,
+                stats,
+                coverage,
+                abdada,
+                tt_view4,
+            );
+        }
+        if caches.has_l4(side) && board.move_count() + 2 < BOARD_AREA {
+            return INF - (ply + 2);
+        }
+
+        // Mate distance pruning.
+        alpha = alpha.max(-INF + ply);
+        beta = beta.min(INF - ply - 1);
+        if alpha >= beta {
+            return alpha;
+        }
+
+        let is_pv = beta - alpha > 1;
+        let old_alpha = alpha;
+        let qvcf_tt_depth = if qdepth >= -1 {
+            QVCF_TT_DEPTH_FULL
+        } else {
+            QVCF_TT_DEPTH_COMB
+        };
+
+        let (tt_hit, probe_tt_value, probe_tt_flag, tt_move, tt_static_eval) =
+            if let Some(pre) = pre_probe {
+                pre
+            } else if let Some(tt4) = tt_view4 {
+                let p4 = tt4.probe(
+                    board.zobrist_key(),
+                    qvcf_tt_depth,
+                    score_to_tt(alpha, ply),
+                    score_to_tt(beta, ply),
+                );
+                if p4.hit && p4.value.is_some() {
+                    stats.tt_hits += 1;
+                    return score_from_tt(p4.value.expect("checked above"), ply);
+                }
+                (
+                    p4.hit,
+                    p4.tt_value,
+                    p4.tt_flag,
+                    p4.best_move,
+                    p4.static_eval,
+                )
+            } else {
+                (false, None, HASHF_EMPTY, None, None)
+            };
+
+        // Stand-pat NNUE evaluation, refined with cached TT bound when sharper.
+        let raw_eval = match tt_static_eval {
+            Some(ev) => ev,
+            None => self
+                .nnue
+                .as_mut()
+                .expect("vcfsearch requires NNUE")
+                .evaluate_value(side),
+        };
+        let mut best_value = raw_eval;
+        if let Some(tt_val) = probe_tt_value {
+            let adj = score_from_tt(tt_val, ply);
+            if adj.abs() < WIN
+                && (probe_tt_flag == HASHF_EXACT
+                    || (probe_tt_flag == HASHF_BETA && adj > best_value)
+                    || (probe_tt_flag == HASHF_ALPHA && adj < best_value))
+            {
+                best_value = adj;
+            }
+        }
+
+        // Stand-pat cutoff.
+        if best_value >= beta {
+            if !tt_hit && tt_static_eval.is_none() {
+                if let Some(tt4) = tt_view4 {
+                    tt4.store(TTEntry4 {
+                        key: board.zobrist_key(),
+                        value: TT_VALUE_NONE,
+                        static_eval: raw_eval,
+                        flag: HASHF_EMPTY,
+                        depth: 0,
+                        best_move: None,
+                        tt_pv: false,
+                        generation: self.tt_generation,
+                    });
+                }
+            }
+            return best_value;
+        }
+        if is_pv && best_value > alpha {
+            alpha = best_value;
+        }
+
+        // Non-PV delta pruning.
+        if !is_pv && best_value + self.qvcf_delta_margin(qdepth) < alpha {
+            if !tt_hit && tt_static_eval.is_none() {
+                if let Some(tt4) = tt_view4 {
+                    tt4.store(TTEntry4 {
+                        key: board.zobrist_key(),
+                        value: TT_VALUE_NONE,
+                        static_eval: raw_eval,
+                        flag: HASHF_EMPTY,
+                        depth: 0,
+                        best_move: None,
+                        tt_pv: false,
+                        generation: self.tt_generation,
+                    });
+                }
+            }
+            return alpha;
+        }
+
+        // O(1) depth cap or no attacker B4 available.
+        let self_last = board
+            .move_history()
+            .iter()
+            .rev()
+            .find(|played| played.side == side)
+            .map(|played| played.move_ as usize);
+        if qdepth <= -QVCF_MAX_STEPS || !caches.has_attack4_plus(side) || self_last.is_none() {
+            if let Some(tt4) = tt_view4 {
+                let flag = if is_pv && best_value > old_alpha {
+                    HASHF_EXACT
+                } else {
+                    HASHF_ALPHA
+                };
+                tt4.store(TTEntry4 {
+                    key: board.zobrist_key(),
+                    value: score_to_tt(best_value, ply),
+                    static_eval: raw_eval,
+                    flag,
+                    depth: qvcf_tt_depth,
+                    best_move: None,
+                    tt_pv: is_pv,
+                    generation: self.tt_generation,
+                });
+            }
+            return best_value;
+        }
+
+        // Collect legal local B4 forcing moves in `RANGE_SQUARE2_LINE4` around
+        // `self_last` directly from the O(1) bitboard (plus valid TT move).
+        // For `qdepth <= -2`, restrict to combo B4s (`bucket >= QVCF_COMB_MIN_BUCKET`)
+        // to match Rapfi's `DEPTH_QVCF_FULL = -1` / `VCF | COMB` discipline.
+        let player = if side == BLACK { 0 } else { 1 };
+        let allow_plain_b4 = qdepth >= -1;
+        let neighbor_mask = &QVCF_NEIGHBOR_MASKS[self_last.expect("checked above")];
+        let mut mask = [
+            caches.attack4_mask[player][0] & neighbor_mask[0],
+            caches.attack4_mask[player][1] & neighbor_mask[1],
+            caches.attack4_mask[player][2] & neighbor_mask[2],
+            caches.attack4_mask[player][3] & neighbor_mask[3],
+        ];
+        if let Some(tt_mv) = tt_move {
+            let idx = tt_mv as usize;
+            if idx < BOARD_AREA
+                && (caches.attack4_mask[player][idx >> 6] & (1_u64 << (idx & 63))) != 0
+            {
+                mask[idx >> 6] |= 1_u64 << (idx & 63);
+            }
+        }
+        let mut b4_moves = [(0_u16, 0_i32); 32];
+        let mut b4_len = 0_usize;
+        for (word_idx, mut word) in mask.into_iter().enumerate() {
+            let base = word_idx << 6;
+            while word != 0 {
+                let idx = base + word.trailing_zeros() as usize;
+                word &= word - 1;
+                if idx >= BOARD_AREA {
+                    break;
+                }
+                let mv = idx as Move;
+                let mx = idx % BOARD_SIZE;
+                let my = idx / BOARD_SIZE;
+                let bucket = caches.value_cache[player][mx][my];
+                if !allow_plain_b4 && Some(mv) != tt_move && bucket < QVCF_COMB_MIN_BUCKET {
+                    continue;
+                }
+                debug_assert_eq!(board.grid_rows()[my][mx], EMPTY);
+                debug_assert!(is_rule_legal_for_movegen(
+                    board,
+                    caches,
+                    mv,
+                    side,
+                    self.config.rule_set
+                ));
+                let score = if Some(mv) == tt_move {
+                    i32::MAX
+                } else {
+                    bucket
+                };
+                if b4_len < b4_moves.len() {
+                    b4_moves[b4_len] = (mv, score);
+                    b4_len += 1;
+                }
+            }
+        }
+        // Small insertion sort descending by score (typically 1..5 moves).
+        for i in 1..b4_len {
+            let cur = b4_moves[i];
+            let mut j = i;
+            while j > 0 && b4_moves[j - 1].1 < cur.1 {
+                b4_moves[j] = b4_moves[j - 1];
+                j -= 1;
+            }
+            b4_moves[j] = cur;
+        }
+
+        let mut best_move: Option<Move> = None;
+        for &(mv, _) in &b4_moves[..b4_len] {
+            let (mx, my) = move_to_xy(mv).expect("B4 move valid");
+            let snapshot = caches.snapshot();
+            board
+                .play_assuming_rule_legal(mv, Some(side), self.config.rule_set)
+                .expect("B4 move stays legal");
+            if let Some(tt4) = tt_view4 {
+                tt4.prefetch(board.zobrist_key());
+            }
+            coverage.add_move(mv);
+            if let Some(nnue) = self.nnue.as_mut() {
+                nnue.before_move(side, mx, my);
+            }
+            value_wide_compute_for_rule(board, caches, (mx, my), self.config.rule_set);
+
+            let child_score = -self.vcfdefend(
+                board,
+                caches,
+                -side,
+                -beta,
+                -alpha,
+                qdepth - 1,
+                ply + 1,
+                stats,
+                coverage,
+                abdada,
+                tt_view4,
+            );
+
+            board.undo().expect("B4 move undo matches play");
+            if let Some(nnue) = self.nnue.as_mut() {
+                nnue.after_undo(side, mx, my);
+            }
+            coverage.remove_move(mv);
+            caches.restore_snapshot(&snapshot);
+
+            if stats.stop {
+                return 0;
+            }
+            if child_score > best_value {
+                best_value = child_score;
+                if child_score > alpha {
+                    best_move = Some(mv);
+                    if is_pv && child_score < beta {
+                        alpha = child_score;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(tt4) = tt_view4 {
+            let mut flag = if best_value >= beta {
+                HASHF_BETA
+            } else if is_pv && best_value > old_alpha {
+                HASHF_EXACT
+            } else {
+                HASHF_ALPHA
+            };
+            if (best_value >= WIN && best_value > old_alpha)
+                || (best_value <= -WIN && best_value < beta)
+            {
+                flag = HASHF_EXACT;
+            }
+            tt4.store(TTEntry4 {
+                key: board.zobrist_key(),
+                value: score_to_tt(best_value, ply),
+                static_eval: raw_eval,
+                flag,
+                depth: qvcf_tt_depth,
+                best_move,
+                tt_pv: is_pv,
+                generation: self.tt_generation,
+            });
+        }
+
+        best_value
+    }
+
+    /// Defense-side leaf quiescence VCF search (`vcfdefend`) for NNUE mode.
+    #[allow(clippy::too_many_arguments)]
+    fn vcfdefend(
+        &mut self,
+        board: &mut Board,
+        caches: &mut EvalCaches,
+        side: Side,
+        alpha: i32,
+        beta: i32,
+        qdepth: i32,
+        ply: i32,
+        stats: &mut SearchStats,
+        coverage: &mut CoverageTracker,
+        abdada: Option<&AbdadaContext>,
+        tt_view4: Option<TTTableView4<'_>>,
+    ) -> i32 {
+        if self.qvcf_check_stop(stats, abdada) {
+            return 0;
+        }
+        if let Some(score) = terminal_score(board, side, ply) {
+            return score;
+        }
+        if board.move_count() >= BOARD_AREA {
+            return 0;
+        }
+        if ply >= QVCF_MAX_PLY {
+            return self
+                .nnue
+                .as_mut()
+                .expect("vcfdefend requires NNUE")
+                .evaluate_value(side);
+        }
+
+        // Immediate counter-win beats opponent's pending four.
+        if caches.has_l5(side) {
+            return INF - ply;
+        }
+
+        let opp_l5_count = caches.l5_count(-side);
+        if opp_l5_count == 0 {
+            return self
+                .nnue
+                .as_mut()
+                .expect("vcfdefend requires NNUE")
+                .evaluate_value(side);
+        }
+        if opp_l5_count >= 2 {
+            return -INF + ply + 2;
+        }
+
+        let mv = caches.first_l5_move(-side).expect("opp_l5_count == 1");
+        if self.config.rule_set == RuleSet::Renju
+            && side == BLACK
+            && !is_rule_legal_for_movegen(board, caches, mv, side, self.config.rule_set)
+        {
+            return -INF + ply + 2;
+        }
+
+        let (mx, my) = move_to_xy(mv).expect("forced block valid");
+        let snapshot = caches.snapshot();
+        board
+            .play_assuming_rule_legal(mv, Some(side), self.config.rule_set)
+            .expect("forced block stays legal");
+        if let Some(tt4) = tt_view4 {
+            tt4.prefetch(board.zobrist_key());
+        }
+        coverage.add_move(mv);
+        if let Some(nnue) = self.nnue.as_mut() {
+            nnue.before_move(side, mx, my);
+        }
+        value_wide_compute_for_rule(board, caches, (mx, my), self.config.rule_set);
+
+        let value = -self.vcfsearch(
+            board,
+            caches,
+            -side,
+            -beta,
+            -alpha,
+            qdepth,
+            ply + 1,
+            stats,
+            coverage,
+            abdada,
+            tt_view4,
+            None,
+        );
+
+        board.undo().expect("forced block undo matches play");
+        if let Some(nnue) = self.nnue.as_mut() {
+            nnue.after_undo(side, mx, my);
+        }
+        coverage.remove_move(mv);
+        caches.restore_snapshot(&snapshot);
+
+        if stats.stop {
+            return 0;
+        }
+        value
     }
 }
 

@@ -80,6 +80,8 @@ pub struct EvalSnapshot {
     pub rule_set: RuleSet,
     pub empty_bucket_counts: EmptyBucketCounts,
     pub nonzero_bucket_mask: NonZeroBucketMask,
+    pub attack4_mask: [[u64; 4]; 2],
+    pub l5_mask: [[u64; 4]; 2],
     pub dgn_sum: [i32; 2],
     pub shadow_log_len: usize,
     pub dgn_cc_log_len: usize,
@@ -99,6 +101,8 @@ pub struct EvalCaches {
     pub attack_cache: ValueCache,
     pub empty_bucket_counts: EmptyBucketCounts,
     pub(crate) nonzero_bucket_mask: NonZeroBucketMask,
+    pub(crate) attack4_mask: [[u64; 4]; 2],
+    pub(crate) l5_mask: [[u64; 4]; 2],
     pub(crate) packed_lines: PackedLineStones,
     pub(crate) dgn_cc: DgnBlockedCounts,
     pub(crate) dgn_sum: [i32; 2],
@@ -152,6 +156,54 @@ impl EvalCaches {
             != 0
     }
 
+    #[inline(always)]
+    pub fn has_attack4_plus(&self, side: i8) -> bool {
+        let m = &self.attack4_mask[if side == BLACK { 0 } else { 1 }];
+        (m[0] | m[1] | m[2] | m[3]) != 0
+    }
+
+    #[inline(always)]
+    pub fn l5_count(&self, side: i8) -> u32 {
+        let m = &self.l5_mask[if side == BLACK { 0 } else { 1 }];
+        m[0].count_ones() + m[1].count_ones() + m[2].count_ones() + m[3].count_ones()
+    }
+
+    #[inline(always)]
+    pub fn first_l5_move(&self, side: i8) -> Option<Move> {
+        let m = &self.l5_mask[if side == BLACK { 0 } else { 1 }];
+        for (word_idx, &word) in m.iter().enumerate() {
+            if word != 0 {
+                return Some(((word_idx << 6) + word.trailing_zeros() as usize) as Move);
+            }
+        }
+        None
+    }
+
+    #[inline(always)]
+    pub(crate) fn set_attack_masks(&mut self, player: usize, move_idx: usize, attack: i32) {
+        let word = move_idx >> 6;
+        let bit = 1_u64 << (move_idx & 63);
+        if attack >= 4 {
+            self.attack4_mask[player][word] |= bit;
+            if attack == 6 {
+                self.l5_mask[player][word] |= bit;
+            } else {
+                self.l5_mask[player][word] &= !bit;
+            }
+        } else {
+            self.attack4_mask[player][word] &= !bit;
+            self.l5_mask[player][word] &= !bit;
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn clear_attack_masks(&mut self, player: usize, move_idx: usize) {
+        let word = move_idx >> 6;
+        let bit = !(1_u64 << (move_idx & 63));
+        self.attack4_mask[player][word] &= bit;
+        self.l5_mask[player][word] &= bit;
+    }
+
     pub fn new() -> Self {
         Self {
             initialized: false,
@@ -162,6 +214,8 @@ impl EvalCaches {
             attack_cache: new_value_cache(),
             empty_bucket_counts: new_empty_bucket_counts(),
             nonzero_bucket_mask: [[0; 3]; 2],
+            attack4_mask: [[0; 4]; 2],
+            l5_mask: [[0; 4]; 2],
             packed_lines: [[0; 2]; PACKED_LINE_COUNT],
             dgn_cc: [[0; BOARD_SIZE]; BOARD_SIZE],
             dgn_sum: [0; 2],
@@ -321,6 +375,8 @@ impl EvalCaches {
             rule_set: self.rule_set,
             empty_bucket_counts: self.empty_bucket_counts,
             nonzero_bucket_mask: self.nonzero_bucket_mask,
+            attack4_mask: self.attack4_mask,
+            l5_mask: self.l5_mask,
             dgn_sum: self.dgn_sum,
             shadow_log_len: self.shadow_log.len(),
             dgn_cc_log_len: self.dgn_cc_log.len(),
@@ -336,6 +392,8 @@ impl EvalCaches {
         self.rule_set = snapshot.rule_set;
         self.empty_bucket_counts = snapshot.empty_bucket_counts;
         self.nonzero_bucket_mask = snapshot.nonzero_bucket_mask;
+        self.attack4_mask = snapshot.attack4_mask;
+        self.l5_mask = snapshot.l5_mask;
         self.dgn_sum = snapshot.dgn_sum;
 
         while self.shadow_log.len() > snapshot.shadow_log_len {
@@ -395,6 +453,8 @@ impl EvalCaches {
         self.attack_cache = other.attack_cache;
         self.empty_bucket_counts = other.empty_bucket_counts;
         self.nonzero_bucket_mask = other.nonzero_bucket_mask;
+        self.attack4_mask = other.attack4_mask;
+        self.l5_mask = other.l5_mask;
         self.packed_lines = other.packed_lines;
         self.dgn_cc = other.dgn_cc;
         self.dgn_sum = other.dgn_sum;
