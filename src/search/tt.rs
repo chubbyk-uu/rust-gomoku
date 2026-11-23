@@ -612,41 +612,62 @@ impl TranspositionTable {
 
     pub fn fork_snapshot(&self) -> Self {
         let storage = TTStorage::new_empty(self.storage.bucket_count());
-        let has_two_way = self.storage.buckets.get().is_some_and(Option::is_some);
-        let has_four_way = self
-            .storage
-            .four_way_buckets
-            .get()
-            .is_some_and(Option::is_some);
-
         let snapshot = Self {
             bucket_mask: self.bucket_mask,
             storage: Arc::new(storage),
             subply: self.subply,
         };
 
-        if has_two_way {
-            let src_buckets = self.storage.buckets_for_mode(self.subply);
-            let dst_buckets = snapshot.storage.buckets_for_mode(self.subply);
-            for (src_bucket, dst_bucket) in src_buckets.iter().zip(dst_buckets.iter()) {
-                for (src, dst) in src_bucket.iter().zip(dst_bucket.iter()) {
+        if let Some(Some(src_buckets)) = self.storage.buckets.get() {
+            let mode = self.storage.primary_mode.load(Ordering::Acquire);
+            snapshot.storage.primary_mode.store(mode, Ordering::Release);
+            let dst = TTStorage::alloc_buckets(src_buckets.len())
+                .expect("existing TT capacity remains allocatable for snapshot");
+            for (src_bucket, dst_bucket) in src_buckets.iter().zip(dst.iter()) {
+                for (src, dst_entry) in src_bucket.iter().zip(dst_bucket.iter()) {
                     let (key_check, data) = src.load_words();
-                    dst.store_words(key_check, data);
+                    dst_entry.store_words(key_check, data);
                 }
             }
+            let _ = snapshot.storage.buckets.set(Some(dst));
         }
-        if has_four_way {
-            if let (Some(src_buckets), Some(dst_buckets)) = (
-                self.storage.four_way_buckets_for_mode(self.subply),
-                snapshot.storage.four_way_buckets_for_mode(self.subply),
-            ) {
-                for (src_bucket, dst_bucket) in src_buckets.iter().zip(dst_buckets.iter()) {
-                    for (src, dst) in src_bucket.entries.iter().zip(dst_bucket.entries.iter()) {
-                        let (key_check, data) = src.load_words();
-                        dst.store_words(key_check, data);
-                    }
+        if let Some(Some(src_sec)) = self.storage.secondary_buckets.get() {
+            let dst = TTStorage::alloc_buckets(src_sec.len())
+                .expect("existing secondary TT remains allocatable for snapshot");
+            for (src_bucket, dst_bucket) in src_sec.iter().zip(dst.iter()) {
+                for (src, dst_entry) in src_bucket.iter().zip(dst_bucket.iter()) {
+                    let (key_check, data) = src.load_words();
+                    dst_entry.store_words(key_check, data);
                 }
             }
+            let _ = snapshot.storage.secondary_buckets.set(Some(dst));
+        }
+        if let Some(Some(src_fw)) = self.storage.four_way_buckets.get() {
+            let mode = self.storage.four_way_primary_mode.load(Ordering::Acquire);
+            snapshot
+                .storage
+                .four_way_primary_mode
+                .store(mode, Ordering::Release);
+            let dst = TTStorage::alloc_buckets4(src_fw.len())
+                .expect("existing 4-way TT remains allocatable for snapshot");
+            for (src_bucket, dst_bucket) in src_fw.iter().zip(dst.iter()) {
+                for (src, dst_entry) in src_bucket.entries.iter().zip(dst_bucket.entries.iter()) {
+                    let (key_check, data) = src.load_words();
+                    dst_entry.store_words(key_check, data);
+                }
+            }
+            let _ = snapshot.storage.four_way_buckets.set(Some(dst));
+        }
+        if let Some(Some(src_fw_sec)) = self.storage.four_way_secondary_buckets.get() {
+            let dst = TTStorage::alloc_buckets4(src_fw_sec.len())
+                .expect("existing 4-way secondary TT remains allocatable for snapshot");
+            for (src_bucket, dst_bucket) in src_fw_sec.iter().zip(dst.iter()) {
+                for (src, dst_entry) in src_bucket.entries.iter().zip(dst_bucket.entries.iter()) {
+                    let (key_check, data) = src.load_words();
+                    dst_entry.store_words(key_check, data);
+                }
+            }
+            let _ = snapshot.storage.four_way_secondary_buckets.set(Some(dst));
         }
         snapshot
     }

@@ -438,7 +438,7 @@ impl RootSearcher {
         mut tt: TranspositionTable,
         nnue: Option<crate::nnue::Mix9svqEvaluator>,
     ) -> Self {
-        tt.set_subply(config.runtime.threads > 1);
+        tt.set_subply(config.runtime.threads > 1 || nnue.is_some());
         let alphabeta = AlphaBetaSearcher::with_tt_and_nnue(config.clone(), tt.clone(), nnue);
         Self {
             config,
@@ -670,7 +670,7 @@ impl RootSearcher {
         recompute_all_for_rule(board, &mut caches, self.config.rule_set);
 
         self.alphabeta.sync_config(&self.config);
-        let subply = self.config.runtime.threads > 1;
+        let subply = self.config.runtime.threads > 1 || self.alphabeta.has_nnue();
         self.tt.set_subply(subply);
         self.alphabeta.tt.set_subply(subply);
         self.alphabeta.advance_tt_generation();
@@ -991,7 +991,7 @@ impl RootSearcher {
         let worker_cancel = Some(worker_cancel_flag.clone());
         let mut worker_board = board.clone();
         let worker_config = self.config.clone();
-        let subply = self.config.runtime.threads > 1;
+        let subply = self.config.runtime.threads > 1 || self.alphabeta.has_nnue();
         self.tt.set_subply(subply);
         self.alphabeta.tt.set_subply(subply);
         let tt_snapshot_start = Instant::now();

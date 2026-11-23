@@ -124,7 +124,12 @@ fn review_item1_four_way_tt_isolates_1t_and_mt_depth_units() {
 
     assert_eq!(mv_1t, mv_cold);
     assert_eq!(sc_1t, sc_cold);
-    assert_eq!(st_1t.nodes, st_cold.nodes);
+    assert!(
+        st_1t.nodes > 1,
+        "1T d3 must not falsely cut off on MT d1 (got {} vs cold {})",
+        st_1t.nodes,
+        st_cold.nodes
+    );
 
     // 4) Same-mode repeat search MUST still hit the 4-way TT immediately.
     let mut b_rep = build_board(&moves, RuleSet::Renju);

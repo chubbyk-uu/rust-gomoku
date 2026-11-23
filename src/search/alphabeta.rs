@@ -241,7 +241,7 @@ impl AlphaBetaSearcher {
         let nnue = load_nnue_for_config(&config);
         let mut tt = TranspositionTable::try_new_with_layout(20, nnue.is_some())
             .expect("default TT allocation succeeds");
-        tt.set_subply(config.runtime.threads > 1);
+        tt.set_subply(config.runtime.threads > 1 || nnue.is_some());
         Self {
             config,
             tt,
@@ -262,7 +262,7 @@ impl AlphaBetaSearcher {
         mut tt: TranspositionTable,
         nnue: Option<Mix9svqEvaluator>,
     ) -> Self {
-        tt.set_subply(config.runtime.threads > 1);
+        tt.set_subply(config.runtime.threads > 1 || nnue.is_some());
         Self {
             config,
             tt,
@@ -329,7 +329,8 @@ impl AlphaBetaSearcher {
         if !self.tt.is_shared_with(tt) || self.tt.is_subply() != tt.is_subply() {
             self.tt = tt.clone();
         }
-        self.tt.set_subply(self.config.runtime.threads > 1);
+        self.tt
+            .set_subply(self.config.runtime.threads > 1 || self.nnue.is_some());
         self.tt_generation = tt_generation;
     }
 
@@ -369,7 +370,8 @@ impl AlphaBetaSearcher {
         options: SearchOptions<'_>,
         abdada: Option<&AbdadaContext>,
     ) -> (i32, Option<Move>) {
-        self.tt.set_subply(self.config.runtime.threads > 1);
+        self.tt
+            .set_subply(self.config.runtime.threads > 1 || self.nnue.is_some());
         let tt = self.tt.clone();
         let key_salt = self.tt_key_salt();
         let tt_view4 = if self.nnue.is_some() {
