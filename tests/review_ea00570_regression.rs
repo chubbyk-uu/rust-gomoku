@@ -96,17 +96,39 @@ fn review_item1_four_way_tt_isolates_1t_and_mt_depth_units() {
         },
     );
 
-    // 3) Cold 1T reference at depth 3.
-    let mut s_cold = AlphaBetaSearcher::with_tt(
+    // 3) 1T d1 -> d3 reference on an isolated TT: since 1T and MT NNUE share
+    // exact 1/64-ply subply units, MT d1 -> 1T d3 must match 1T d1 -> 1T d3
+    // and never falsely cut off depth 3 on a depth-1 entry.
+    let mut s_ref = AlphaBetaSearcher::with_tt(
         cfg_1t.clone(),
-        TranspositionTable::try_new_with_layout(15, true).expect("cold 4-way TT"),
+        TranspositionTable::try_new_with_layout(15, true).expect("reference 4-way TT"),
+    );
+    let mut b_ref1 = build_board(&moves, RuleSet::Renju);
+    let mut c_ref1 = EvalCaches::new();
+    recompute_all_for_rule(&mut b_ref1, &mut c_ref1, RuleSet::Renju);
+    let side_ref1 = b_ref1.side_to_move();
+    let mut st_ref1 = SearchStats::default();
+    let _ = s_ref.search(
+        &mut b_ref1,
+        &mut c_ref1,
+        side_ref1,
+        1.0,
+        -INF,
+        INF,
+        10,
+        &mut st_ref1,
+        SearchOptions {
+            opo: 1,
+            root: true,
+            ..SearchOptions::default()
+        },
     );
     let mut b_cold = build_board(&moves, RuleSet::Renju);
     let mut c_cold = EvalCaches::new();
     recompute_all_for_rule(&mut b_cold, &mut c_cold, RuleSet::Renju);
     let side_cold = b_cold.side_to_move();
     let mut st_cold = SearchStats::default();
-    let (sc_cold, mv_cold) = s_cold.search(
+    let (sc_cold, mv_cold) = s_ref.search(
         &mut b_cold,
         &mut c_cold,
         side_cold,
@@ -126,7 +148,7 @@ fn review_item1_four_way_tt_isolates_1t_and_mt_depth_units() {
     assert_eq!(sc_1t, sc_cold);
     assert!(
         st_1t.nodes > 1,
-        "1T d3 must not falsely cut off on MT d1 (got {} vs cold {})",
+        "1T d3 must not falsely cut off on MT d1 (got {} vs ref {})",
         st_1t.nodes,
         st_cold.nodes
     );

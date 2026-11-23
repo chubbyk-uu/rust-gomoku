@@ -778,29 +778,33 @@ impl AlphaBetaSearcher {
             && caches.rule_set == self.config.rule_set
             && !caches.has_any_l4_or_l5();
 
-        // Tactically-guarded NNUE Reverse Futility Pruning (RFP) BEFORE movegen:
+        // Tactically-guarded NNUE Razoring (with QVCF) + Reverse Futility
+        // Pruning (RFP) BEFORE movegen:
         // When O(1) bucket masks confirm neither side has an immediate L4/L5
-        // threat, evaluate NNUE static value (cached in 4-way TT) and cut off
+        // threat, evaluate NNUE static value (cached in 4-way TT) and prune
         // before running `generate_candidates_with_coverage_scratch`.
-        if let (Some(tt4), Some(nnue)) = (tt_view4, self.nnue.as_mut()) {
-            if !options.root
+        if let Some(tt4) = tt_view4 {
+            if self.nnue.is_some()
+                && !options.root
                 && !is_pv
                 && no_l4_l5
                 && depth > 0.0
                 && depth <= 3.0
-                && beta > -WIN
-                && beta < WIN
             {
                 let raw_eval = match tt_static_eval {
                     Some(ev) => ev,
                     None => {
-                        let ev = nnue.evaluate_value(side);
+                        let ev = self
+                            .nnue
+                            .as_mut()
+                            .expect("checked above")
+                            .evaluate_value(side);
                         tt_static_eval = Some(ev);
                         tt4.store(TTEntry4 {
                             key: board.zobrist_key(),
                             value: TT_VALUE_NONE,
                             static_eval: ev,
-                            flag: crate::constants::HASHF_EMPTY,
+                            flag: HASHF_EMPTY,
                             depth: 0,
                             best_move: None,
                             tt_pv: tt_was_pv,
@@ -820,8 +824,40 @@ impl AlphaBetaSearcher {
                         eval = adj;
                     }
                 }
+                // Step 7 (Rapfi): Razoring with leaf QVCF when static eval is
+                // clearly below alpha at shallow depth (< 2.6 ply).
+                if depth < 2.6 && (alpha < WIN || !probe_hit) {
+                    let razor_margin = match self.config.rule_set {
+                        RuleSet::Renju => (0.17 * depth * depth + 8.0 * depth) as i32 + 9,
+                        RuleSet::Freestyle => (0.17 * depth * depth + 15.0 * depth) as i32 + 11,
+                    }
+                    .max(0);
+                    if eval + razor_margin < alpha {
+                        let score = self.vcfsearch(
+                            board,
+                            caches,
+                            side,
+                            alpha,
+                            alpha + 1,
+                            0,
+                            options.ply,
+                            stats,
+                            coverage,
+                            abdada,
+                            tt_view4,
+                            Some((
+                                probe_hit,
+                                probe_tt_value,
+                                probe_tt_flag,
+                                probe_best_move,
+                                Some(raw_eval),
+                            )),
+                        );
+                        return (score, None);
+                    }
+                }
                 let rfp_margin = (135.0 * depth).round() as i32;
-                if eval < WIN && eval - rfp_margin >= beta {
+                if beta > -WIN && beta < WIN && eval < WIN && eval - rfp_margin >= beta {
                     return (eval, None);
                 }
             }
