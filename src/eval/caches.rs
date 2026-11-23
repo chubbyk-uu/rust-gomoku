@@ -125,6 +125,33 @@ impl Default for EvalCaches {
 }
 
 impl EvalCaches {
+    /// Word-1 bitmask for `ShapeLabel::L5` buckets (`79..=91`, bits `15..=27`).
+    pub const L5_BUCKET_WORD1_MASK: u64 = ((1_u64 << 13) - 1) << (79 - 64);
+    /// Word-1 bitmask for `ShapeLabel::L4` buckets (`67..=78`, bits `3..=14`).
+    pub const L4_BUCKET_WORD1_MASK: u64 = ((1_u64 << 12) - 1) << (67 - 64);
+    /// Combined word-1 bitmask for `L4` and `L5` buckets (`67..=91`).
+    pub const L4_L5_BUCKET_WORD1_MASK: u64 =
+        Self::L4_BUCKET_WORD1_MASK | Self::L5_BUCKET_WORD1_MASK;
+
+    #[inline(always)]
+    pub fn has_l5(&self, side: i8) -> bool {
+        let player = if side == BLACK { 0 } else { 1 };
+        (self.nonzero_bucket_mask[player][1] & Self::L5_BUCKET_WORD1_MASK) != 0
+    }
+
+    #[inline(always)]
+    pub fn has_l4(&self, side: i8) -> bool {
+        let player = if side == BLACK { 0 } else { 1 };
+        (self.nonzero_bucket_mask[player][1] & Self::L4_BUCKET_WORD1_MASK) != 0
+    }
+
+    #[inline(always)]
+    pub fn has_any_l4_or_l5(&self) -> bool {
+        ((self.nonzero_bucket_mask[0][1] | self.nonzero_bucket_mask[1][1])
+            & Self::L4_L5_BUCKET_WORD1_MASK)
+            != 0
+    }
+
     pub fn new() -> Self {
         Self {
             initialized: false,
@@ -414,4 +441,38 @@ fn new_empty_bucket_counts() -> EmptyBucketCounts {
 
 fn new_dt3_present() -> Dt3Present {
     [[false; BOARD_SIZE]; BOARD_SIZE]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::patterns::buckets::bucket_for_lines;
+
+    #[test]
+    fn l4_and_l5_bucket_masks_match_exact_bucket_ranges() {
+        for top1 in 0..=12 {
+            for top2 in 0..=top1 {
+                let bucket = bucket_for_lines(top1, top2).expect("valid bucket") as usize;
+                let mut caches = EvalCaches::new();
+                caches.inc_empty_bucket(0, bucket);
+                assert_eq!(
+                    caches.has_l5(BLACK),
+                    top1 == 12,
+                    "L5 mask mismatch at top1={top1}, top2={top2}, bucket={bucket}"
+                );
+                assert_eq!(
+                    caches.has_l4(BLACK),
+                    top1 == 11,
+                    "L4 mask mismatch at top1={top1}, top2={top2}, bucket={bucket}"
+                );
+                assert_eq!(
+                    caches.has_any_l4_or_l5(),
+                    top1 >= 11,
+                    "L4/L5 mask mismatch at top1={top1}, top2={top2}, bucket={bucket}"
+                );
+                assert!(!caches.has_l5(WHITE));
+                assert!(!caches.has_l4(WHITE));
+            }
+        }
+    }
 }

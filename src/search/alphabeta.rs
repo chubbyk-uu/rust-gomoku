@@ -14,7 +14,8 @@ use crate::eval::{evaluate_board, value_wide_compute_for_rule, EvalCaches, EvalS
 use crate::nnue::{load_mix9svq_evaluator_for_rule, Mix9svqEvaluator};
 use crate::search::abdada::{AbdadaContext, ABDADA_MIN_DEPTH};
 use crate::search::movegen::{
-    generate_candidates_with_coverage_scratch, Candidate, CoverageTracker, MoveAnalysis,
+    generate_candidates_with_coverage_scratch, is_rule_legal_for_movegen, Candidate,
+    CoverageTracker, MoveAnalysis,
 };
 use crate::search::ordering::{
     order_candidates_owned, order_candidates_primary_owned, order_candidates_primary_slice,
@@ -652,33 +653,23 @@ impl AlphaBetaSearcher {
             probe_best_move
         };
 
-        let generated = generate_candidates_with_coverage_scratch(
-            board,
-            caches,
-            side,
-            &self.config,
-            Some(wide),
-            root_allowed_moves,
-            tt_best_move,
-            options.root,
-            coverage,
-            &mut self.movegen_scratch,
-        );
-        let win_priority = generated.win_priority;
-        let single_forcing = generated.single_forcing;
-        let hostile_threat = generated.hostile_threat;
+        let original_alpha = alpha;
+        let child_wide = (((wide * self.config.root_search.ratio_num as usize)
+            / self.config.root_search.ratio_den as usize)
+            + 1)
+        .min(wide);
+        let no_l4_l5 = caches.initialized
+            && caches.rule_set == self.config.rule_set
+            && !caches.has_any_l4_or_l5();
 
-        // Tactically-guarded NNUE Reverse Futility Pruning (RFP):
-        // At shallow non-PV quiet nodes with no immediate win/forcing/open-3
-        // threat, if the NNUE static evaluation (cached in 4-way TT) exceeds
-        // beta by a generous depth-scaled margin, cut off without expanding
-        // wide candidates.
+        // Tactically-guarded NNUE Reverse Futility Pruning (RFP) BEFORE movegen:
+        // When O(1) bucket masks confirm neither side has an immediate L4/L5
+        // threat, evaluate NNUE static value (cached in 4-way TT) and cut off
+        // before running `generate_candidates_with_coverage_scratch`.
         if let (Some(tt4), Some(nnue)) = (tt_view4, self.nnue.as_mut()) {
             if !options.root
                 && !is_pv
-                && !win_priority
-                && !single_forcing
-                && !hostile_threat
+                && no_l4_l5
                 && depth > 0.0
                 && depth <= 3.0
                 && beta > -WIN
@@ -720,6 +711,136 @@ impl AlphaBetaSearcher {
             }
         }
 
+        let mut current = i32::MIN;
+        let mut has_score = false;
+        let mut best_move = None;
+        let mut hash_flag = HASHF_ALPHA;
+        let mut found_pv = false;
+        let mut pre_searched_tt_move: Option<Move> = None;
+
+        // Pre-movegen NNUE TT-move probe: on quiet non-root nodes (no L4/L5),
+        // search a legal covered TT move directly before candidate generation.
+        // An immediate beta cutoff skips movegen, NNUE policy, and sorting.
+        if self.nnue.is_some() && !options.root && !self.config.runtime.nonroot_vcf && no_l4_l5 {
+            if let Some(tt_mv) = tt_best_move {
+                if coverage.is_covered(tt_mv)
+                    && is_rule_legal_for_movegen(board, caches, tt_mv, side, self.config.rule_set)
+                {
+                    let (mx, my) = move_to_xy(tt_mv).expect("TT move is valid");
+                    let mut candidate_snapshot: Option<EvalSnapshot> = None;
+                    board
+                        .play_assuming_rule_legal(tt_mv, Some(side), self.config.rule_set)
+                        .expect("legal TT move stays legal");
+                    if let Some(tt4) = tt_view4 {
+                        tt4.prefetch(board.zobrist_key());
+                    }
+                    coverage.add_move(tt_mv);
+                    if let Some(nnue) = self.nnue.as_mut() {
+                        nnue.before_move(side, mx, my);
+                    }
+                    let child_options = SearchOptions {
+                        opo: 1 - options.opo,
+                        ply: options.ply + 1,
+                        root: false,
+                        root_allowed_moves: None,
+                        root_preferred_move: None,
+                        downf: options.downf,
+                        root_depth: Some(root_depth),
+                        priority_base: Some(priority_base),
+                    };
+                    let (child_score, _) = self.search_with_coverage(
+                        board,
+                        caches,
+                        -side,
+                        depth - 1.0,
+                        -beta,
+                        -alpha,
+                        child_wide,
+                        stats,
+                        child_options,
+                        coverage,
+                        Some(((mx, my), &mut candidate_snapshot)),
+                        abdada,
+                        tt_view,
+                        tt_view4,
+                    );
+                    board.undo().expect("TT move undo matches play");
+                    if let Some(nnue) = self.nnue.as_mut() {
+                        nnue.after_undo(side, mx, my);
+                    }
+                    coverage.remove_move(tt_mv);
+                    if let Some(snapshot) = candidate_snapshot.as_ref() {
+                        caches.restore_snapshot(snapshot);
+                    }
+                    if stats.stop {
+                        return (current, best_move);
+                    }
+                    let score = -child_score;
+                    current = score;
+                    has_score = true;
+                    best_move = Some(tt_mv);
+                    pre_searched_tt_move = Some(tt_mv);
+                    if score > alpha {
+                        alpha = score;
+                        hash_flag = HASHF_EXACT;
+                        found_pv = true;
+                    }
+                    if alpha >= beta {
+                        hash_flag = HASHF_BETA;
+                        stats.cutoffs += 1;
+                        let mut store_depth = hash_depth;
+                        if (current >= WIN && current > original_alpha)
+                            || (current <= -WIN && current < original_beta)
+                        {
+                            hash_flag = HASHF_EXACT;
+                            store_depth += if subply_tt { SUBPLY_TT_WIN_BONUS } else { 10 };
+                        }
+                        if let Some(tt4) = tt_view4 {
+                            tt4.store(TTEntry4 {
+                                key: board.zobrist_key(),
+                                value: score_to_tt(current, options.ply),
+                                static_eval: tt_static_eval.unwrap_or(TT_VALUE_NONE),
+                                flag: hash_flag,
+                                depth: store_depth,
+                                best_move,
+                                tt_pv: is_pv || tt_was_pv,
+                                generation: self.tt_generation,
+                            });
+                        }
+                        return (current, best_move);
+                    }
+                }
+            }
+        }
+
+        let mut generated = generate_candidates_with_coverage_scratch(
+            board,
+            caches,
+            side,
+            &self.config,
+            Some(wide),
+            root_allowed_moves,
+            tt_best_move,
+            options.root,
+            coverage,
+            &mut self.movegen_scratch,
+        );
+        let win_priority = generated.win_priority;
+        let single_forcing = generated.single_forcing;
+        let hostile_threat = generated.hostile_threat;
+        if no_l4_l5 {
+            debug_assert!(!win_priority && !single_forcing && !hostile_threat);
+        }
+        if let Some(tt_mv) = pre_searched_tt_move {
+            if let Some(pos) = generated
+                .candidates
+                .iter()
+                .position(|candidate| candidate.move_ == tt_mv)
+            {
+                generated.candidates.remove(pos);
+            }
+        }
+
         let lazy_tie_ordering = !options.root && !self.config.runtime.nonroot_vcf;
         let mut rest_primary_sorted = true;
         let mut policy_rest_sorted = true;
@@ -730,11 +851,15 @@ impl AlphaBetaSearcher {
             && (options.root || depth >= 2.0);
         let mut ordered = if use_nnue_policy {
             let mut candidates = generated.candidates;
-            if let Some(pos) = tt_best_move.and_then(|tt_mv| {
-                candidates
-                    .iter()
-                    .position(|candidate| candidate.move_ == tt_mv)
-            }) {
+            if let Some(pos) = (pre_searched_tt_move.is_none())
+                .then_some(tt_best_move)
+                .flatten()
+                .and_then(|tt_mv| {
+                    candidates
+                        .iter()
+                        .position(|candidate| candidate.move_ == tt_mv)
+                })
+            {
                 // Keep exact relative scan order for `candidates[1..]` while
                 // deferring NNUE Policy evaluation until `index == 1` (only
                 // when `tt_best_move` fails to cause an immediate cutoff).
@@ -761,7 +886,12 @@ impl AlphaBetaSearcher {
             order_candidates_root_classic(board, &generated.candidates, side)
         } else if lazy_tie_ordering {
             let mut candidates = generated.candidates;
-            if !win_priority && !single_forcing && candidates.len() > 1 && tt_best_move.is_some() {
+            if pre_searched_tt_move.is_none()
+                && !win_priority
+                && !single_forcing
+                && candidates.len() > 1
+                && tt_best_move.is_some()
+            {
                 if let Some(pos) = candidates
                     .iter()
                     .position(|candidate| Some(candidate.move_) == tt_best_move)
@@ -838,29 +968,22 @@ impl AlphaBetaSearcher {
             stats.stop = true;
             return (0, None);
         }
+        let tt_offset = usize::from(pre_searched_tt_move.is_some());
         if !lazy_tie_ordering && !use_nnue_policy && !win_priority && !single_forcing {
-            ordered.truncate(wide);
+            ordered.truncate(wide.saturating_sub(tt_offset));
         }
         let search_limit = if !win_priority && !single_forcing {
-            ordered.len().min(wide)
+            (ordered.len() + tt_offset)
+                .min(wide)
+                .saturating_sub(tt_offset)
         } else {
             ordered.len()
         };
-        if search_limit == 0 {
+        if search_limit == 0 && !has_score {
             return (-INF - 1, None);
         }
 
-        let mut current = i32::MIN;
-        let mut has_score = false;
-        let mut best_move = None;
-        let original_alpha = alpha;
-        let mut hash_flag = HASHF_ALPHA;
-        let mut found_pv = false;
-        let child_wide = (((wide * self.config.root_search.ratio_num as usize)
-            / self.config.root_search.ratio_den as usize)
-            + 1)
-        .min(wide);
-        let case_count = search_limit;
+        let case_count = search_limit + tt_offset;
         let (pre_corner, pre_half) = if options.root {
             compute_corner_state(board)
         } else {
@@ -906,7 +1029,7 @@ impl AlphaBetaSearcher {
         } else {
             usize::MAX
         };
-        let use_abdada = abdada.is_some() && depth >= ABDADA_MIN_DEPTH && search_limit > 1;
+        let use_abdada = abdada.is_some() && depth >= ABDADA_MIN_DEPTH && case_count > 1;
 
         #[derive(Clone, Copy)]
         struct DeferredCandidate {
@@ -916,9 +1039,15 @@ impl AlphaBetaSearcher {
             depthdown: f64,
             net: i32,
         }
+        let default_candidate = ordered.first().copied().unwrap_or(Candidate {
+            move_: 0,
+            order_score: 0.0,
+            self_attack: 0,
+            opp_attack: 0,
+        });
         let mut deferred = [DeferredCandidate {
             index: 0,
-            candidate: ordered[0],
+            candidate: default_candidate,
             local_downf: 0,
             depthdown: 0.0,
             net: 0,
@@ -938,7 +1067,7 @@ impl AlphaBetaSearcher {
 
             for step in 0..pass_len {
                 let (index, candidate, local_downf, depthdown, mut net) = if pass == 0 {
-                    let index = step;
+                    let index = step + tt_offset;
                     if !policy_rest_sorted && index == 1 {
                         let rest = &mut ordered[1..];
                         let n = rest.len();
@@ -963,16 +1092,16 @@ impl AlphaBetaSearcher {
                         order_candidates_primary_slice(&mut ordered[1..]);
                         rest_primary_sorted = true;
                     }
-                    if lazy_tie_ordering && index >= tie_sorted_until {
+                    if lazy_tie_ordering && step >= tie_sorted_until {
                         tie_sorted_until = resolve_candidate_tie_group(
                             board,
                             &mut ordered,
-                            index,
+                            step,
                             side,
                             tt_best_move,
                         );
                     }
-                    let candidate = ordered[index];
+                    let candidate = ordered[step];
                     // Safe Move Count Pruning (LMP) for quiet non-forcing NNUE
                     // tail moves once at least one non-losing move is found.
                     if index >= nnue_lmp_limit

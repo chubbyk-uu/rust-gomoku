@@ -240,6 +240,11 @@ impl CoverageTracker {
         }
     }
 
+    #[inline(always)]
+    pub(crate) fn is_covered(&self, move_: Move) -> bool {
+        self.counts[move_ as usize] > 0
+    }
+
     fn collect_moves(&self, board: &Board, out: &mut CoveredMovesBuf) {
         out.len = 0;
         if board.move_count() == 0 {
@@ -703,7 +708,7 @@ fn rule_detector_required(
     renju_black_candidate_needs_full_detector(caches, x, y)
 }
 
-fn is_rule_legal_for_movegen(
+pub(crate) fn is_rule_legal_for_movegen(
     board: &Board,
     caches: &EvalCaches,
     move_: Move,
