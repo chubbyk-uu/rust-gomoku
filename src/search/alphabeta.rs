@@ -62,6 +62,20 @@ static LMR_LUT: LazyLock<[[f64; 64]; 2]> = LazyLock::new(|| {
     table
 });
 
+/// Deterministic per-square TT key salt used when `nonlocal_b4_dropped` is true
+/// in QVCF so history-dependent fail-low/exact bounds stay cached for repeated
+/// visits with the same `self_last` without ever polluting pure `zobrist_key`.
+#[inline(always)]
+fn qvcf_self_last_salt(last_move: usize) -> u64 {
+    let mut z = (last_move as u64)
+        .wrapping_add(1)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ 0xBF58_476D_1CE4_E5B9;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 #[inline(always)]
 fn update_quiet_history(entry: &mut i32, bonus: i32) {
     let clamped = bonus.clamp(-400, 400);
@@ -2169,29 +2183,47 @@ impl AlphaBetaSearcher {
         }
 
         // O(1) depth cap or no attacker B4 available.
-        let self_last = board
-            .move_history()
-            .iter()
-            .rev()
-            .find(|played| played.side == side)
-            .map(|played| played.move_ as usize);
-        if qdepth <= -QVCF_MAX_STEPS || !caches.has_attack4_plus(side) || self_last.is_none() {
+        let has_any_b4 = caches.has_attack4_plus(side);
+        let self_last = if has_any_b4 {
+            board
+                .move_history()
+                .iter()
+                .rev()
+                .find(|played| played.side == side)
+                .map(|played| played.move_ as usize)
+        } else {
+            None
+        };
+        if qdepth <= -QVCF_MAX_STEPS || !has_any_b4 || self_last.is_none() {
             if let Some(tt4) = tt_view4 {
-                let flag = if is_pv && best_value > old_alpha {
-                    HASHF_EXACT
-                } else {
-                    HASHF_ALPHA
-                };
-                tt4.store(TTEntry4 {
-                    key: board.zobrist_key(),
-                    value: score_to_tt(best_value, ply),
-                    static_eval: raw_eval,
-                    flag,
-                    depth: qvcf_tt_depth,
-                    best_move: None,
-                    tt_pv: is_pv,
-                    generation: self.tt_generation,
-                });
+                if !has_any_b4 || qdepth <= -QVCF_MAX_STEPS {
+                    let flag = if is_pv && best_value > old_alpha {
+                        HASHF_EXACT
+                    } else {
+                        HASHF_ALPHA
+                    };
+                    tt4.store(TTEntry4 {
+                        key: board.zobrist_key(),
+                        value: score_to_tt(best_value, ply),
+                        static_eval: raw_eval,
+                        flag,
+                        depth: qvcf_tt_depth,
+                        best_move: None,
+                        tt_pv: is_pv,
+                        generation: self.tt_generation,
+                    });
+                } else if !tt_hit && tt_static_eval.is_none() {
+                    tt4.store(TTEntry4 {
+                        key: board.zobrist_key(),
+                        value: TT_VALUE_NONE,
+                        static_eval: raw_eval,
+                        flag: HASHF_EMPTY,
+                        depth: 0,
+                        best_move: None,
+                        tt_pv: false,
+                        generation: self.tt_generation,
+                    });
+                }
             }
             return best_value;
         }
@@ -2202,14 +2234,48 @@ impl AlphaBetaSearcher {
         // to match Rapfi's `DEPTH_QVCF_FULL = -1` / `VCF | COMB` discipline.
         let player = if side == BLACK { 0 } else { 1 };
         let allow_plain_b4 = qdepth >= -1;
-        let neighbor_mask = &QVCF_NEIGHBOR_MASKS[self_last.expect("checked above")];
+        let last_move = self_last.expect("checked above");
+        let neighbor_mask = &QVCF_NEIGHBOR_MASKS[last_move];
         let mut mask = [
             caches.attack4_mask[player][0] & neighbor_mask[0],
             caches.attack4_mask[player][1] & neighbor_mask[1],
             caches.attack4_mask[player][2] & neighbor_mask[2],
             caches.attack4_mask[player][3] & neighbor_mask[3],
         ];
-        if let Some(tt_mv) = tt_move {
+        // Track whether the `self_last` neighborhood filter dropped any legal
+        // B4 outside the local mask. Dropping attacker moves can only
+        // underestimate the attacker's score, so when `nonlocal_b4_dropped` is
+        // true, lower bounds (`HASHF_BETA` / proven wins) remain sound on the
+        // pure board `zobrist_key`, while upper/exact fail-low bounds are
+        // path-dependent and are stored/probed under a `self_last`-salted key.
+        let nonlocal_b4_dropped = ((caches.attack4_mask[player][0] & !mask[0])
+            | (caches.attack4_mask[player][1] & !mask[1])
+            | (caches.attack4_mask[player][2] & !mask[2])
+            | (caches.attack4_mask[player][3] & !mask[3]))
+            != 0;
+        let mut local_tt_move = tt_move;
+        let salted_key = if nonlocal_b4_dropped {
+            let key = board.zobrist_key() ^ qvcf_self_last_salt(last_move);
+            if let Some(tt4) = tt_view4 {
+                let ps = tt4.probe(
+                    key,
+                    qvcf_tt_depth,
+                    score_to_tt(alpha, ply),
+                    score_to_tt(beta, ply),
+                );
+                if ps.hit && ps.value.is_some() {
+                    stats.tt_hits += 1;
+                    return score_from_tt(ps.value.expect("checked above"), ply);
+                }
+                if local_tt_move.is_none() {
+                    local_tt_move = ps.best_move;
+                }
+            }
+            Some(key)
+        } else {
+            None
+        };
+        if let Some(tt_mv) = local_tt_move {
             let idx = tt_mv as usize;
             if idx < BOARD_AREA
                 && (caches.attack4_mask[player][idx >> 6] & (1_u64 << (idx & 63))) != 0
@@ -2231,7 +2297,7 @@ impl AlphaBetaSearcher {
                 let mx = idx % BOARD_SIZE;
                 let my = idx / BOARD_SIZE;
                 let bucket = caches.value_cache[player][mx][my];
-                if !allow_plain_b4 && Some(mv) != tt_move && bucket < QVCF_COMB_MIN_BUCKET {
+                if !allow_plain_b4 && Some(mv) != local_tt_move && bucket < QVCF_COMB_MIN_BUCKET {
                     continue;
                 }
                 debug_assert_eq!(board.grid_rows()[my][mx], EMPTY);
@@ -2242,7 +2308,7 @@ impl AlphaBetaSearcher {
                     side,
                     self.config.rule_set
                 ));
-                let score = if Some(mv) == tt_move {
+                let score = if Some(mv) == local_tt_move {
                     i32::MAX
                 } else {
                     bucket
@@ -2330,16 +2396,46 @@ impl AlphaBetaSearcher {
             {
                 flag = HASHF_EXACT;
             }
-            tt4.store(TTEntry4 {
-                key: board.zobrist_key(),
-                value: score_to_tt(best_value, ply),
-                static_eval: raw_eval,
-                flag,
-                depth: qvcf_tt_depth,
-                best_move,
-                tt_pv: is_pv,
-                generation: self.tt_generation,
-            });
+            let safe_for_board_key = !nonlocal_b4_dropped
+                || flag == HASHF_BETA
+                || (best_value >= WIN && best_value > old_alpha);
+            if safe_for_board_key {
+                tt4.store(TTEntry4 {
+                    key: board.zobrist_key(),
+                    value: score_to_tt(best_value, ply),
+                    static_eval: raw_eval,
+                    flag,
+                    depth: qvcf_tt_depth,
+                    best_move,
+                    tt_pv: is_pv,
+                    generation: self.tt_generation,
+                });
+            } else {
+                if let Some(key) = salted_key {
+                    tt4.store(TTEntry4 {
+                        key,
+                        value: score_to_tt(best_value, ply),
+                        static_eval: raw_eval,
+                        flag,
+                        depth: qvcf_tt_depth,
+                        best_move,
+                        tt_pv: is_pv,
+                        generation: self.tt_generation,
+                    });
+                }
+                if !tt_hit && tt_static_eval.is_none() {
+                    tt4.store(TTEntry4 {
+                        key: board.zobrist_key(),
+                        value: TT_VALUE_NONE,
+                        static_eval: raw_eval,
+                        flag: HASHF_EMPTY,
+                        depth: 0,
+                        best_move: None,
+                        tt_pv: false,
+                        generation: self.tt_generation,
+                    });
+                }
+            }
         }
 
         best_value
@@ -2984,5 +3080,127 @@ mod tests {
             assert!(p1.hit && p1.value == Some(17));
             assert!(p2.hit && p2.value == Some(29));
         }
+    }
+
+    #[test]
+    fn qvcf_self_last_salts_are_unique_and_nonzero() {
+        let mut seen = std::collections::HashSet::with_capacity(BOARD_AREA);
+        for sq in 0..BOARD_AREA {
+            let salt = qvcf_self_last_salt(sq);
+            assert_ne!(salt, 0);
+            assert!(seen.insert(salt), "duplicate salt at square {sq}");
+        }
+    }
+
+    #[test]
+    fn qvcf_leaf_is_move_order_invariant_and_does_not_poison_tt() {
+        // Real game `renjunet_center_g151985_ply6` after ply 28:
+        // Black wins by forced B4 `(4,10) -> (5,9) -> (5,10)` (open four).
+        // Swapping black moves #25 `(2,5)` and #27 `(6,10)` produces the exact
+        // same board and side to move, and must yield the same winning mate
+        // both on a cold TT and on a warm shared TT.
+        let nnue_dir = std::path::Path::new("opponent/rapfi-networks/mix9svq");
+        if !nnue_dir.exists() {
+            return;
+        }
+        let orig_moves: [(usize, usize); 28] = [
+            (7, 7),
+            (7, 6),
+            (6, 7),
+            (8, 7),
+            (6, 5),
+            (6, 6),
+            (5, 6),
+            (4, 7),
+            (4, 5),
+            (3, 4),
+            (6, 8),
+            (5, 8),
+            (8, 6),
+            (9, 5),
+            (7, 5),
+            (5, 5),
+            (7, 9),
+            (6, 9),
+            (7, 8),
+            (8, 9),
+            (7, 10),
+            (7, 11),
+            (9, 7),
+            (3, 6),
+            (2, 5),
+            (10, 8),
+            (6, 10),
+            (8, 8),
+        ];
+        let mut swapped_moves = orig_moves;
+        swapped_moves.swap(24, 26);
+
+        let build_board = |moves: &[(usize, usize)]| {
+            let mut b = Board::new();
+            for &(x, y) in moves {
+                let mv = xy_to_move(x, y).unwrap();
+                b.play_for_rule(mv, None, RuleSet::Renju).unwrap();
+            }
+            b
+        };
+        let mut board_orig = build_board(&orig_moves);
+        let mut board_swapped = build_board(&swapped_moves);
+        assert_eq!(board_orig.zobrist_key(), board_swapped.zobrist_key());
+        assert_eq!(board_orig.side_to_move(), BLACK);
+
+        let mut cfg = load_default_config();
+        cfg.rule_set = RuleSet::Renju;
+        cfg.runtime.use_nnue = true;
+        cfg.runtime.nnue_dir = Some(nnue_dir.to_string_lossy().into_owned());
+        cfg.runtime.compute_vcf = false;
+        cfg.runtime.compute_vct = false;
+
+        // Search the swapped order FIRST on a shared TT (where `self_last = (2,5)`
+        // is outside the local neighborhood of `(4,10)`), then search the original
+        // order (`self_last = (6,10)`) on the SAME shared TT. The swapped path
+        // must NOT poison the shared TT for the original path!
+        let mut caches_swapped = EvalCaches::new();
+        recompute_all_for_rule(&mut board_swapped, &mut caches_swapped, RuleSet::Renju);
+        let mut shared_searcher = AlphaBetaSearcher::new(cfg.clone());
+        let mut stats_swapped = SearchStats::default();
+        let (_score_swapped, _) = shared_searcher.search(
+            &mut board_swapped,
+            &mut caches_swapped,
+            BLACK,
+            0.0,
+            -INF,
+            INF,
+            40,
+            &mut stats_swapped,
+            SearchOptions {
+                opo: 1,
+                root: false,
+                ..SearchOptions::default()
+            },
+        );
+
+        let mut caches_orig = EvalCaches::new();
+        recompute_all_for_rule(&mut board_orig, &mut caches_orig, RuleSet::Renju);
+        let mut stats_orig = SearchStats::default();
+        let (score_orig, _) = shared_searcher.search(
+            &mut board_orig,
+            &mut caches_orig,
+            BLACK,
+            0.0,
+            -INF,
+            INF,
+            40,
+            &mut stats_orig,
+            SearchOptions {
+                opo: 1,
+                root: false,
+                ..SearchOptions::default()
+            },
+        );
+        assert!(
+            score_orig >= WIN,
+            "swapped move order poisoned shared TT and hid forced win on original order: score_orig={score_orig}"
+        );
     }
 }

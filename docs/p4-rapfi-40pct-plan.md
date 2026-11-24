@@ -100,9 +100,12 @@
   - 实测结果（均严格 `INFO tt_bits 20` = 32 MiB TT，Renju `1s/move`，`center_50_prefixes.jsonl` 100 局）：
     - `4T vs 33d1515 4T`：**`50-42-8`（`54.0%`，`+27.85 Elo`，`WW=5, WD=3, WL/DD=38, LD=3, LL=1`）**，`0` 错误/`0` 超时，`avg_ms=509.4ms`；
     - `4T vs Rapfi 4T (32 MiB)`：**`31-69-0`（`31.0%`，`-138.99 Elo`，`WL=31, LL=19`）**，`0` 错误/`0` 超时，`avg_ms=498.7ms` vs Rapfi `509.4ms`（相比修前 64 MiB 的 `26.0% / -181.7 Elo` 跃升 **`+42.7 Elo`**，并反超 1T 相对差距 `30.0% / -147.2 Elo`）。
-- [ ] **Fix 2（P1）：叶层 QVCF 局部裁剪与共享 TT 污染**（`src/search/alphabeta.rs`）
-  - 解决 `vcfsearch` 用 `self_last` 局部掩码裁剪候选却往纯盘面 `zobrist_key` 写精确/上界分导致换序漏杀传染的问题（1T & 4T 均受益）；
-  - 验收：复现 `renjunet_center_g151985_ply6` 第 28 手换序回归单测 + 同线程换色 vs Fix 1 + vs Rapfi 4T（`tt_bits 20`）。
+- [x] **Fix 2（P1）：叶层 QVCF 局部裁剪与共享 TT 污染**（`src/search/alphabeta.rs`）
+  - 采用 Sound-Bound Guard + `self_last` salted key（Candidate C+）：用 4 条位运算检测 `nonlocal_b4_dropped = (attack4_mask & !mask) != 0`；未丢弃非局部 B4 或已取得 `HASHF_BETA`/杀胜下界时照常读写纯盘面 `zobrist_key` 保持高命中率；丢弃非局部 B4 且 fail-low 时仅写入 `board.zobrist_key() ^ qvcf_self_last_salt(last_move)`（纯盘面键仅存 `HASHF_EMPTY` 静评），彻底杜绝共享 TT 污染且避免密集局炸节点。
+  - 实测结果（均严格 `INFO tt_bits 20` = 32 MiB TT，Renju `1s/move`，`center_50_prefixes.jsonl` 100 局）：
+    - `4T vs Fix 1 4T`：**`48-41-11`（`53.5%`，`+24.36 Elo`，`WW=5, WD=5, WL/DD=34, LD=4, LL=2`）**，`0` 错误/`0` 超时，`avg_ms=514.5ms`；
+    - `4T vs Rapfi 4T (32 MiB)`：**`29-71-0`（`29.0%`，`-155.54 Elo`，`WL=29, LL=21`）**，`avg_ms=506.3ms` vs Rapfi `525.1ms`（其中 1 盘坚持到第 225 手全盘仅剩 `(11,8)` 为黑方禁手导致无合法着，属 Renju 正常判负）。
+  - 回归单测：`qvcf_leaf_is_move_order_invariant_and_does_not_poison_tt`（复现 `renjunet_center_g151985_ply6` 第 28 手换序）+ `qvcf_self_last_salts_are_unique_and_nonzero` 通过。
 - [ ] **Fix 3（P2）：奇异延伸验证提前排除 `skip_move`**（`src/search/alphabeta.rs`）
   - 在排序、`wide` 截断、`policy_top_logit` 与 `index` 分配之前剔除 `options.skip_move`，避免占名额并避免首替代着误触发 LMR/LMP 偏移；
   - 验收：定向回归单测 + 不掉分门禁。
@@ -176,7 +179,7 @@
 | 基线 P2 (`b69f98b`) | 已归档 | 23.5% (-205.0) | 28.0% (-164.1) | `master` 锚点 |
 | 基线 P3 (`33d1515`) | 已完成 | 30.0% (-147.2) | 26.0% (-181.7, 64 MiB) | Batch 1~3 + Lazy SMP 初版 |
 | Phase 0 · Fix 1（4T 停搜与选步） | **已完成** | — | **31.0% (-139.0, 32 MiB)** | `4T vs 33d1515` `54.0% (+27.9)` |
-| Phase 0 · Fix 2（QVCF 缓存） | 待开始 | — | — | 修复 `self_last` 换序漏杀污染 TT |
+| Phase 0 · Fix 2（QVCF 缓存） | **已完成** | — | **29.0% (-155.5, 32 MiB)** | `4T vs Fix 1` `53.5% (+24.4)` |
 | Phase 0 · Fix 3（奇异延伸排除） | 待开始 | — | — | 提前剔除 `skip_move` |
 | Step 0 前置体检 | 待开始 | — | — | 实测报告（1s 深度/节点/热点/VCT/Bias） |
 | Step 1 4T 止血 + 最大深度放宽 | 待开始 | — | 目标 `31%~34%+` | `DEFAULT_TIMED_SEARCH_MAX_DEPTH` + Lazy SMP 修复 |
