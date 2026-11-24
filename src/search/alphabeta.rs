@@ -187,6 +187,7 @@ pub struct SearchOptions<'a> {
     pub root_depth: Option<f64>,
     pub priority_base: Option<i32>,
     pub cut_node: bool,
+    pub skip_move: Option<Move>,
 }
 
 pub fn terminal_score(board: &Board, side: Side, ply: i32) -> Option<i32> {
@@ -699,14 +700,15 @@ impl AlphaBetaSearcher {
                 stats.tt_bestmove_old_generation += 1;
             }
         }
-        if !root_restricted && probe_hit && probe_value.is_some() {
+        let in_singular = options.skip_move.is_some();
+        if !root_restricted && !in_singular && probe_hit && probe_value.is_some() {
             stats.tt_hits += 1;
             return (
                 score_from_tt(probe_value.expect("checked above"), options.ply),
                 probe_best_move,
             );
         }
-        if probe_has_window && !options.root {
+        if probe_has_window && !options.root && !in_singular {
             alpha = alpha.max(score_from_tt(probe_window_alpha, options.ply));
             beta = beta.min(score_from_tt(probe_window_beta, options.ply));
         }
@@ -994,19 +996,87 @@ impl AlphaBetaSearcher {
 
         // Pre-movegen NNUE TT-move probe: on quiet non-root nodes (no L4/L5),
         // search a legal covered TT move directly before candidate generation.
-        // An immediate beta cutoff skips movegen, NNUE policy, and sorting.
-        if self.nnue.is_some() && !options.root && !self.config.runtime.nonroot_vcf && no_l4_l5 {
+        // Includes Rapfi-calibrated Singular Extension / Multi-Cut / Negative
+        // Extension for deep TT moves (`depth >= 6.85`).
+        if self.nnue.is_some()
+            && !options.root
+            && !in_singular
+            && !self.config.runtime.nonroot_vcf
+            && no_l4_l5
+        {
             if let Some(tt_mv) = tt_best_move {
                 if coverage.is_covered(tt_mv)
                     && is_rule_legal_for_movegen(board, caches, tt_mv, side, self.config.rule_set)
                 {
                     let (mx, my) = move_to_xy(tt_mv).expect("TT move is valid");
                     let tt_self_attack = attack_level(caches, mx, my, side);
-                    let tt_depthdown = if likely_fail_high && tt_self_attack < 4 {
-                        2.0
-                    } else {
-                        1.0
-                    };
+                    let mut tt_extension = 0.0_f64;
+
+                    // Singular Extension (Rapfi ~52 Elo): verify whether `tt_mv`
+                    // is uniquely superior to all other moves at reduced depth.
+                    if depth >= 6.85
+                        && (probe_tt_flag == HASHF_BETA || probe_tt_flag == HASHF_EXACT)
+                    {
+                        if let Some(tt_val_raw) = probe_tt_value {
+                            let tt_val_adj = score_from_tt(tt_val_raw, options.ply);
+                            let tt_depth_plies =
+                                f64::from(probe_tt_depth.saturating_sub(NNUE_MAIN_TT_DEPTH_OFFSET))
+                                    / SUBPLY_TT_SCALE_F64;
+                            let se_tte_depth = match self.config.rule_set {
+                                RuleSet::Renju => 1.95,
+                                RuleSet::Freestyle => 2.09,
+                            };
+                            if tt_val_adj.abs() < WIN && tt_depth_plies >= depth - se_tte_depth {
+                                let former_pv = !is_pv && tt_was_pv;
+                                let se_scale = match self.config.rule_set {
+                                    RuleSet::Renju => 0.90,
+                                    RuleSet::Freestyle => 0.85,
+                                };
+                                let singular_margin =
+                                    ((se_scale + if former_pv { 1.0 } else { 0.0 }) * depth) as i32;
+                                let singular_beta = (tt_val_adj - singular_margin).max(-WIN + 1);
+                                let raw_se_depth =
+                                    (depth * 0.55 - if former_pv { 1.0 } else { 0.0 }).max(1.0);
+                                let se_depth = (raw_se_depth * SUBPLY_TT_SCALE_F64).floor()
+                                    / SUBPLY_TT_SCALE_F64;
+
+                                let (se_score, _) = self.search_with_coverage(
+                                    board,
+                                    caches,
+                                    side,
+                                    se_depth,
+                                    singular_beta - 1,
+                                    singular_beta,
+                                    wide,
+                                    stats,
+                                    SearchOptions {
+                                        skip_move: Some(tt_mv),
+                                        ..options
+                                    },
+                                    coverage,
+                                    None,
+                                    abdada,
+                                    tt_view,
+                                    tt_view4,
+                                );
+                                if stats.stop {
+                                    return (current, best_move);
+                                }
+                                if se_score < singular_beta {
+                                    tt_extension = 1.0;
+                                } else if singular_beta >= beta {
+                                    return (singular_beta, None);
+                                } else if tt_val_adj >= beta {
+                                    tt_extension = -1.5;
+                                }
+                            }
+                        }
+                    }
+
+                    let mut tt_depthdown = 1.0 - tt_extension;
+                    if likely_fail_high && tt_self_attack < 4 {
+                        tt_depthdown += 1.0;
+                    }
                     let mut candidate_snapshot: Option<EvalSnapshot> = None;
                     board
                         .play_assuming_rule_legal(tt_mv, Some(side), self.config.rule_set)
@@ -1028,6 +1098,7 @@ impl AlphaBetaSearcher {
                         root_depth: Some(root_depth),
                         priority_base: Some(priority_base),
                         cut_node: if is_pv { false } else { !options.cut_node },
+                        skip_move: None,
                     };
                     let (child_score, _) = self.search_with_coverage(
                         board,
@@ -1386,6 +1457,9 @@ impl AlphaBetaSearcher {
                         );
                     }
                     let candidate = ordered[step];
+                    if options.skip_move == Some(candidate.move_) {
+                        continue;
+                    }
                     // Safe Move Count Pruning (LMP) for quiet non-forcing NNUE
                     // tail moves once at least one non-losing move is found.
                     if index >= nnue_lmp_limit
@@ -1574,6 +1648,7 @@ impl AlphaBetaSearcher {
                         root_depth: Some(root_depth),
                         priority_base: Some(priority_base),
                         cut_node: false,
+                        skip_move: None,
                     };
                     let score = if found_pv {
                         let narrow_start = profile_root_candidate.then(Instant::now);
@@ -1829,7 +1904,7 @@ impl AlphaBetaSearcher {
             return (current, best_move);
         }
 
-        if !root_restricted {
+        if !root_restricted && !in_singular {
             let mut store_depth = hash_depth;
             if (current >= WIN && current > original_alpha)
                 || (current <= -WIN && current < original_beta)
