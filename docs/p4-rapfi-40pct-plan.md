@@ -106,9 +106,12 @@
     - `4T vs Fix 1 4T`：**`48-41-11`（`53.5%`，`+24.36 Elo`，`WW=5, WD=5, WL/DD=34, LD=4, LL=2`）**，`0` 错误/`0` 超时，`avg_ms=514.5ms`；
     - `4T vs Rapfi 4T (32 MiB)`：**`29-71-0`（`29.0%`，`-155.54 Elo`，`WL=29, LL=21`）**，`avg_ms=506.3ms` vs Rapfi `525.1ms`（其中 1 盘坚持到第 225 手全盘仅剩 `(11,8)` 为黑方禁手导致无合法着，属 Renju 正常判负）。
   - 回归单测：`qvcf_leaf_is_move_order_invariant_and_does_not_poison_tt`（复现 `renjunet_center_g151985_ply6` 第 28 手换序）+ `qvcf_self_last_salts_are_unique_and_nonzero` 通过。
-- [ ] **Fix 3（P2）：奇异延伸验证提前排除 `skip_move`**（`src/search/alphabeta.rs`）
+- [x] **Fix 3（P2）：奇异延伸验证提前排除 `skip_move`**（`src/search/alphabeta.rs`）
   - 在排序、`wide` 截断、`policy_top_logit` 与 `index` 分配之前剔除 `options.skip_move`，避免占名额并避免首替代着误触发 LMR/LMP 偏移；
-  - 验收：定向回归单测 + 不掉分门禁。
+  - 实测结果（均严格 `INFO tt_bits 20` = 32 MiB TT，Renju `1s/move`，`center_50_prefixes.jsonl` 100 局）：
+    - `4T vs Fix 2 4T`：**`46-48-6`（`49.0%`，`-6.95 Elo`，`WW=2, WD=2, WL/DD=40, LD=4, LL=2`）**，`0` 错误/`0` 超时（该正确性小修仅影响 ~0.7% 奇异判定，100 局处于 50% 噪声带内）；
+    - `4T vs Rapfi 4T (32 MiB)`：**`30-66-4`（`32.0%`，`-130.94 Elo`，`WL=30, LD=4, LL=16`）**，`0` 错误/`0` 超时，`avg_ms=515.3ms` vs Rapfi `556.0ms`（**创 4T 对 Rapfi 新高**，较 Phase 0 前 64 MiB 的 `26.0% / -181.7 Elo` 净涨 **`+50.8 Elo`**，`LL` 双负对子从 23 降到 16）。
+  - 回归单测：`singular_skip_move_is_excluded_before_width_truncation_and_indexing` 通过。
 - [ ] **协议卫生（可选单笔）**：`src/protocol/gomocup.rs` 补 `INFO max_memory` 解析，自动映射为对齐字节数的 `tt_bits`。
 
 ### Step 0：前置体检（在 Phase 0 干净基线上补齐实测证据）
@@ -180,7 +183,7 @@
 | 基线 P3 (`33d1515`) | 已完成 | 30.0% (-147.2) | 26.0% (-181.7, 64 MiB) | Batch 1~3 + Lazy SMP 初版 |
 | Phase 0 · Fix 1（4T 停搜与选步） | **已完成** | — | **31.0% (-139.0, 32 MiB)** | `4T vs 33d1515` `54.0% (+27.9)` |
 | Phase 0 · Fix 2（QVCF 缓存） | **已完成** | — | **29.0% (-155.5, 32 MiB)** | `4T vs Fix 1` `53.5% (+24.4)` |
-| Phase 0 · Fix 3（奇异延伸排除） | 待开始 | — | — | 提前剔除 `skip_move` |
+| Phase 0 · Fix 3（奇异延伸排除） | **已完成** | — | **32.0% (-130.9, 32 MiB)** | `4T vs Fix 2` `49.0%`；对 Rapfi 4T 新高（`+50.8 Elo` vs P3） |
 | Step 0 前置体检 | 待开始 | — | — | 实测报告（1s 深度/节点/热点/VCT/Bias） |
 | Step 1 4T 止血 + 最大深度放宽 | 待开始 | — | 目标 `31%~34%+` | `DEFAULT_TIMED_SEARCH_MAX_DEPTH` + Lazy SMP 修复 |
 | Step 2 EBF 与战术深度主攻 | 待开始 | 目标 `37%~41%` | 目标 `37%~41%` | `DEFEND_FOUR/B4F3` + `OPPO5_EXT` + EBF 包 |

@@ -1222,6 +1222,19 @@ impl AlphaBetaSearcher {
                 generated.candidates.remove(pos);
             }
         }
+        // In Singular Extension verification, exclude `options.skip_move`
+        // before sorting, `policy_top_logit`, `wide` truncation, and move
+        // indexing so the skipped move neither consumes a width slot nor
+        // shifts the first real alternative into LMR/LMP (`index >= 1`).
+        if let Some(skip_mv) = options.skip_move {
+            if let Some(pos) = generated
+                .candidates
+                .iter()
+                .position(|candidate| candidate.move_ == skip_mv)
+            {
+                generated.candidates.remove(pos);
+            }
+        }
 
         let lazy_tie_ordering = !options.root && !self.config.runtime.nonroot_vcf;
         let mut rest_primary_sorted = true;
@@ -1487,9 +1500,7 @@ impl AlphaBetaSearcher {
                         );
                     }
                     let candidate = ordered[step];
-                    if options.skip_move == Some(candidate.move_) {
-                        continue;
-                    }
+                    debug_assert_ne!(options.skip_move, Some(candidate.move_));
                     // Safe Move Count Pruning (LMP) for quiet non-forcing NNUE
                     // tail moves once at least one non-losing move is found.
                     if index >= nnue_lmp_limit
@@ -3201,6 +3212,71 @@ mod tests {
         assert!(
             score_orig >= WIN,
             "swapped move order poisoned shared TT and hid forced win on original order: score_orig={score_orig}"
+        );
+    }
+
+    #[test]
+    fn singular_skip_move_is_excluded_before_width_truncation_and_indexing() {
+        let mut board = Board::new();
+        for (x, y) in [(7, 7), (7, 6), (8, 8), (6, 6)] {
+            let mv = xy_to_move(x, y).unwrap();
+            board.play_for_rule(mv, None, RuleSet::Renju).unwrap();
+        }
+        let mut cfg = load_default_config();
+        cfg.rule_set = RuleSet::Renju;
+        cfg.runtime.compute_vcf = false;
+        cfg.runtime.compute_vct = false;
+
+        let mut caches = EvalCaches::new();
+        recompute_all_for_rule(&mut board, &mut caches, RuleSet::Renju);
+        let side = board.side_to_move();
+
+        let mut searcher = AlphaBetaSearcher::new(cfg);
+        let mut base_stats = SearchStats::default();
+        let (_, top_move) = searcher.search(
+            &mut board.clone(),
+            &mut caches.clone(),
+            side,
+            2.0,
+            -INF,
+            INF,
+            1,
+            &mut base_stats,
+            SearchOptions {
+                opo: 1,
+                root: false,
+                ..SearchOptions::default()
+            },
+        );
+        let skipped = top_move.expect("width=1 search returns a best move");
+
+        // With `wide = 1` and `skip_move = Some(skipped)`, excluding `skip_move`
+        // before truncation must still search 1 real alternative move instead of
+        // burning the single width slot on the skipped move and returning None.
+        let mut skip_stats = SearchStats::default();
+        let (alt_score, alt_move) = searcher.search(
+            &mut board.clone(),
+            &mut caches.clone(),
+            side,
+            2.0,
+            -INF,
+            INF,
+            1,
+            &mut skip_stats,
+            SearchOptions {
+                opo: 1,
+                root: false,
+                skip_move: Some(skipped),
+                ..SearchOptions::default()
+            },
+        );
+        assert!(
+            alt_score > -INF,
+            "excluding skip_move before width truncation must search a real alternative"
+        );
+        assert!(
+            alt_move.is_some_and(|m| m != skipped),
+            "alternative move must be present and distinct from skipped move"
         );
     }
 }
