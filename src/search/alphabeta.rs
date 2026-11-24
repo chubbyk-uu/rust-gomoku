@@ -13,7 +13,9 @@ use crate::constants::{
     BLACK, BOARD_AREA, BOARD_SIZE, EMPTY, HASHF_ALPHA, HASHF_BETA, HASHF_EMPTY, HASHF_EXACT, INF,
     WIN,
 };
-use crate::eval::{evaluate_board, value_wide_compute_for_rule, EvalCaches, EvalSnapshot};
+use crate::eval::{
+    attack_level, evaluate_board, value_wide_compute_for_rule, EvalCaches, EvalSnapshot,
+};
 use crate::nnue::{load_mix9svq_evaluator_for_rule, Mix9svqEvaluator};
 use crate::rules::RuleSet;
 use crate::search::abdada::{AbdadaContext, ABDADA_MIN_DEPTH};
@@ -791,6 +793,7 @@ impl AlphaBetaSearcher {
 
         let ply_idx = (options.ply as usize).min(127);
         let mut improving = false;
+        let mut node_eval: Option<i32> = None;
 
         // Tactically-guarded NNUE Static Eval + Razoring (with QVCF) +
         // Deeper Rapfi-calibrated Reverse Futility Pruning (RFP) BEFORE movegen:
@@ -839,6 +842,7 @@ impl AlphaBetaSearcher {
                                 eval = adj;
                             }
                         }
+                        node_eval = Some(eval);
                         // Step 7 (Rapfi): Razoring with leaf QVCF when static eval is
                         // clearly below alpha at shallow depth (< 2.6 ply).
                         if depth < 2.6 && (alpha < WIN || !probe_hit) {
@@ -936,6 +940,21 @@ impl AlphaBetaSearcher {
             }
         }
         let _ = improving;
+        // Fail-High Reduction (Rapfi ~50 Elo): on non-PV cutNodes where static
+        // eval already exceeds beta by a depth-scaled margin, reduce non-B4
+        // moves by 1 ply.
+        let likely_fail_high = self.nnue.is_some()
+            && !options.root
+            && !is_pv
+            && options.cut_node
+            && depth >= 2.0
+            && node_eval.is_some_and(|ev| {
+                let margin = match self.config.rule_set {
+                    RuleSet::Renju => -4 + 16 * (depth as i32),
+                    RuleSet::Freestyle => -3 + 20 * (depth as i32),
+                };
+                ev >= beta + margin
+            });
 
         let mut current = i32::MIN;
         let mut has_score = false;
@@ -953,6 +972,12 @@ impl AlphaBetaSearcher {
                     && is_rule_legal_for_movegen(board, caches, tt_mv, side, self.config.rule_set)
                 {
                     let (mx, my) = move_to_xy(tt_mv).expect("TT move is valid");
+                    let tt_self_attack = attack_level(caches, mx, my, side);
+                    let tt_depthdown = if likely_fail_high && tt_self_attack < 4 {
+                        2.0
+                    } else {
+                        1.0
+                    };
                     let mut candidate_snapshot: Option<EvalSnapshot> = None;
                     board
                         .play_assuming_rule_legal(tt_mv, Some(side), self.config.rule_set)
@@ -979,7 +1004,7 @@ impl AlphaBetaSearcher {
                         board,
                         caches,
                         -side,
-                        depth - 1.0,
+                        depth - tt_depthdown,
                         -beta,
                         -alpha,
                         child_wide,
@@ -1342,6 +1367,9 @@ impl AlphaBetaSearcher {
                     running_downf += index as i32;
                     let mut local_downf = running_downf;
                     let mut depthdown = base_depthdown;
+                    if likely_fail_high && candidate.self_attack < 4 {
+                        depthdown += 1.0;
+                    }
                     let mut net = 0_i32;
                     if local_downf >= 15 {
                         net = local_downf / 15;
