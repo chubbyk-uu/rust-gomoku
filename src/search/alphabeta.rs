@@ -2318,18 +2318,16 @@ impl AlphaBetaSearcher {
         }
 
         if let Some(tt4) = tt_view4 {
-            let mut flag = if best_value >= beta {
+            // Match Rapfi (`search.cpp:2236-2238`): a beta cutoff exits the B4
+            // loop early and only proves a lower bound (`HASHF_BETA`), never
+            // exact mate distance (`HASHF_EXACT`), even when `best_value >= WIN`.
+            let flag = if best_value >= beta {
                 HASHF_BETA
             } else if is_pv && best_value > old_alpha {
                 HASHF_EXACT
             } else {
                 HASHF_ALPHA
             };
-            if (best_value >= WIN && best_value > old_alpha)
-                || (best_value <= -WIN && best_value < beta)
-            {
-                flag = HASHF_EXACT;
-            }
             tt4.store(TTEntry4 {
                 key: board.zobrist_key(),
                 value: score_to_tt(best_value, ply),
@@ -2451,6 +2449,7 @@ mod tests {
     use super::*;
     use crate::board::xy_to_move;
     use crate::config::load_default_config;
+    use crate::constants::WHITE;
     use crate::eval::recompute_all_for_rule;
     use crate::rules::RuleSet;
 
@@ -2984,5 +2983,150 @@ mod tests {
             assert!(p1.hit && p1.value == Some(17));
             assert!(p2.hit && p2.value == Some(29));
         }
+    }
+
+    #[test]
+    fn qvcf_narrow_window_mate_cutoff_stores_lower_bound_not_exact() {
+        let nnue_dir = std::path::Path::new("opponent/rapfi-networks/mix9svq");
+        if !nnue_dir.exists() {
+            return;
+        }
+        let mut cfg = load_default_config();
+        cfg.rule_set = RuleSet::Renju;
+        cfg.runtime.use_nnue = true;
+        cfg.runtime.nnue_dir = Some(nnue_dir.to_string_lossy().into_owned());
+        cfg.runtime.compute_vcf = false;
+        cfg.runtime.compute_vct = false;
+
+        // Construct a Renju position (Black to move, `self_last = (7, 8)`) with
+        // TWO local B4 winning lines of different mate distances and ZERO L4/L5:
+        // - Slower 6-ply mate (`INF - 6 = 19994`) at `(5, 7)`:
+        //   B(5,7) -> W(5,10) -> B(3,7) -> W(6,7) -> L4 on col x=3 (`(3,6)/(3,10)`).
+        // - Faster 4-ply mate (`INF - 4 = 19996`) at `(9, 7)`:
+        //   B(9,7) -> W(9,10) -> L4 on row y=7 (`(8,7)/(12,7)`).
+        let black: [(usize, usize); 13] = [
+            (5, 6),
+            (5, 8),
+            (5, 9),
+            (2, 7),
+            (4, 7),
+            (3, 8),
+            (3, 9),
+            (9, 6),
+            (9, 8),
+            (9, 9),
+            (10, 7),
+            (11, 7),
+            (7, 8), // `self_last = (7, 8)`
+        ];
+        let white: [(usize, usize); 13] = [
+            (5, 5),
+            (1, 7),
+            (9, 5),
+            (6, 8),
+            (2, 9),
+            (6, 5),
+            (0, 0),
+            (0, 2),
+            (0, 4),
+            (0, 10),
+            (0, 12),
+            (0, 14),
+            (14, 0),
+        ];
+        let mut board = Board::new();
+        for i in 0..black.len() {
+            let bm = xy_to_move(black[i].0, black[i].1).unwrap();
+            let wm = xy_to_move(white[i].0, white[i].1).unwrap();
+            board
+                .play_for_rule(bm, Some(BLACK), RuleSet::Renju)
+                .unwrap();
+            board
+                .play_for_rule(wm, Some(WHITE), RuleSet::Renju)
+                .unwrap();
+        }
+        let mut caches = EvalCaches::new();
+        recompute_all_for_rule(&mut board, &mut caches, RuleSet::Renju);
+        assert!(!caches.has_l5(BLACK) && !caches.has_l5(WHITE));
+        assert!(!caches.has_l4(BLACK) && !caches.has_l4(WHITE));
+
+        let key = board.zobrist_key();
+        let slow_mv = xy_to_move(5, 7).unwrap();
+        let mut searcher = AlphaBetaSearcher::new(cfg);
+        searcher.tt.set_subply(true);
+        let key_salt = searcher.tt_key_salt();
+        // Seed `tt_move = Some(slow_mv)` so the narrow-window search tries the
+        // 6-ply mate FIRST and breaks early on `best_value >= beta`.
+        searcher
+            .tt
+            .view4_with_salt(key_salt)
+            .expect("4-way TT")
+            .store(TTEntry4 {
+                key,
+                value: TT_VALUE_NONE,
+                static_eval: TT_VALUE_NONE,
+                flag: HASHF_EMPTY,
+                depth: 0,
+                best_move: Some(slow_mv),
+                tt_pv: false,
+                generation: searcher.tt_generation,
+            });
+
+        let (narrow_score, _) = searcher.search(
+            &mut board,
+            &mut caches,
+            BLACK,
+            0.0,
+            1_500,
+            1_501,
+            40,
+            &mut SearchStats::default(),
+            SearchOptions {
+                opo: 1,
+                root: false,
+                ..SearchOptions::default()
+            },
+        );
+        assert_eq!(narrow_score, INF - 6);
+
+        let p = searcher
+            .tt
+            .view4_with_salt(key_salt)
+            .expect("4-way TT")
+            .probe(key, QVCF_TT_DEPTH_FULL, 19_995, 19_996);
+        assert_eq!(
+            p.tt_flag, HASHF_BETA,
+            "narrow-window mate cutoff must store HASHF_BETA, not HASHF_EXACT"
+        );
+        assert!(
+            p.value.is_none(),
+            "HASHF_BETA(+19994) must not cut off window [19995, 19996]"
+        );
+
+        // Full-window PV search must not be cut off by `HASHF_BETA(+19994)` and
+        // must discover the shorter 4-ply mate `+19996`, storing `HASHF_EXACT`.
+        let (exact_full, _) = searcher.search(
+            &mut board,
+            &mut caches,
+            BLACK,
+            0.0,
+            -INF,
+            INF,
+            40,
+            &mut SearchStats::default(),
+            SearchOptions {
+                opo: 1,
+                root: false,
+                ..SearchOptions::default()
+            },
+        );
+        assert_eq!(exact_full, INF - 4);
+        let p_exact = searcher
+            .tt
+            .view4_with_salt(key_salt)
+            .expect("4-way TT")
+            .probe(key, QVCF_TT_DEPTH_FULL, -INF, INF);
+        assert_eq!(p_exact.tt_flag, HASHF_EXACT);
+        assert_eq!(p_exact.value, Some(INF - 4));
     }
 }
