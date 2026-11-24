@@ -112,7 +112,7 @@
     - `4T vs Fix 2 4T`：**`46-48-6`（`49.0%`，`-6.95 Elo`，`WW=2, WD=2, WL/DD=40, LD=4, LL=2`）**，`0` 错误/`0` 超时（该正确性小修仅影响 ~0.7% 奇异判定，100 局处于 50% 噪声带内）；
     - `4T vs Rapfi 4T (32 MiB)`：**`30-66-4`（`32.0%`，`-130.94 Elo`，`WL=30, LD=4, LL=16`）**，`0` 错误/`0` 超时，`avg_ms=515.3ms` vs Rapfi `556.0ms`（**创 4T 对 Rapfi 新高**，较 Phase 0 前 64 MiB 的 `26.0% / -181.7 Elo` 净涨 **`+50.8 Elo`**，`LL` 双负对子从 23 降到 16）。
   - 回归单测：`singular_skip_move_is_excluded_before_width_truncation_and_indexing` 通过。
-- [ ] **协议卫生（可选单笔）**：`src/protocol/gomocup.rs` 补 `INFO max_memory` 解析，自动映射为对齐字节数的 `tt_bits`。
+- [x] **协议卫生（单笔）**：`src/protocol/gomocup.rs` 补 `INFO max_memory` 解析，自动将默认 TT 容量上限约束在 `max_memory` 字节内（如 4T 收到 `INFO max_memory 33554432` 自动落到 32 MiB = `2^20` 桶，`0` 恢复默认，显式 `tt_bits` 仍优先）。
 
 ### Step 0：前置体检（在 Phase 0 干净基线上补齐实测证据）
 

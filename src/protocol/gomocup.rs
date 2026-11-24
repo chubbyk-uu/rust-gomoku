@@ -56,6 +56,7 @@ pub struct GomocupProtocol {
     pending_error: Option<PendingProtocolError>,
     searcher: Option<RootSearcher>,
     auto_tt_max_bits: u32,
+    max_memory_tt_bits: Option<u32>,
     nnue_prewarm: Option<(std::path::PathBuf, RuleSet, Arc<(Mutex<u8>, Condvar)>)>,
 }
 
@@ -81,6 +82,7 @@ impl GomocupProtocol {
             pending_error: None,
             searcher: None,
             auto_tt_max_bits: MAX_TT_BUCKET_BITS,
+            max_memory_tt_bits: None,
             nnue_prewarm: None,
         }
     }
@@ -442,6 +444,25 @@ impl GomocupProtocol {
                     self.searcher = None;
                 }
             }
+            "max_memory" => {
+                if let Some(parsed) = parse_one::<u64>(value) {
+                    let new_cap = if parsed == 0 {
+                        None
+                    } else {
+                        let buckets = parsed / 32;
+                        let bits = if buckets == 0 {
+                            0
+                        } else {
+                            buckets.ilog2().min(MAX_TT_BUCKET_BITS)
+                        };
+                        Some(bits)
+                    };
+                    if self.max_memory_tt_bits != new_cap {
+                        self.max_memory_tt_bits = new_cap;
+                        self.searcher = None;
+                    }
+                }
+            }
             "tt_bits" => {
                 if let Some(parsed) = parse_one::<u32>(value) {
                     if parsed <= MAX_TT_BUCKET_BITS {
@@ -701,8 +722,12 @@ impl GomocupProtocol {
             } else {
                 self.config.runtime.threads
             };
-            default_tt_bits_for_search(effective_threads, limits.max_depth)
-                .min(self.auto_tt_max_bits)
+            let mut bits = default_tt_bits_for_search(effective_threads, limits.max_depth)
+                .min(self.auto_tt_max_bits);
+            if let Some(mem_bits) = self.max_memory_tt_bits {
+                bits = bits.min(mem_bits);
+            }
+            bits
         });
         // Check deduplicated prewarm state for NNUE weights:
         // - Under ANY timed budget, never wait unboundedly for slow storage:
@@ -780,9 +805,10 @@ impl GomocupProtocol {
                         }
                         None => {
                             let preferred_bits = expected_auto_bits.expect("auto bits computed");
+                            let floor_bits = preferred_bits.min(16);
                             TranspositionTable::try_new_with_fallback_layout(
                                 preferred_bits,
-                                16,
+                                floor_bits,
                                 prefer_four_way_tt,
                             )
                             .map(|(tt, actual_bits)| {
@@ -1096,5 +1122,39 @@ mod tests {
             unlimited_match.current_search_limits().time_limit_ms,
             Some(1000.0)
         );
+    }
+
+    #[test]
+    fn gomocup_info_max_memory_caps_auto_tt_bits_for_4t_and_resets_on_zero() {
+        let mut config = load_default_config();
+        config.runtime.threads = 4;
+        config.runtime.compute_vcf = false;
+        config.runtime.compute_vct = false;
+        let mut limits = SearchLimits::fixed_from_config(&config);
+        limits.max_depth = 5;
+        let mut protocol = GomocupProtocol::new(Some(config), Some(limits));
+        protocol.handle_line("START 15");
+        protocol.handle_line("INFO max_memory 33554432");
+        assert_eq!(protocol.max_memory_tt_bits, Some(20));
+        let _ = protocol.handle_line("BEGIN");
+        let searcher = protocol.searcher.as_ref().expect("searcher built");
+        assert_eq!(
+            searcher.tt.bucket_count(),
+            1_usize << 20,
+            "INFO max_memory 33554432 must cap 4T TT at 32 MiB (2^20 buckets)"
+        );
+
+        // Clearing max_memory with 0 restores default 4T 64 MiB (2^21 buckets).
+        protocol.handle_line("INFO max_memory 0");
+        assert_eq!(protocol.max_memory_tt_bits, None);
+        assert!(protocol.searcher.is_none());
+
+        // Explicit tt_bits continues to override max_memory auto cap.
+        protocol.handle_line("INFO max_memory 33554432");
+        protocol.handle_line("INFO tt_bits 18");
+        let _ = protocol.handle_line("RESTART");
+        let _ = protocol.handle_line("BEGIN");
+        let searcher = protocol.searcher.as_ref().expect("searcher rebuilt");
+        assert_eq!(searcher.tt.bucket_count(), 1_usize << 18);
     }
 }
