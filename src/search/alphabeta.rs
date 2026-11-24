@@ -165,6 +165,7 @@ pub struct SearchOptions<'a> {
     pub downf: i32,
     pub root_depth: Option<f64>,
     pub priority_base: Option<i32>,
+    pub cut_node: bool,
 }
 
 pub fn terminal_score(board: &Board, side: Side, ply: i32) -> Option<i32> {
@@ -276,6 +277,7 @@ pub struct AlphaBetaSearcher {
     tt_generation: u16,
     movegen_scratch: MoveAnalysis,
     nnue: Option<Mix9svqEvaluator>,
+    static_eval_stack: [i32; 128],
 }
 
 pub(crate) fn load_nnue_for_config(config: &EngineConfig) -> Option<Mix9svqEvaluator> {
@@ -313,6 +315,7 @@ impl AlphaBetaSearcher {
             tt_generation: 0,
             movegen_scratch: MoveAnalysis::new(),
             nnue,
+            static_eval_stack: [TT_VALUE_NONE; 128],
         }
     }
 
@@ -334,6 +337,7 @@ impl AlphaBetaSearcher {
             tt_generation: 0,
             movegen_scratch: MoveAnalysis::new(),
             nnue,
+            static_eval_stack: [TT_VALUE_NONE; 128],
         }
     }
 
@@ -476,7 +480,7 @@ impl AlphaBetaSearcher {
         board: &mut Board,
         caches: &mut EvalCaches,
         side: Side,
-        depth: f64,
+        mut depth: f64,
         mut alpha: i32,
         mut beta: i32,
         wide: usize,
@@ -488,6 +492,10 @@ impl AlphaBetaSearcher {
         tt_view: Option<TTTableView<'_>>,
         tt_view4: Option<TTTableView4<'_>>,
     ) -> (i32, Option<Move>) {
+        if options.root {
+            self.static_eval_stack[0] = TT_VALUE_NONE;
+            self.static_eval_stack[1] = TT_VALUE_NONE;
+        }
         let root_depth = options.root_depth.unwrap_or(depth);
         let priority_base = options.priority_base.unwrap_or(board.move_count() as i32);
         let subply_tt = tt_view4
@@ -512,7 +520,7 @@ impl AlphaBetaSearcher {
         } else {
             (depth.floor() as i64).clamp(0, i64::from(i32::MAX)) as i32
         };
-        let hash_depth = raw_hash_depth.min(max_encodable_depth);
+        let mut hash_depth = raw_hash_depth.min(max_encodable_depth);
         let raw_probe_depth = if depth <= 0.0 {
             if nnue_depth_offset > 0 {
                 QVCF_TT_DEPTH_FULL
@@ -602,6 +610,7 @@ impl AlphaBetaSearcher {
             probe_value,
             probe_tt_value,
             probe_tt_flag,
+            probe_tt_depth,
             probe_best_move,
             probe_best_move_hint,
             probe_has_window,
@@ -621,6 +630,7 @@ impl AlphaBetaSearcher {
                 p4.value,
                 p4.tt_value,
                 p4.tt_flag,
+                p4.tt_depth,
                 p4.best_move,
                 p4.best_move_hint,
                 p4.has_window,
@@ -641,6 +651,7 @@ impl AlphaBetaSearcher {
                 p2.value,
                 None,
                 0,
+                0,
                 p2.best_move,
                 p2.best_move_hint,
                 p2.has_window,
@@ -651,7 +662,7 @@ impl AlphaBetaSearcher {
             )
         } else {
             (
-                false, None, None, 0, None, None, false, alpha, beta, None, false,
+                false, None, None, 0, 0, None, None, false, alpha, beta, None, false,
             )
         };
         if let Some(best_move_hint) = probe_best_move_hint {
@@ -778,90 +789,153 @@ impl AlphaBetaSearcher {
             && caches.rule_set == self.config.rule_set
             && !caches.has_any_l4_or_l5();
 
-        // Tactically-guarded NNUE Razoring (with QVCF) + Reverse Futility
-        // Pruning (RFP) BEFORE movegen:
+        let ply_idx = (options.ply as usize).min(127);
+        let mut improving = false;
+
+        // Tactically-guarded NNUE Static Eval + Razoring (with QVCF) +
+        // Deeper Rapfi-calibrated Reverse Futility Pruning (RFP) BEFORE movegen:
         // When O(1) bucket masks confirm neither side has an immediate L4/L5
-        // threat, evaluate NNUE static value (cached in 4-way TT) and prune
-        // before running `generate_candidates_with_coverage_scratch`.
+        // threat, evaluate NNUE static value (cached in 4-way TT), update
+        // `static_eval_stack` / `improving`, and prune before movegen.
         if let Some(tt4) = tt_view4 {
-            if self.nnue.is_some()
-                && !options.root
-                && !is_pv
-                && no_l4_l5
-                && depth > 0.0
-                && depth <= 3.0
-            {
-                let raw_eval = match tt_static_eval {
-                    Some(ev) => ev,
-                    None => {
-                        let ev = self
-                            .nnue
-                            .as_mut()
-                            .expect("checked above")
-                            .evaluate_value(side);
-                        tt_static_eval = Some(ev);
-                        tt4.store(TTEntry4 {
-                            key: board.zobrist_key(),
-                            value: TT_VALUE_NONE,
-                            static_eval: ev,
-                            flag: HASHF_EMPTY,
-                            depth: 0,
-                            best_move: None,
-                            tt_pv: tt_was_pv,
-                            generation: self.tt_generation,
-                        });
-                        ev
+            if self.nnue.is_some() && !options.root {
+                if no_l4_l5 {
+                    let raw_eval = match tt_static_eval {
+                        Some(ev) => ev,
+                        None => {
+                            let ev = self
+                                .nnue
+                                .as_mut()
+                                .expect("checked above")
+                                .evaluate_value(side);
+                            tt_static_eval = Some(ev);
+                            tt4.store(TTEntry4 {
+                                key: board.zobrist_key(),
+                                value: TT_VALUE_NONE,
+                                static_eval: ev,
+                                flag: HASHF_EMPTY,
+                                depth: 0,
+                                best_move: None,
+                                tt_pv: tt_was_pv,
+                                generation: self.tt_generation,
+                            });
+                            ev
+                        }
+                    };
+                    self.static_eval_stack[ply_idx] = raw_eval;
+                    improving = ply_idx >= 2
+                        && self.static_eval_stack[ply_idx - 2] != TT_VALUE_NONE
+                        && raw_eval > self.static_eval_stack[ply_idx - 2];
+
+                    if !is_pv && depth > 0.0 {
+                        let mut eval = raw_eval;
+                        if let Some(tt_val) = probe_tt_value {
+                            let adj = score_from_tt(tt_val, options.ply);
+                            if adj.abs() < WIN
+                                && (probe_tt_flag == HASHF_EXACT
+                                    || (probe_tt_flag == HASHF_BETA && adj > eval)
+                                    || (probe_tt_flag == HASHF_ALPHA && adj < eval))
+                            {
+                                eval = adj;
+                            }
+                        }
+                        // Step 7 (Rapfi): Razoring with leaf QVCF when static eval is
+                        // clearly below alpha at shallow depth (< 2.6 ply).
+                        if depth < 2.6 && (alpha < WIN || !probe_hit) {
+                            let razor_margin = match self.config.rule_set {
+                                RuleSet::Renju => (0.17 * depth * depth + 8.0 * depth) as i32 + 9,
+                                RuleSet::Freestyle => {
+                                    (0.17 * depth * depth + 15.0 * depth) as i32 + 11
+                                }
+                            }
+                            .max(0);
+                            if eval + razor_margin < alpha {
+                                let score = self.vcfsearch(
+                                    board,
+                                    caches,
+                                    side,
+                                    alpha,
+                                    alpha + 1,
+                                    0,
+                                    options.ply,
+                                    stats,
+                                    coverage,
+                                    abdada,
+                                    tt_view4,
+                                    Some((
+                                        probe_hit,
+                                        probe_tt_value,
+                                        probe_tt_flag,
+                                        probe_best_move,
+                                        Some(raw_eval),
+                                    )),
+                                );
+                                return (score, None);
+                            }
+                        }
+                        // Step 8 (Rapfi): Futility / Reverse Futility Pruning across
+                        // quiet non-PV nodes calibrated with `cut_node` & `improving`.
+                        if depth <= 9.0 && beta > -WIN && beta < WIN && eval < WIN {
+                            let (scale, no_tt_penalty) = match self.config.rule_set {
+                                RuleSet::Renju => (63, 13),
+                                RuleSet::Freestyle => (68, 16),
+                            };
+                            let eff_scale = scale
+                                - if options.cut_node && !probe_hit {
+                                    no_tt_penalty
+                                } else {
+                                    0
+                                };
+                            let eff_depth =
+                                (depth - 1.0 - if improving { 1.0 } else { 0.0 }).max(0.0);
+                            let rfp_margin = (f64::from(eff_scale) * eff_depth).trunc() as i32;
+                            if eval - rfp_margin >= beta {
+                                return (eval, None);
+                            }
+                        }
                     }
-                };
-                let mut eval = raw_eval;
-                if let Some(tt_val) = probe_tt_value {
-                    let adj = score_from_tt(tt_val, options.ply);
-                    if adj.abs() < WIN
-                        && (probe_tt_flag == HASHF_EXACT
-                            || (probe_tt_flag == HASHF_BETA && adj > eval)
-                            || (probe_tt_flag == HASHF_ALPHA && adj < eval))
-                    {
-                        eval = adj;
-                    }
-                }
-                // Step 7 (Rapfi): Razoring with leaf QVCF when static eval is
-                // clearly below alpha at shallow depth (< 2.6 ply).
-                if depth < 2.6 && (alpha < WIN || !probe_hit) {
-                    let razor_margin = match self.config.rule_set {
-                        RuleSet::Renju => (0.17 * depth * depth + 8.0 * depth) as i32 + 9,
-                        RuleSet::Freestyle => (0.17 * depth * depth + 15.0 * depth) as i32 + 11,
-                    }
-                    .max(0);
-                    if eval + razor_margin < alpha {
-                        let score = self.vcfsearch(
-                            board,
-                            caches,
-                            side,
-                            alpha,
-                            alpha + 1,
-                            0,
-                            options.ply,
-                            stats,
-                            coverage,
-                            abdada,
-                            tt_view4,
-                            Some((
-                                probe_hit,
-                                probe_tt_value,
-                                probe_tt_flag,
-                                probe_best_move,
-                                Some(raw_eval),
-                            )),
-                        );
-                        return (score, None);
-                    }
-                }
-                let rfp_margin = (135.0 * depth).round() as i32;
-                if beta > -WIN && beta < WIN && eval < WIN && eval - rfp_margin >= beta {
-                    return (eval, None);
+                } else {
+                    self.static_eval_stack[ply_idx] =
+                        if ply_idx > 0 && self.static_eval_stack[ply_idx - 1] != TT_VALUE_NONE {
+                            -self.static_eval_stack[ply_idx - 1]
+                        } else {
+                            TT_VALUE_NONE
+                        };
                 }
             }
         }
+
+        // Step 10 (Rapfi): Internal Iterative Reduction (IIR) on non-root PV
+        // nodes missing a TT move or with a stale PV TT depth.
+        if self.nnue.is_some() && !options.root && no_l4_l5 && is_pv && depth > 1.0 {
+            let mut iir_red = 0.0;
+            if tt_best_move.is_none() && depth >= 2.0 {
+                iir_red = match self.config.rule_set {
+                    RuleSet::Renju => 24.0 / SUBPLY_TT_SCALE_F64,
+                    RuleSet::Freestyle => 29.0 / SUBPLY_TT_SCALE_F64,
+                };
+            } else if tt_best_move.is_some() {
+                let tt_depth_plies =
+                    f64::from(probe_tt_depth.saturating_sub(NNUE_MAIN_TT_DEPTH_OFFSET))
+                        / SUBPLY_TT_SCALE_F64;
+                let (iir_scale, iir_max) = match self.config.rule_set {
+                    RuleSet::Renju => (0.17, 3.3),
+                    RuleSet::Freestyle => (0.19, 3.6),
+                };
+                let raw_red = ((depth - tt_depth_plies) * iir_scale).clamp(0.0, iir_max);
+                iir_red = (raw_red * SUBPLY_TT_SCALE_F64).floor() / SUBPLY_TT_SCALE_F64;
+            }
+            if iir_red > 0.0 {
+                depth = (depth - iir_red).max(0.5);
+                if subply_tt {
+                    hash_depth = (((depth * SUBPLY_TT_SCALE_F64).floor() as i64)
+                        .clamp(0, i64::from(i32::MAX)) as i32
+                        + nnue_depth_offset)
+                        .min(max_encodable_depth);
+                }
+            }
+        }
+        let _ = improving;
 
         let mut current = i32::MIN;
         let mut has_score = false;
@@ -899,6 +973,7 @@ impl AlphaBetaSearcher {
                         downf: options.downf,
                         root_depth: Some(root_depth),
                         priority_base: Some(priority_base),
+                        cut_node: if is_pv { false } else { !options.cut_node },
                     };
                     let (child_score, _) = self.search_with_coverage(
                         board,
@@ -1399,7 +1474,7 @@ impl AlphaBetaSearcher {
 
                 let mut attempt_depth = depth - depthdown;
                 let score = loop {
-                    let child_options = SearchOptions {
+                    let base_child_options = SearchOptions {
                         opo: 1 - options.opo,
                         ply: options.ply + 1,
                         root: false,
@@ -1408,6 +1483,7 @@ impl AlphaBetaSearcher {
                         downf: local_downf,
                         root_depth: Some(root_depth),
                         priority_base: Some(priority_base),
+                        cut_node: false,
                     };
                     let score = if found_pv {
                         let narrow_start = profile_root_candidate.then(Instant::now);
@@ -1422,7 +1498,10 @@ impl AlphaBetaSearcher {
                             -shifted_alpha,
                             child_wide,
                             stats,
-                            child_options,
+                            SearchOptions {
+                                cut_node: true,
+                                ..base_child_options
+                            },
                             coverage,
                             Some(((mx, my), &mut candidate_snapshot)),
                             abdada,
@@ -1451,7 +1530,10 @@ impl AlphaBetaSearcher {
                                 -shift_bound_with_atdown(alpha, atdown),
                                 child_wide,
                                 stats,
-                                child_options,
+                                SearchOptions {
+                                    cut_node: false,
+                                    ..base_child_options
+                                },
                                 coverage,
                                 Some(((mx, my), &mut candidate_snapshot)),
                                 abdada,
@@ -1482,7 +1564,10 @@ impl AlphaBetaSearcher {
                             -shift_bound_with_atdown(alpha, atdown),
                             child_wide,
                             stats,
-                            child_options,
+                            SearchOptions {
+                                cut_node: if is_pv { false } else { !options.cut_node },
+                                ..base_child_options
+                            },
                             coverage,
                             Some(((mx, my), &mut candidate_snapshot)),
                             abdada,
