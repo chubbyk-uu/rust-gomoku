@@ -1,12 +1,13 @@
 //! Root iterative-deepening search for the classic mainline.
 
 use super::abdada::{
-    AbdadaContext, DepthJob, SearchWorkerPool, SharedRootBest, ABDADA_PARALLEL_START_DEPTH,
+    pick_best_thread, AbdadaContext, DepthJob, LazySmpJob, SearchWorkerPool, SharedRootBest,
+    ThreadSearchOutcome, ABDADA_PARALLEL_START_DEPTH,
 };
 use super::budget::MoveBudget;
 use std::collections::HashSet;
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 use std::thread;
@@ -710,6 +711,187 @@ impl RootSearcher {
                     depth: 0,
                     nodes: 0,
                 };
+            }
+        }
+
+        if self.config.runtime.threads > 1
+            && self.alphabeta.has_nnue()
+            && limits.node_limit.is_none()
+            && limits.max_depth >= 2
+        {
+            let threads = self.config.runtime.threads;
+            let pool = self.ensure_worker_pool(threads);
+            let num_workers = pool.num_workers();
+            let table_and_salt = (num_workers > 0)
+                .then(|| pool.table().map(|table| (table, pool.next_salt())))
+                .flatten();
+            if let Some((abdada_table, abdada_salt)) = table_and_salt {
+                let total_threads = num_workers + 1;
+                let stop_flag = Arc::new(AtomicBool::new(false));
+                let completed_depths: Vec<AtomicI32> =
+                    (0..total_threads).map(|_| AtomicI32::new(0)).collect();
+                let job = Arc::new(LazySmpJob {
+                    config: Arc::new(self.config.clone()),
+                    tt: self.tt.clone(),
+                    tt_generation: self.alphabeta.tt_generation(),
+                    board: board.clone(),
+                    caches: caches.clone(),
+                    side,
+                    max_depth: limits.max_depth,
+                    wide: limits.root_width,
+                    root_allowed_moves: root_allowed_moves.clone(),
+                    deadline: self.vcf.budget.deadline(),
+                    cancel: cancel.clone(),
+                    stop_flag: Arc::clone(&stop_flag),
+                    abdada_table: Arc::clone(&abdada_table),
+                    abdada_salt,
+                    completed_depths,
+                    thread_outcomes: Mutex::new(Vec::with_capacity(total_threads)),
+                    helper_nodes: AtomicUsize::new(0),
+                    helper_tt_curr: AtomicUsize::new(0),
+                    helper_tt_old: AtomicUsize::new(0),
+                });
+                self.worker_pool
+                    .as_ref()
+                    .expect("worker pool initialized")
+                    .start_lazy_smp(Arc::clone(&job));
+
+                let mut completed_depth = 0_i32;
+                for depth in 1..=limits.max_depth {
+                    if self.vcf.budget.stopped()
+                        || cancel
+                            .as_ref()
+                            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+                    {
+                        break;
+                    }
+                    let depth_start = Instant::now();
+                    let main_abdada = AbdadaContext {
+                        worker_id: 0,
+                        table: Arc::clone(&abdada_table),
+                        salt: abdada_salt,
+                        root_best: Arc::new(SharedRootBest::new()),
+                        depth_done: Arc::clone(&stop_flag),
+                    };
+                    let root_preferred_move = if root_allowed_moves.is_some() {
+                        best_move
+                    } else {
+                        None
+                    };
+                    let mut stats = SearchStats {
+                        root_profile: self.config.runtime.root_profile,
+                        cancel: cancel.clone(),
+                        ..SearchStats::default()
+                    };
+                    let (score, move_) = self.alphabeta.search_with_abdada(
+                        board,
+                        &mut caches,
+                        side,
+                        f64::from(depth),
+                        -INF,
+                        INF,
+                        limits.root_width,
+                        &mut stats,
+                        SearchOptions {
+                            opo: 1,
+                            root: true,
+                            root_allowed_moves: root_allowed_moves.as_ref(),
+                            root_preferred_move,
+                            ..SearchOptions::default()
+                        },
+                        Some(&main_abdada),
+                    );
+                    let depth_elapsed_us = depth_start.elapsed().as_micros();
+                    total_nodes += stats.nodes;
+                    trace.tt_bestmove_current_generation += stats.tt_bestmove_current_generation;
+                    trace.tt_bestmove_old_generation += stats.tt_bestmove_old_generation;
+                    if self.config.runtime.root_profile {
+                        trace.root_profiles.push(RootDepthProfile {
+                            depth,
+                            score,
+                            best_move: move_,
+                            nodes: stats.nodes,
+                            elapsed_us: depth_elapsed_us,
+                            stopped: stats.stop,
+                            candidates: std::mem::take(&mut stats.root_candidates),
+                        });
+                        self.last_trace = Some(trace.clone());
+                    }
+                    if stats.stop || (best_move.is_some() && self.vcf.budget.stopped()) {
+                        break;
+                    }
+                    completed_depth = depth;
+                    job.completed_depths[0].store(completed_depth, Ordering::Relaxed);
+                    if let Some(move_) = move_ {
+                        best_move = Some(move_);
+                        best_score = score;
+                    } else if score <= -WIN {
+                        if let Ok(move_) = fallback_ai_move(
+                            board,
+                            &caches,
+                            side,
+                            self.config.rule_set,
+                            &mut self.fallback_rng,
+                        ) {
+                            best_move = Some(move_);
+                        }
+                        best_score = score;
+                    }
+                    if score >= WIN || score <= -WIN {
+                        break;
+                    }
+                }
+
+                stop_flag.store(true, Ordering::Relaxed);
+                self.worker_pool
+                    .as_ref()
+                    .expect("worker pool initialized")
+                    .wait_depth_done();
+                let helper_nodes = job.helper_nodes.load(Ordering::Relaxed);
+                self.vcf.budget.add_nodes(helper_nodes);
+                total_nodes += helper_nodes;
+                trace.tt_bestmove_current_generation += job.helper_tt_curr.load(Ordering::Relaxed);
+                trace.tt_bestmove_old_generation += job.helper_tt_old.load(Ordering::Relaxed);
+
+                let mut outcomes = Vec::with_capacity(total_threads);
+                if completed_depth > 0 && best_move.is_some() {
+                    outcomes.push(ThreadSearchOutcome {
+                        completed_depth,
+                        score: best_score,
+                        best_move,
+                    });
+                }
+                {
+                    let guard = job
+                        .thread_outcomes
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    outcomes.extend(guard.iter().copied());
+                }
+                if let Some(chosen) = pick_best_thread(&outcomes) {
+                    return SearchResult {
+                        move_: chosen.best_move.expect("checked"),
+                        score: chosen.score,
+                        depth: chosen.completed_depth,
+                        nodes: total_nodes,
+                    };
+                }
+                if let Some(move_) = best_move {
+                    return SearchResult {
+                        move_,
+                        score: best_score,
+                        depth: completed_depth,
+                        nodes: total_nodes,
+                    };
+                }
+                return self.fallback_search_result(
+                    board,
+                    &caches,
+                    side,
+                    best_score,
+                    completed_depth,
+                    total_nodes,
+                );
             }
         }
 

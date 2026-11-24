@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use crate::board::Board;
 use crate::config::EngineConfig;
-use crate::constants::INF;
+use crate::constants::{INF, WIN};
 use crate::eval::EvalCaches;
 use crate::search::alphabeta::{AlphaBetaSearcher, SearchOptions, SearchStats};
 use crate::search::tt::TranspositionTable;
@@ -167,11 +167,118 @@ pub(crate) struct DepthJob {
     pub helper_tt_old: AtomicUsize,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ThreadSearchOutcome {
+    pub completed_depth: i32,
+    pub score: i32,
+    pub best_move: Option<Move>,
+}
+
+/// Rapfi-style asynchronous Lazy SMP job shared across all threads for a full
+/// move search (no per-depth global barriers).
+pub(crate) struct LazySmpJob {
+    pub config: Arc<EngineConfig>,
+    pub tt: TranspositionTable,
+    pub tt_generation: u16,
+    pub board: Board,
+    pub caches: EvalCaches,
+    pub side: Side,
+    pub max_depth: i32,
+    pub wide: usize,
+    pub root_allowed_moves: Option<HashSet<Move>>,
+    pub deadline: Option<Instant>,
+    pub cancel: Option<Arc<AtomicBool>>,
+    pub stop_flag: Arc<AtomicBool>,
+    pub abdada_table: Arc<AbdadaTable>,
+    pub abdada_salt: u64,
+    pub completed_depths: Vec<AtomicI32>,
+    pub thread_outcomes: Mutex<Vec<ThreadSearchOutcome>>,
+    pub helper_nodes: AtomicUsize,
+    pub helper_tt_curr: AtomicUsize,
+    pub helper_tt_old: AtomicUsize,
+}
+
+/// Rapfi `ABSearcher::pickNextDepth` (search.cpp:515-536):
+/// Main thread always advances `last_depth + 1`; helper threads skip a depth
+/// when more than half of all threads are already at or above it.
+pub(crate) fn pick_next_depth(
+    completed_depths: &[AtomicI32],
+    tid: usize,
+    last_depth: i32,
+    max_depth: i32,
+) -> i32 {
+    let n = completed_depths.len();
+    if tid == 0 || n < 3 {
+        return (last_depth + 1).min(max_depth + 1);
+    }
+    let mut next_depth = last_depth + 1;
+    while next_depth <= max_depth {
+        let mut above = 0_usize;
+        for (i, d) in completed_depths.iter().enumerate() {
+            if i != tid && d.load(Ordering::Relaxed) + 1 >= next_depth {
+                above += 1;
+            }
+        }
+        if above > n / 2 {
+            next_depth += 1;
+        } else {
+            return next_depth;
+        }
+    }
+    max_depth + 1
+}
+
+/// Rapfi `ABSearcher::pickBestThread` (search.cpp:538-580):
+/// Depth-weighted voting across completed thread outcomes, with proven mates
+/// taking priority (and shorter winning mates winning over longer ones).
+pub(crate) fn pick_best_thread(outcomes: &[ThreadSearchOutcome]) -> Option<ThreadSearchOutcome> {
+    let valid: Vec<ThreadSearchOutcome> = outcomes
+        .iter()
+        .copied()
+        .filter(|o| o.completed_depth > 0 && o.best_move.is_some())
+        .collect();
+    if valid.is_empty() {
+        return None;
+    }
+    let mut best = valid[0];
+    let min_score = valid.iter().map(|o| o.score).min().unwrap_or(0);
+    let vote_for = |mv: Move| -> i64 {
+        let mut total = 0_i64;
+        for o in &valid {
+            if o.best_move == Some(mv) {
+                total +=
+                    (i64::from(o.score) - i64::from(min_score) + 15) * i64::from(o.completed_depth);
+            }
+        }
+        total
+    };
+    for &cand in &valid[1..] {
+        if best.score.abs() >= WIN {
+            if cand.score > best.score {
+                best = cand;
+            }
+        } else if cand.score.abs() >= WIN {
+            best = cand;
+        } else if cand.score > -WIN
+            && vote_for(cand.best_move.expect("checked"))
+                > vote_for(best.best_move.expect("checked"))
+        {
+            best = cand;
+        }
+    }
+    Some(best)
+}
+
+enum PoolJob {
+    Abdada(Arc<DepthJob>),
+    LazySmp(Arc<LazySmpJob>),
+}
+
 struct PoolState {
     generation: u64,
     shutdown: bool,
     active_workers: usize,
-    job: Option<Arc<DepthJob>>,
+    job: Option<PoolJob>,
 }
 
 struct PoolShared {
@@ -314,7 +421,18 @@ impl SearchWorkerPool {
             return;
         }
         let mut state = lock_pool_state(&self.shared);
-        state.job = Some(job);
+        state.job = Some(PoolJob::Abdada(job));
+        state.active_workers = self.num_workers;
+        state.generation = state.generation.wrapping_add(1);
+        self.shared.wake_workers.notify_all();
+    }
+
+    pub(crate) fn start_lazy_smp(&self, job: Arc<LazySmpJob>) {
+        if self.num_workers == 0 {
+            return;
+        }
+        let mut state = lock_pool_state(&self.shared);
+        state.job = Some(PoolJob::LazySmp(job));
         state.active_workers = self.num_workers;
         state.generation = state.generation.wrapping_add(1);
         self.shared.wake_workers.notify_all();
@@ -421,6 +539,115 @@ fn run_depth_job(job: &DepthJob, worker_id: usize, local: &mut WorkerLocal) {
     }
 }
 
+fn run_lazy_smp_helper(job: &LazySmpJob, worker_id: usize, local: &mut WorkerLocal) {
+    let mut board = job.board.clone();
+    local.caches.restore_from(&job.caches);
+    let searcher = match local.searcher.as_mut() {
+        Some(existing) => {
+            existing.sync_worker_state(&job.config, &job.tt, job.tt_generation);
+            existing
+        }
+        None => {
+            let mut created = AlphaBetaSearcher::with_tt((*job.config).clone(), job.tt.clone());
+            created.set_tt_generation(job.tt_generation);
+            local.searcher.insert(created)
+        }
+    };
+    let mut completed_depth = 0_i32;
+    let mut best_move: Option<Move> = None;
+    let mut best_score = -INF;
+    let mut last_depth = 0_i32;
+    let mut total_nodes = 0_usize;
+    let mut total_tt_curr = 0_usize;
+    let mut total_tt_old = 0_usize;
+
+    loop {
+        if job.stop_flag.load(Ordering::Relaxed)
+            || job
+                .cancel
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::Relaxed))
+            || job.deadline.is_some_and(|dl| Instant::now() >= dl)
+        {
+            break;
+        }
+        let next_depth =
+            pick_next_depth(&job.completed_depths, worker_id, last_depth, job.max_depth);
+        if next_depth > job.max_depth {
+            break;
+        }
+        let abdada_ctx = AbdadaContext {
+            worker_id,
+            table: Arc::clone(&job.abdada_table),
+            salt: job.abdada_salt,
+            root_best: Arc::new(SharedRootBest::new()),
+            depth_done: Arc::clone(&job.stop_flag),
+        };
+        let mut stats = SearchStats {
+            deadline: job.deadline,
+            cancel: job.cancel.clone(),
+            ..SearchStats::default()
+        };
+        let root_preferred_move = if job.root_allowed_moves.is_some() {
+            best_move
+        } else {
+            None
+        };
+        let (score, mv) = searcher.search_with_abdada(
+            &mut board,
+            &mut local.caches,
+            job.side,
+            f64::from(next_depth),
+            -INF,
+            INF,
+            job.wide,
+            &mut stats,
+            SearchOptions {
+                opo: 1,
+                root: true,
+                root_allowed_moves: job.root_allowed_moves.as_ref(),
+                root_preferred_move,
+                ..SearchOptions::default()
+            },
+            Some(&abdada_ctx),
+        );
+        total_nodes += stats.nodes;
+        total_tt_curr += stats.tt_bestmove_current_generation;
+        total_tt_old += stats.tt_bestmove_old_generation;
+        if stats.stop {
+            break;
+        }
+        last_depth = next_depth;
+        completed_depth = next_depth;
+        if let Some(m) = mv {
+            best_move = Some(m);
+            best_score = score;
+        }
+        if worker_id < job.completed_depths.len() {
+            job.completed_depths[worker_id].store(completed_depth, Ordering::Relaxed);
+        }
+        if score >= WIN || score <= -WIN {
+            break;
+        }
+    }
+
+    job.helper_nodes.fetch_add(total_nodes, Ordering::Relaxed);
+    job.helper_tt_curr
+        .fetch_add(total_tt_curr, Ordering::Relaxed);
+    job.helper_tt_old.fetch_add(total_tt_old, Ordering::Relaxed);
+    if completed_depth > 0 && best_move.is_some() {
+        let mut guard = job
+            .thread_outcomes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.push(ThreadSearchOutcome {
+            completed_depth,
+            score: best_score,
+            best_move,
+        });
+    }
+}
+
 fn worker_loop(shared: Arc<PoolShared>, worker_id: usize) {
     let mut seen_generation = 0_u64;
     let mut local = WorkerLocal::new();
@@ -434,7 +661,11 @@ fn worker_loop(shared: Arc<PoolShared>, worker_id: usize) {
                 return;
             }
             seen_generation = state.generation;
-            state.job.clone()
+            match state.job.as_ref() {
+                Some(PoolJob::Abdada(j)) => Some(PoolJob::Abdada(Arc::clone(j))),
+                Some(PoolJob::LazySmp(j)) => Some(PoolJob::LazySmp(Arc::clone(j))),
+                None => None,
+            }
         };
 
         // Guard guarantees `active_workers` is decremented and `workers_done` is
@@ -444,8 +675,9 @@ fn worker_loop(shared: Arc<PoolShared>, worker_id: usize) {
             shared: Arc::clone(&shared),
         };
         if let Some(job) = job {
-            let _ = catch_unwind(AssertUnwindSafe(|| {
-                run_depth_job(&job, worker_id, &mut local);
+            let _ = catch_unwind(AssertUnwindSafe(|| match job {
+                PoolJob::Abdada(j) => run_depth_job(&j, worker_id, &mut local),
+                PoolJob::LazySmp(j) => run_lazy_smp_helper(&j, worker_id, &mut local),
             }));
         }
     }

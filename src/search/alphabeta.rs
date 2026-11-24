@@ -424,6 +424,9 @@ impl AlphaBetaSearcher {
         }
         self.tt
             .set_subply(self.config.runtime.threads > 1 || self.nnue.is_some());
+        if self.tt_generation != tt_generation {
+            self.quiet_history = [[0; BOARD_AREA]; 2];
+        }
         self.tt_generation = tt_generation;
     }
 
@@ -1040,34 +1043,47 @@ impl AlphaBetaSearcher {
                                 let se_depth = (raw_se_depth * SUBPLY_TT_SCALE_F64).floor()
                                     / SUBPLY_TT_SCALE_F64;
 
-                                let (se_score, _) = self.search_with_coverage(
-                                    board,
-                                    caches,
-                                    side,
-                                    se_depth,
-                                    singular_beta - 1,
-                                    singular_beta,
-                                    wide,
-                                    stats,
-                                    SearchOptions {
-                                        skip_move: Some(tt_mv),
-                                        ..options
-                                    },
-                                    coverage,
-                                    None,
-                                    abdada,
-                                    tt_view,
-                                    tt_view4,
-                                );
-                                if stats.stop {
-                                    return (current, best_move);
-                                }
-                                if se_score < singular_beta {
-                                    tt_extension = 1.0;
-                                } else if singular_beta >= beta {
-                                    return (singular_beta, None);
-                                } else if tt_val_adj >= beta {
-                                    tt_extension = -1.5;
+                                let se_key =
+                                    board.zobrist_key() ^ 0x517C_C1B7_2722_0A95 ^ u64::from(tt_mv);
+                                let skip_dup_se = abdada.is_some_and(|ctx| {
+                                    ctx.worker_id > 0 && ctx.table.is_busy(se_key, ctx.salt)
+                                });
+                                if !skip_dup_se {
+                                    if let Some(ctx) = abdada {
+                                        ctx.table.mark_busy(se_key, ctx.salt);
+                                    }
+                                    let (se_score, _) = self.search_with_coverage(
+                                        board,
+                                        caches,
+                                        side,
+                                        se_depth,
+                                        singular_beta - 1,
+                                        singular_beta,
+                                        wide,
+                                        stats,
+                                        SearchOptions {
+                                            skip_move: Some(tt_mv),
+                                            ..options
+                                        },
+                                        coverage,
+                                        None,
+                                        abdada,
+                                        tt_view,
+                                        tt_view4,
+                                    );
+                                    if let Some(ctx) = abdada {
+                                        ctx.table.clear_busy(se_key, ctx.salt);
+                                    }
+                                    if stats.stop {
+                                        return (current, best_move);
+                                    }
+                                    if se_score < singular_beta {
+                                        tt_extension = 1.0;
+                                    } else if singular_beta >= beta {
+                                        return (singular_beta, None);
+                                    } else if tt_val_adj >= beta {
+                                        tt_extension = -1.5;
+                                    }
                                 }
                             }
                         }
@@ -1486,6 +1502,11 @@ impl AlphaBetaSearcher {
                             let d_idx = (depth as usize).clamp(1, 63);
                             let mc_idx = (index + 1).clamp(1, 63);
                             let mut r = LMR_LUT[rule_idx][d_idx] * LMR_LUT[rule_idx][mc_idx];
+                            if let Some(ctx) = abdada {
+                                if ctx.worker_id > 0 && (ctx.worker_id & 1) == 1 {
+                                    r += 0.25;
+                                }
+                            }
                             if !is_pv && !improving && r > 1.0 {
                                 r += 1.0;
                             }
