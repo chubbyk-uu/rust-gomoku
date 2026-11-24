@@ -49,6 +49,25 @@ const NNUE_MAIN_TT_DEPTH_OFFSET: i32 = 3;
 /// Minimum `value_cache` bucket for a combo B4 (`B4 + L2` or stronger: `L4S` top1=10, top2>=6 -> bucket >= 62).
 const QVCF_COMB_MIN_BUCKET: i32 = 62;
 
+/// Precomputed Rapfi-calibrated LMR log table:
+/// index 0 = Freestyle (`Factor = 0.95`), index 1 = Renju (`Factor = 0.83`).
+static LMR_LUT: LazyLock<[[f64; 64]; 2]> = LazyLock::new(|| {
+    let factors = [0.95_f64, 0.83_f64];
+    let mut table = [[0.0_f64; 64]; 2];
+    for (r, &factor) in factors.iter().enumerate() {
+        for i in 1..64 {
+            table[r][i] = factor * (i as f64).ln();
+        }
+    }
+    table
+});
+
+#[inline(always)]
+fn update_quiet_history(entry: &mut i32, bonus: i32) {
+    let clamped = bonus.clamp(-400, 400);
+    *entry += clamped - (*entry * clamped.abs()) / 4096;
+}
+
 /// Precomputed `RANGE_SQUARE2_LINE4` neighborhood bitboards for each board square
 /// (all cells within Chebyshev distance <= 2 plus distance 3..=4 along the 4 lines).
 static QVCF_NEIGHBOR_MASKS: LazyLock<[[u64; 4]; BOARD_AREA]> = LazyLock::new(|| {
@@ -280,6 +299,7 @@ pub struct AlphaBetaSearcher {
     movegen_scratch: MoveAnalysis,
     nnue: Option<Mix9svqEvaluator>,
     static_eval_stack: [i32; 128],
+    quiet_history: [[i32; BOARD_AREA]; 2],
 }
 
 pub(crate) fn load_nnue_for_config(config: &EngineConfig) -> Option<Mix9svqEvaluator> {
@@ -318,6 +338,7 @@ impl AlphaBetaSearcher {
             movegen_scratch: MoveAnalysis::new(),
             nnue,
             static_eval_stack: [TT_VALUE_NONE; 128],
+            quiet_history: [[0; BOARD_AREA]; 2],
         }
     }
 
@@ -340,6 +361,7 @@ impl AlphaBetaSearcher {
             movegen_scratch: MoveAnalysis::new(),
             nnue,
             static_eval_stack: [TT_VALUE_NONE; 128],
+            quiet_history: [[0; BOARD_AREA]; 2],
         }
     }
 
@@ -497,6 +519,9 @@ impl AlphaBetaSearcher {
         if options.root {
             self.static_eval_stack[0] = TT_VALUE_NONE;
             self.static_eval_stack[1] = TT_VALUE_NONE;
+            if depth <= 1.0 && self.nnue.is_some() {
+                self.quiet_history = [[0; BOARD_AREA]; 2];
+            }
         }
         let root_depth = options.root_depth.unwrap_or(depth);
         let priority_base = options.priority_base.unwrap_or(board.move_count() as i32);
@@ -783,10 +808,14 @@ impl AlphaBetaSearcher {
         };
 
         let original_alpha = alpha;
-        let child_wide = (((wide * self.config.root_search.ratio_num as usize)
-            / self.config.root_search.ratio_den as usize)
-            + 1)
-        .min(wide);
+        let child_wide = if self.nnue.is_some() {
+            wide
+        } else {
+            (((wide * self.config.root_search.ratio_num as usize)
+                / self.config.root_search.ratio_den as usize)
+                + 1)
+            .min(wide)
+        };
         let no_l4_l5 = caches.initialized
             && caches.rule_set == self.config.rule_set
             && !caches.has_any_l4_or_l5();
@@ -1242,11 +1271,19 @@ impl AlphaBetaSearcher {
             (false, 0)
         };
         let mut running_downf = options.downf;
-        let raw_depthdown = 0.0_f64.max(
-            1.0 - self.config.search.extend_ratio
-                + self.config.search.extend_ratio * (case_count.max(1) as f64).ln()
-                    / (wide.max(2) as f64).ln(),
-        );
+        let raw_depthdown = if self.nnue.is_some() {
+            if single_forcing {
+                (1.0 - self.config.search.extend_ratio).max(0.0)
+            } else {
+                1.0
+            }
+        } else {
+            0.0_f64.max(
+                1.0 - self.config.search.extend_ratio
+                    + self.config.search.extend_ratio * (case_count.max(1) as f64).ln()
+                        / (wide.max(2) as f64).ln(),
+            )
+        };
         // Floor-quantize fractional depth reductions to exact 1/64-ply dyadic
         // steps in multi-threaded mode so internal nodes hit exact same-depth
         // TT entries (floor == ceil) without ever rounding near-full-width
@@ -1267,17 +1304,10 @@ impl AlphaBetaSearcher {
             && !win_priority
             && !single_forcing
             && !hostile_threat
-            && depth <= 4.0
+            && depth <= 10.0
         {
-            if depth <= 1.0 {
-                6
-            } else if depth <= 2.0 {
-                10
-            } else if depth <= 3.0 {
-                15
-            } else {
-                22
-            }
+            let fmc = 3 + (depth.max(0.0).powf(1.30) as usize);
+            (fmc / (2 - usize::from(improving))).max(2)
         } else {
             usize::MAX
         };
@@ -1289,7 +1319,7 @@ impl AlphaBetaSearcher {
             candidate: Candidate,
             local_downf: i32,
             depthdown: f64,
-            net: i32,
+            lmr_reduction: f64,
         }
         let default_candidate = ordered.first().copied().unwrap_or(Candidate {
             move_: 0,
@@ -1302,9 +1332,11 @@ impl AlphaBetaSearcher {
             candidate: default_candidate,
             local_downf: 0,
             depthdown: 0.0,
-            net: 0,
+            lmr_reduction: 0.0,
         }; 64];
         let mut deferred_len = 0_usize;
+        let mut searched_quiets = [0_u16; 64];
+        let mut searched_quiets_len = 0_usize;
         let mut early_exit = false;
 
         for pass in 0..2 {
@@ -1318,7 +1350,7 @@ impl AlphaBetaSearcher {
             };
 
             for step in 0..pass_len {
-                let (index, candidate, local_downf, depthdown, mut net) = if pass == 0 {
+                let (index, candidate, local_downf, depthdown, mut lmr_reduction) = if pass == 0 {
                     let index = step + tt_offset;
                     if !policy_rest_sorted && index == 1 {
                         let rest = &mut ordered[1..];
@@ -1364,40 +1396,70 @@ impl AlphaBetaSearcher {
                     {
                         continue;
                     }
-                    running_downf += index as i32;
-                    let mut local_downf = running_downf;
                     let mut depthdown = base_depthdown;
                     if likely_fail_high && candidate.self_attack < 4 {
                         depthdown += 1.0;
                     }
-                    let mut net = 0_i32;
-                    if local_downf >= 15 {
-                        net = local_downf / 15;
-                        depthdown += f64::from(net);
-                        local_downf %= 15;
-                    }
-                    running_downf = local_downf;
-                    // Shift-invariant Policy-guided LMR for low-probability
-                    // quiet tail moves (re-searched at full depth on fail-high).
-                    if use_nnue_policy
-                        && index >= 2
-                        && !hostile_threat
-                        && candidate.self_attack < 4
-                        && candidate.opp_attack < 4
-                        && policy_top_logit.is_finite()
-                    {
-                        let gap = (policy_top_logit - candidate.order_score).max(0.0);
-                        if gap > 1.5 {
-                            let scale = if is_pv { 0.18 } else { 0.35 };
-                            let extra = (scale * (gap - 1.5)).min(2.5);
-                            let extra_plies = extra.floor() as i32;
-                            if extra_plies > 0 {
-                                depthdown += f64::from(extra_plies);
-                                net += extra_plies;
+                    let (local_downf, lmr_reduction) = if self.nnue.is_some() {
+                        let mut red = 0.0_f64;
+                        if depth >= 2.0
+                            && index >= 1 + usize::from(options.root)
+                            && !win_priority
+                            && !single_forcing
+                            && candidate.self_attack < 4
+                        {
+                            let rule_idx = usize::from(self.config.rule_set == RuleSet::Renju);
+                            let d_idx = (depth as usize).clamp(1, 63);
+                            let mc_idx = (index + 1).clamp(1, 63);
+                            let mut r = LMR_LUT[rule_idx][d_idx] * LMR_LUT[rule_idx][mc_idx];
+                            if !is_pv && !improving && r > 1.0 {
+                                r += 1.0;
+                            }
+                            if use_nnue_policy && policy_top_logit.is_finite() {
+                                let gap = (policy_top_logit - candidate.order_score).max(0.0);
+                                if gap > 1.0 {
+                                    let scale = if is_pv { 0.25 } else { 0.45 };
+                                    r += (scale * (gap - 1.0)).min(3.0);
+                                }
+                            }
+                            if is_pv || tt_was_pv {
+                                r -= 0.71;
+                            }
+                            if options.cut_node {
+                                r += 1.25;
+                            }
+                            let player = if side == BLACK { 0 } else { 1 };
+                            let h = self.quiet_history[player][candidate.move_ as usize];
+                            r -= (f64::from(h) / 2048.0).clamp(-1.5, 1.5);
+                            if candidate.opp_attack >= 4 || hostile_threat {
+                                r *= 0.5;
+                            }
+                            let full_child_depth = depth - depthdown;
+                            if r > 0.0 && full_child_depth > 1.0 {
+                                let r_quant =
+                                    (r * SUBPLY_TT_SCALE_F64).floor() / SUBPLY_TT_SCALE_F64;
+                                let reduced_depth = (full_child_depth - r_quant).max(1.0);
+                                let actual_red = (full_child_depth - reduced_depth).max(0.0);
+                                if actual_red > 0.0 {
+                                    depthdown += actual_red;
+                                    red = actual_red;
+                                }
                             }
                         }
-                    }
-                    (index, candidate, local_downf, depthdown, net)
+                        (0, red)
+                    } else {
+                        running_downf += index as i32;
+                        let mut local_downf = running_downf;
+                        let mut net = 0_i32;
+                        if local_downf >= 15 {
+                            net = local_downf / 15;
+                            depthdown += f64::from(net);
+                            local_downf %= 15;
+                        }
+                        running_downf = local_downf;
+                        (local_downf, f64::from(net))
+                    };
+                    (index, candidate, local_downf, depthdown, lmr_reduction)
                 } else {
                     let wid = abdada.map_or(0, |ctx| ctx.worker_id);
                     let d_idx = if wid == 0 || deferred_len <= 1 {
@@ -1413,7 +1475,7 @@ impl AlphaBetaSearcher {
                         item.candidate,
                         item.local_downf,
                         item.depthdown,
-                        item.net,
+                        item.lmr_reduction,
                     )
                 };
 
@@ -1450,7 +1512,7 @@ impl AlphaBetaSearcher {
                                 candidate,
                                 local_downf,
                                 depthdown,
-                                net,
+                                lmr_reduction,
                             };
                             deferred_len += 1;
                             continue;
@@ -1615,9 +1677,9 @@ impl AlphaBetaSearcher {
                     if score >= WIN {
                         break score;
                     }
-                    if score > alpha && score > current && net > 0 {
-                        attempt_depth += f64::from(net);
-                        net = 0;
+                    if score > alpha && score > current && lmr_reduction > 0.0 {
+                        attempt_depth += lmr_reduction;
+                        lmr_reduction = 0.0;
                         continue;
                     }
                     break score;
@@ -1728,10 +1790,31 @@ impl AlphaBetaSearcher {
                     break;
                 }
                 if beta_cutoff {
+                    if self.nnue.is_some() && candidate.self_attack < 4 {
+                        let player = if side == BLACK { 0 } else { 1 };
+                        let bonus = ((depth * depth * 4.0) as i32).clamp(1, 400);
+                        update_quiet_history(
+                            &mut self.quiet_history[player][candidate.move_ as usize],
+                            bonus,
+                        );
+                        for &prev_mv in &searched_quiets[..searched_quiets_len] {
+                            update_quiet_history(
+                                &mut self.quiet_history[player][prev_mv as usize],
+                                -bonus,
+                            );
+                        }
+                    }
                     hash_flag = HASHF_BETA;
                     stats.cutoffs += 1;
                     early_exit = true;
                     break;
+                }
+                if self.nnue.is_some()
+                    && candidate.self_attack < 4
+                    && searched_quiets_len < searched_quiets.len()
+                {
+                    searched_quiets[searched_quiets_len] = candidate.move_;
+                    searched_quiets_len += 1;
                 }
             }
         }
