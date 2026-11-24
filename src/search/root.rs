@@ -730,6 +730,8 @@ impl RootSearcher {
                 let stop_flag = Arc::new(AtomicBool::new(false));
                 let completed_depths: Vec<AtomicI32> =
                     (0..total_threads).map(|_| AtomicI32::new(0)).collect();
+                let latest_scores: Vec<AtomicI32> =
+                    (0..total_threads).map(|_| AtomicI32::new(0)).collect();
                 let job = Arc::new(LazySmpJob {
                     config: Arc::new(self.config.clone()),
                     tt: self.tt.clone(),
@@ -746,6 +748,7 @@ impl RootSearcher {
                     abdada_table: Arc::clone(&abdada_table),
                     abdada_salt,
                     completed_depths,
+                    latest_scores,
                     thread_outcomes: Mutex::new(Vec::with_capacity(total_threads)),
                     helper_nodes: AtomicUsize::new(0),
                     helper_tt_curr: AtomicUsize::new(0),
@@ -756,7 +759,11 @@ impl RootSearcher {
                     .expect("worker pool initialized")
                     .start_lazy_smp(Arc::clone(&job));
 
+                const WIN_MATE_CONFIRM_ITERS: i32 = 2;
+                const LOSS_MATE_CONFIRM_ITERS: i32 = 6;
                 let mut completed_depth = 0_i32;
+                let mut first_win_mate_depth: Option<i32> = None;
+                let mut first_loss_mate_depth: Option<i32> = None;
                 for depth in 1..=limits.max_depth {
                     if self.vcf.budget.stopped()
                         || cancel
@@ -821,7 +828,6 @@ impl RootSearcher {
                         break;
                     }
                     completed_depth = depth;
-                    job.completed_depths[0].store(completed_depth, Ordering::Relaxed);
                     if let Some(move_) = move_ {
                         best_move = Some(move_);
                         best_score = score;
@@ -837,8 +843,29 @@ impl RootSearcher {
                         }
                         best_score = score;
                     }
-                    if score >= WIN || score <= -WIN {
-                        break;
+                    job.latest_scores[0].store(best_score, Ordering::Relaxed);
+                    job.completed_depths[0].store(completed_depth, Ordering::Release);
+                    if best_score >= WIN {
+                        first_loss_mate_depth = None;
+                        let start = *first_win_mate_depth.get_or_insert(depth);
+                        if best_score >= INF - 2 || depth - start >= WIN_MATE_CONFIRM_ITERS {
+                            break;
+                        }
+                    } else if best_score <= -WIN {
+                        first_win_mate_depth = None;
+                        let start = *first_loss_mate_depth.get_or_insert(depth);
+                        if depth - start >= LOSS_MATE_CONFIRM_ITERS {
+                            let helper_disagrees = (1..total_threads).any(|tid| {
+                                job.completed_depths[tid].load(Ordering::Acquire) >= start
+                                    && job.latest_scores[tid].load(Ordering::Relaxed) > -WIN
+                            });
+                            if !helper_disagrees {
+                                break;
+                            }
+                        }
+                    } else {
+                        first_win_mate_depth = None;
+                        first_loss_mate_depth = None;
                     }
                 }
 
@@ -856,6 +883,7 @@ impl RootSearcher {
                 let mut outcomes = Vec::with_capacity(total_threads);
                 if completed_depth > 0 && best_move.is_some() {
                     outcomes.push(ThreadSearchOutcome {
+                        thread_id: 0,
                         completed_depth,
                         score: best_score,
                         best_move,

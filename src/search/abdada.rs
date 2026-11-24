@@ -167,8 +167,9 @@ pub(crate) struct DepthJob {
     pub helper_tt_old: AtomicUsize,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ThreadSearchOutcome {
+    pub thread_id: usize,
     pub completed_depth: i32,
     pub score: i32,
     pub best_move: Option<Move>,
@@ -192,6 +193,7 @@ pub(crate) struct LazySmpJob {
     pub abdada_table: Arc<AbdadaTable>,
     pub abdada_salt: u64,
     pub completed_depths: Vec<AtomicI32>,
+    pub latest_scores: Vec<AtomicI32>,
     pub thread_outcomes: Mutex<Vec<ThreadSearchOutcome>>,
     pub helper_nodes: AtomicUsize,
     pub helper_tt_curr: AtomicUsize,
@@ -228,9 +230,18 @@ pub(crate) fn pick_next_depth(
     max_depth + 1
 }
 
-/// Rapfi `ABSearcher::pickBestThread` (search.cpp:538-580):
-/// Depth-weighted voting across completed thread outcomes, with proven mates
-/// taking priority (and shorter winning mates winning over longer ones).
+/// Order-independent thread selection across completed Lazy SMP outcomes:
+/// 1. Winning mates (`score >= WIN`): prefer shortest mate (`highest score`),
+///    then deepest `completed_depth`, then lowest `thread_id`.
+/// 2. Normal (non-mate) outcomes (`-WIN < score < WIN`): preferred whenever no
+///    losing-mate outcome has a strictly greater `completed_depth` than the
+///    deepest normal outcome. Chosen by commutative depth-weighted voting over
+///    normal outcomes (matching Rapfi's `DepthBias = 15`), with deterministic
+///    tie-breaking independent of helper submission order.
+/// 3. Proven losing mates (`score <= -WIN`) when strictly deeper than all
+///    normal outcomes (or when every thread reports a loss): prefer deepest
+///    `completed_depth`, then longest resistance (`highest score`), then
+///    lowest `thread_id`.
 pub(crate) fn pick_best_thread(outcomes: &[ThreadSearchOutcome]) -> Option<ThreadSearchOutcome> {
     let valid: Vec<ThreadSearchOutcome> = outcomes
         .iter()
@@ -240,11 +251,57 @@ pub(crate) fn pick_best_thread(outcomes: &[ThreadSearchOutcome]) -> Option<Threa
     if valid.is_empty() {
         return None;
     }
-    let mut best = valid[0];
-    let min_score = valid.iter().map(|o| o.score).min().unwrap_or(0);
+
+    // 1. Any proven winning mate wins immediately; prefer shortest mate.
+    if let Some(best_win) = valid
+        .iter()
+        .copied()
+        .filter(|o| o.score >= WIN)
+        .max_by(|a, b| {
+            a.score
+                .cmp(&b.score)
+                .then_with(|| a.completed_depth.cmp(&b.completed_depth))
+                .then_with(|| b.thread_id.cmp(&a.thread_id))
+        })
+    {
+        return Some(best_win);
+    }
+
+    let max_normal_depth = valid
+        .iter()
+        .filter(|o| o.score > -WIN)
+        .map(|o| o.completed_depth)
+        .max();
+    let max_loss_depth = valid
+        .iter()
+        .filter(|o| o.score <= -WIN)
+        .map(|o| o.completed_depth)
+        .max();
+
+    // 2. If a losing mate was proven at a strictly greater depth than every
+    //    normal outcome (or no normal outcome exists), trust the deepest loss
+    //    search and pick the longest resistance at that depth.
+    if let Some(loss_depth) = max_loss_depth {
+        if max_normal_depth.is_none_or(|nd| loss_depth > nd) {
+            return valid
+                .iter()
+                .copied()
+                .filter(|o| o.score <= -WIN)
+                .max_by(|a, b| {
+                    a.completed_depth
+                        .cmp(&b.completed_depth)
+                        .then_with(|| a.score.cmp(&b.score))
+                        .then_with(|| b.thread_id.cmp(&a.thread_id))
+                });
+        }
+    }
+
+    // 3. Depth-weighted voting exclusively over normal (non-mate) outcomes.
+    let normal: Vec<ThreadSearchOutcome> = valid.into_iter().filter(|o| o.score > -WIN).collect();
+    let min_score = normal.iter().map(|o| o.score).min().unwrap_or(0);
     let vote_for = |mv: Move| -> i64 {
         let mut total = 0_i64;
-        for o in &valid {
+        for o in &normal {
             if o.best_move == Some(mv) {
                 total +=
                     (i64::from(o.score) - i64::from(min_score) + 15) * i64::from(o.completed_depth);
@@ -252,21 +309,38 @@ pub(crate) fn pick_best_thread(outcomes: &[ThreadSearchOutcome]) -> Option<Threa
         }
         total
     };
-    for &cand in &valid[1..] {
-        if best.score.abs() >= WIN {
-            if cand.score > best.score {
-                best = cand;
-            }
-        } else if cand.score.abs() >= WIN {
-            best = cand;
-        } else if cand.score > -WIN
-            && vote_for(cand.best_move.expect("checked"))
-                > vote_for(best.best_move.expect("checked"))
-        {
-            best = cand;
-        }
-    }
-    Some(best)
+
+    // Rank each candidate outcome by its move's total vote first, then by the
+    // best individual thread backing that move (depth, score, thread_id).
+    // Comparing full keys makes the winner 100% invariant to slice order.
+    let best_for_move = |mv: Move| -> ThreadSearchOutcome {
+        normal
+            .iter()
+            .copied()
+            .filter(|o| o.best_move == Some(mv))
+            .max_by(|a, b| {
+                a.completed_depth
+                    .cmp(&b.completed_depth)
+                    .then_with(|| a.score.cmp(&b.score))
+                    .then_with(|| b.thread_id.cmp(&a.thread_id))
+            })
+            .expect("mv came from normal")
+    };
+
+    normal
+        .iter()
+        .map(|o| o.best_move.expect("checked"))
+        .map(|mv| {
+            let rep = best_for_move(mv);
+            (vote_for(mv), rep)
+        })
+        .max_by(|(va, ra), (vb, rb)| {
+            va.cmp(vb)
+                .then_with(|| ra.completed_depth.cmp(&rb.completed_depth))
+                .then_with(|| ra.score.cmp(&rb.score))
+                .then_with(|| rb.thread_id.cmp(&ra.thread_id))
+        })
+        .map(|(_, rep)| rep)
 }
 
 enum PoolJob {
@@ -622,12 +696,14 @@ fn run_lazy_smp_helper(job: &LazySmpJob, worker_id: usize, local: &mut WorkerLoc
         if let Some(m) = mv {
             best_move = Some(m);
             best_score = score;
+        } else if score <= -WIN && best_move.is_some() {
+            best_score = score;
+        }
+        if worker_id < job.latest_scores.len() {
+            job.latest_scores[worker_id].store(best_score, Ordering::Relaxed);
         }
         if worker_id < job.completed_depths.len() {
-            job.completed_depths[worker_id].store(completed_depth, Ordering::Relaxed);
-        }
-        if score >= WIN || score <= -WIN {
-            break;
+            job.completed_depths[worker_id].store(completed_depth, Ordering::Release);
         }
     }
 
@@ -641,6 +717,7 @@ fn run_lazy_smp_helper(job: &LazySmpJob, worker_id: usize, local: &mut WorkerLoc
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.push(ThreadSearchOutcome {
+            thread_id: worker_id,
             completed_depth,
             score: best_score,
             best_move,
@@ -725,5 +802,151 @@ mod tests {
         assert_eq!(state.active_workers, 0);
         drop(state);
         worker.join().unwrap();
+    }
+
+    fn all_permutations<T: Copy>(items: &[T]) -> Vec<Vec<T>> {
+        if items.len() <= 1 {
+            return vec![items.to_vec()];
+        }
+        let mut out = Vec::new();
+        for i in 0..items.len() {
+            let mut rest = items.to_vec();
+            let head = rest.remove(i);
+            for mut tail in all_permutations(&rest) {
+                tail.insert(0, head);
+                out.push(tail);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn pick_best_thread_is_order_independent_across_all_permutations() {
+        // Reproduces the exact mixed mate-loss + normal-score conflict where
+        // the old non-transitive loop depended on helper submission order.
+        let outcomes = [
+            ThreadSearchOutcome {
+                thread_id: 0,
+                completed_depth: 9,
+                score: -19_975,
+                best_move: Some(10),
+            },
+            ThreadSearchOutcome {
+                thread_id: 1,
+                completed_depth: 8,
+                score: -913,
+                best_move: Some(20),
+            },
+            ThreadSearchOutcome {
+                thread_id: 2,
+                completed_depth: 9,
+                score: -19_980,
+                best_move: Some(30),
+            },
+            ThreadSearchOutcome {
+                thread_id: 3,
+                completed_depth: 8,
+                score: -900,
+                best_move: Some(40),
+            },
+        ];
+        // Deepest losing mate (d=9) is strictly deeper than all normal scores
+        // (d=8), so every permutation must select the longest-resistance d=9
+        // losing move (move 10, score -19_975).
+        for perm in all_permutations(&outcomes) {
+            let chosen = pick_best_thread(&perm).expect("valid outcome");
+            assert_eq!(chosen.best_move, Some(10));
+            assert_eq!(chosen.score, -19_975);
+            assert_eq!(chosen.completed_depth, 9);
+        }
+
+        // When a normal score exists at equal or greater depth (d=9), it must
+        // override losing-mate outcomes deterministically across all 24 orders.
+        let equal_depth_defense = [
+            ThreadSearchOutcome {
+                thread_id: 0,
+                completed_depth: 9,
+                score: -19_975,
+                best_move: Some(10),
+            },
+            ThreadSearchOutcome {
+                thread_id: 1,
+                completed_depth: 9,
+                score: -913,
+                best_move: Some(20),
+            },
+            ThreadSearchOutcome {
+                thread_id: 2,
+                completed_depth: 9,
+                score: -19_980,
+                best_move: Some(30),
+            },
+            ThreadSearchOutcome {
+                thread_id: 3,
+                completed_depth: 8,
+                score: -900,
+                best_move: Some(40),
+            },
+        ];
+        for perm in all_permutations(&equal_depth_defense) {
+            let chosen = pick_best_thread(&perm).expect("valid outcome");
+            assert_eq!(chosen.best_move, Some(40));
+        }
+    }
+
+    #[test]
+    fn pick_best_thread_prefers_shortest_win_and_deepest_loss_resistance() {
+        let win_case = [
+            ThreadSearchOutcome {
+                thread_id: 0,
+                completed_depth: 12,
+                score: 19_985,
+                best_move: Some(11),
+            },
+            ThreadSearchOutcome {
+                thread_id: 1,
+                completed_depth: 10,
+                score: 19_993,
+                best_move: Some(22),
+            },
+            ThreadSearchOutcome {
+                thread_id: 2,
+                completed_depth: 13,
+                score: 400,
+                best_move: Some(33),
+            },
+        ];
+        for perm in all_permutations(&win_case) {
+            let chosen = pick_best_thread(&perm).expect("valid outcome");
+            assert_eq!(chosen.best_move, Some(22));
+            assert_eq!(chosen.score, 19_993);
+        }
+
+        let loss_case = [
+            ThreadSearchOutcome {
+                thread_id: 0,
+                completed_depth: 10,
+                score: -19_970,
+                best_move: Some(11),
+            },
+            ThreadSearchOutcome {
+                thread_id: 1,
+                completed_depth: 11,
+                score: -19_985,
+                best_move: Some(22),
+            },
+            ThreadSearchOutcome {
+                thread_id: 2,
+                completed_depth: 11,
+                score: -19_979,
+                best_move: Some(33),
+            },
+        ];
+        for perm in all_permutations(&loss_case) {
+            let chosen = pick_best_thread(&perm).expect("valid outcome");
+            assert_eq!(chosen.best_move, Some(33));
+            assert_eq!(chosen.completed_depth, 11);
+            assert_eq!(chosen.score, -19_979);
+        }
     }
 }
