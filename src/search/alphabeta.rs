@@ -1401,13 +1401,12 @@ impl AlphaBetaSearcher {
         }
         let nnue_lmp_limit = if self.nnue.is_some()
             && !options.root
-            && !is_pv
             && !win_priority
             && !single_forcing
             && !hostile_threat
-            && depth <= 10.0
         {
-            let fmc = 3 + (depth.max(0.0).powf(1.30) as usize);
+            let d_int = depth.floor().max(0.0);
+            let fmc = 3 + (d_int.powf(1.30) as usize);
             (fmc / (2 - usize::from(improving))).max(2)
         } else {
             usize::MAX
@@ -1490,14 +1489,10 @@ impl AlphaBetaSearcher {
                     if options.skip_move == Some(candidate.move_) {
                         continue;
                     }
-                    // Safe Move Count Pruning (LMP) for quiet non-forcing NNUE
-                    // tail moves once at least one non-losing move is found.
-                    if index >= nnue_lmp_limit
-                        && has_score
-                        && current > -WIN
-                        && candidate.self_attack < 4
-                        && candidate.opp_attack < 4
-                    {
+                    // Move Count Pruning (Rapfi `futilityMoveCount`, ~107 Elo):
+                    // once we already have a non-losing move, prune moves beyond
+                    // the depth-scaled move count threshold.
+                    if (index + 1) >= nnue_lmp_limit && has_score && current > -WIN {
                         continue;
                     }
                     let mut depthdown = base_depthdown;
