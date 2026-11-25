@@ -1535,7 +1535,6 @@ impl AlphaBetaSearcher {
                             && index >= 1 + usize::from(options.root)
                             && !win_priority
                             && !single_forcing
-                            && candidate.self_attack < 4
                         {
                             let rule_idx = usize::from(self.config.rule_set == RuleSet::Renju);
                             let d_idx = (depth as usize).clamp(1, 63);
@@ -1563,14 +1562,11 @@ impl AlphaBetaSearcher {
                                 r -= 0.71;
                             }
                             if options.cut_node {
-                                r += 1.25;
+                                r += 1.80;
                             }
                             let player = if side == BLACK { 0 } else { 1 };
                             let h = self.quiet_history[player][candidate.move_ as usize];
                             r -= (f64::from(h) / 2048.0).clamp(-1.5, 1.5);
-                            if candidate.opp_attack >= 4 || hostile_threat {
-                                r *= 0.5;
-                            }
                             let full_child_depth = depth - depthdown;
                             if r > 0.0 && full_child_depth > 1.0 {
                                 let r_quant =
@@ -1700,7 +1696,13 @@ impl AlphaBetaSearcher {
                 }
 
                 let mut attempt_depth = depth - depthdown;
-                let score = loop {
+                let score = if self.nnue.is_some() {
+                    // Rapfi/Stockfish PVS + LMR flow: never run a full-window
+                    // search at reduced depth; reduced scout always uses zero
+                    // window with `cut_node = true`, re-searches at full depth
+                    // with zero window (`cut_node = !options.cut_node`) on fail
+                    // high, and only opens `[alpha, beta]` on PV nodes at full
+                    // depth when needed.
                     let base_child_options = SearchOptions {
                         opo: 1 - options.opo,
                         ply: options.ply + 1,
@@ -1713,17 +1715,19 @@ impl AlphaBetaSearcher {
                         cut_node: false,
                         skip_move: None,
                     };
-                    let score = if found_pv {
+                    let full_depth = attempt_depth + lmr_reduction;
+                    let mut val = 0_i32;
+                    let mut need_full_window = false;
+                    if lmr_reduction > 0.0 {
                         let narrow_start = profile_root_candidate.then(Instant::now);
                         let narrow_nodes_before = stats.nodes;
-                        let shifted_alpha = shift_bound_with_atdown(alpha, atdown);
-                        let (narrow_score, _) = self.search_with_coverage(
+                        let (s, _) = self.search_with_coverage(
                             board,
                             caches,
                             -side,
                             attempt_depth,
-                            -shifted_alpha - 1,
-                            -shifted_alpha,
+                            -alpha - 1,
+                            -alpha,
                             child_wide,
                             stats,
                             SearchOptions {
@@ -1741,12 +1745,189 @@ impl AlphaBetaSearcher {
                                 stats.nodes.saturating_sub(narrow_nodes_before);
                             profile_zero_window_elapsed_us += start.elapsed().as_micros();
                         }
-                        if stats.stop {
-                            break narrow_score;
+                        val = -s;
+                        if !stats.stop && val > alpha && val < WIN {
+                            attempt_depth = full_depth;
+                            let narrow_start2 = profile_root_candidate.then(Instant::now);
+                            let narrow_nodes_before2 = stats.nodes;
+                            let (s2, _) = self.search_with_coverage(
+                                board,
+                                caches,
+                                -side,
+                                full_depth,
+                                -alpha - 1,
+                                -alpha,
+                                child_wide,
+                                stats,
+                                SearchOptions {
+                                    cut_node: !options.cut_node,
+                                    ..base_child_options
+                                },
+                                coverage,
+                                Some(((mx, my), &mut candidate_snapshot)),
+                                abdada,
+                                tt_view,
+                                tt_view4,
+                            );
+                            if let Some(start) = narrow_start2 {
+                                profile_zero_window_nodes +=
+                                    stats.nodes.saturating_sub(narrow_nodes_before2);
+                                profile_zero_window_elapsed_us += start.elapsed().as_micros();
+                            }
+                            val = -s2;
+                            if !stats.stop && is_pv && val > alpha && val < beta {
+                                need_full_window = true;
+                            }
                         }
-                        let narrowed = score_from_child(narrow_score, atdown);
-                        if alpha < narrowed && narrowed < beta {
+                    } else if !is_pv || found_pv {
+                        let narrow_start = profile_root_candidate.then(Instant::now);
+                        let narrow_nodes_before = stats.nodes;
+                        let (s, _) = self.search_with_coverage(
+                            board,
+                            caches,
+                            -side,
+                            full_depth,
+                            -alpha - 1,
+                            -alpha,
+                            child_wide,
+                            stats,
+                            SearchOptions {
+                                cut_node: if is_pv { true } else { !options.cut_node },
+                                ..base_child_options
+                            },
+                            coverage,
+                            Some(((mx, my), &mut candidate_snapshot)),
+                            abdada,
+                            tt_view,
+                            tt_view4,
+                        );
+                        if let Some(start) = narrow_start {
+                            profile_zero_window_nodes +=
+                                stats.nodes.saturating_sub(narrow_nodes_before);
+                            profile_zero_window_elapsed_us += start.elapsed().as_micros();
+                        }
+                        val = -s;
+                        if !stats.stop && is_pv && val > alpha && val < beta {
+                            need_full_window = true;
+                        }
+                    } else {
+                        need_full_window = true;
+                    }
+                    if !stats.stop && need_full_window {
+                        if found_pv {
                             profile_pvs_research = true;
+                        }
+                        let full_start = profile_root_candidate.then(Instant::now);
+                        let full_nodes_before = stats.nodes;
+                        let (full_score, _) = self.search_with_coverage(
+                            board,
+                            caches,
+                            -side,
+                            full_depth,
+                            -beta,
+                            -alpha,
+                            child_wide,
+                            stats,
+                            SearchOptions {
+                                cut_node: false,
+                                ..base_child_options
+                            },
+                            coverage,
+                            Some(((mx, my), &mut candidate_snapshot)),
+                            abdada,
+                            tt_view,
+                            tt_view4,
+                        );
+                        if let Some(start) = full_start {
+                            profile_full_window_nodes +=
+                                stats.nodes.saturating_sub(full_nodes_before);
+                            profile_full_window_elapsed_us += start.elapsed().as_micros();
+                        }
+                        val = -full_score;
+                    }
+                    val
+                } else {
+                    loop {
+                        let base_child_options = SearchOptions {
+                            opo: 1 - options.opo,
+                            ply: options.ply + 1,
+                            root: false,
+                            root_allowed_moves: None,
+                            root_preferred_move: None,
+                            downf: local_downf,
+                            root_depth: Some(root_depth),
+                            priority_base: Some(priority_base),
+                            cut_node: false,
+                            skip_move: None,
+                        };
+                        let score = if found_pv {
+                            let narrow_start = profile_root_candidate.then(Instant::now);
+                            let narrow_nodes_before = stats.nodes;
+                            let shifted_alpha = shift_bound_with_atdown(alpha, atdown);
+                            let (narrow_score, _) = self.search_with_coverage(
+                                board,
+                                caches,
+                                -side,
+                                attempt_depth,
+                                -shifted_alpha - 1,
+                                -shifted_alpha,
+                                child_wide,
+                                stats,
+                                SearchOptions {
+                                    cut_node: true,
+                                    ..base_child_options
+                                },
+                                coverage,
+                                Some(((mx, my), &mut candidate_snapshot)),
+                                abdada,
+                                tt_view,
+                                tt_view4,
+                            );
+                            if let Some(start) = narrow_start {
+                                profile_zero_window_nodes +=
+                                    stats.nodes.saturating_sub(narrow_nodes_before);
+                                profile_zero_window_elapsed_us += start.elapsed().as_micros();
+                            }
+                            if stats.stop {
+                                break narrow_score;
+                            }
+                            let narrowed = score_from_child(narrow_score, atdown);
+                            if alpha < narrowed && narrowed < beta {
+                                profile_pvs_research = true;
+                                let full_start = profile_root_candidate.then(Instant::now);
+                                let full_nodes_before = stats.nodes;
+                                let (full_score, _) = self.search_with_coverage(
+                                    board,
+                                    caches,
+                                    -side,
+                                    attempt_depth,
+                                    -shift_bound_with_atdown(beta, atdown),
+                                    -shift_bound_with_atdown(alpha, atdown),
+                                    child_wide,
+                                    stats,
+                                    SearchOptions {
+                                        cut_node: false,
+                                        ..base_child_options
+                                    },
+                                    coverage,
+                                    Some(((mx, my), &mut candidate_snapshot)),
+                                    abdada,
+                                    tt_view,
+                                    tt_view4,
+                                );
+                                if let Some(start) = full_start {
+                                    profile_full_window_nodes +=
+                                        stats.nodes.saturating_sub(full_nodes_before);
+                                    profile_full_window_elapsed_us += start.elapsed().as_micros();
+                                }
+                                if stats.stop {
+                                    break full_score;
+                                }
+                                score_from_child(full_score, atdown)
+                            } else {
+                                narrowed
+                            }
+                        } else {
                             let full_start = profile_root_candidate.then(Instant::now);
                             let full_nodes_before = stats.nodes;
                             let (full_score, _) = self.search_with_coverage(
@@ -1759,7 +1940,7 @@ impl AlphaBetaSearcher {
                                 child_wide,
                                 stats,
                                 SearchOptions {
-                                    cut_node: false,
+                                    cut_node: if is_pv { false } else { !options.cut_node },
                                     ..base_child_options
                                 },
                                 coverage,
@@ -1777,50 +1958,17 @@ impl AlphaBetaSearcher {
                                 break full_score;
                             }
                             score_from_child(full_score, atdown)
-                        } else {
-                            narrowed
+                        };
+                        if score >= WIN {
+                            break score;
                         }
-                    } else {
-                        let full_start = profile_root_candidate.then(Instant::now);
-                        let full_nodes_before = stats.nodes;
-                        let (full_score, _) = self.search_with_coverage(
-                            board,
-                            caches,
-                            -side,
-                            attempt_depth,
-                            -shift_bound_with_atdown(beta, atdown),
-                            -shift_bound_with_atdown(alpha, atdown),
-                            child_wide,
-                            stats,
-                            SearchOptions {
-                                cut_node: if is_pv { false } else { !options.cut_node },
-                                ..base_child_options
-                            },
-                            coverage,
-                            Some(((mx, my), &mut candidate_snapshot)),
-                            abdada,
-                            tt_view,
-                            tt_view4,
-                        );
-                        if let Some(start) = full_start {
-                            profile_full_window_nodes +=
-                                stats.nodes.saturating_sub(full_nodes_before);
-                            profile_full_window_elapsed_us += start.elapsed().as_micros();
+                        if score > alpha && score > current && lmr_reduction > 0.0 {
+                            attempt_depth += lmr_reduction;
+                            lmr_reduction = 0.0;
+                            continue;
                         }
-                        if stats.stop {
-                            break full_score;
-                        }
-                        score_from_child(full_score, atdown)
-                    };
-                    if score >= WIN {
                         break score;
                     }
-                    if score > alpha && score > current && lmr_reduction > 0.0 {
-                        attempt_depth += lmr_reduction;
-                        lmr_reduction = 0.0;
-                        continue;
-                    }
-                    break score;
                 };
 
                 if let (Some(child_key), Some(ctx)) = (marked_busy_key, abdada) {
