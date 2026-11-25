@@ -2159,8 +2159,19 @@ impl AlphaBetaSearcher {
             alpha = best_value;
         }
 
-        // Non-PV delta pruning.
-        if !is_pv && best_value + self.qvcf_delta_margin(qdepth) < alpha {
+        // Non-PV delta pruning. Bypass when searching in the positive mate band
+        // (`alpha >= WIN`) on a node whose TT already holds a positive mate
+        // lower bound (`HASHF_BETA`/`HASHF_EXACT >= WIN`), so high mate-shortening
+        // scout windows (e.g. `[19995, 19996]` after `+19994`) are not pruned
+        // against the non-mate static `raw_eval`.
+        let has_pos_mate_lower_bound = probe_tt_value.is_some_and(|tt_val| {
+            (probe_tt_flag == HASHF_BETA || probe_tt_flag == HASHF_EXACT)
+                && score_from_tt(tt_val, ply) >= WIN
+        });
+        if !is_pv
+            && !(alpha >= WIN && has_pos_mate_lower_bound)
+            && best_value + self.qvcf_delta_margin(qdepth) < alpha
+        {
             if !tt_hit && tt_static_eval.is_none() {
                 if let Some(tt4) = tt_view4 {
                     tt4.store(TTEntry4 {
@@ -3138,6 +3149,68 @@ mod tests {
             .probe(key, QVCF_TT_DEPTH_FULL, -INF, INF);
         assert_eq!(p_exact.tt_flag, HASHF_EXACT);
         assert_eq!(p_exact.value, Some(INF - 4));
+
+        // Real high narrow-window search `[19995, 19996]` after storing
+        // `HASHF_BETA(+19994)` must NOT be delta-pruned down to fail-low
+        // `19995`; it must search and discover the shorter 4-ply mate `+19996`.
+        {
+            let mut leaf_scout = AlphaBetaSearcher::new(searcher.config.clone());
+            leaf_scout.tt.set_subply(true);
+            leaf_scout
+                .tt
+                .view4_with_salt(key_salt)
+                .unwrap()
+                .store(TTEntry4 {
+                    key,
+                    value: TT_VALUE_NONE,
+                    static_eval: TT_VALUE_NONE,
+                    flag: HASHF_EMPTY,
+                    depth: 0,
+                    best_move: Some(slow_mv),
+                    tt_pv: false,
+                    generation: leaf_scout.tt_generation,
+                });
+            let (s_low, _) = leaf_scout.search(
+                &mut board,
+                &mut caches,
+                BLACK,
+                0.0,
+                1_500,
+                1_501,
+                40,
+                &mut SearchStats::default(),
+                SearchOptions {
+                    opo: 1,
+                    root: false,
+                    ..SearchOptions::default()
+                },
+            );
+            assert_eq!(s_low, INF - 6);
+            let mut high_stats = SearchStats::default();
+            let (high_scout, _) = leaf_scout.search(
+                &mut board,
+                &mut caches,
+                BLACK,
+                0.0,
+                19_995,
+                19_996,
+                40,
+                &mut high_stats,
+                SearchOptions {
+                    opo: 1,
+                    root: false,
+                    ..SearchOptions::default()
+                },
+            );
+            eprintln!(
+                "d0 high_scout=[19995,19996] -> score={high_scout} nodes={} tt_hits={}",
+                high_stats.nodes, high_stats.tt_hits
+            );
+            assert!(
+                high_scout >= INF - 4,
+                "d0 high narrow window [19995, 19996] missed shorter mate +19996: got {high_scout}"
+            );
+        }
 
         // Main alpha-beta (`d=3`, both `ply=0` and `ply=4`): a narrow-window
         // fail-high on the slower mate `(5, 7)` must store `HASHF_BETA` at the
