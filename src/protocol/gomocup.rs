@@ -403,7 +403,7 @@ impl GomocupProtocol {
             }
             "compute_vct" => {
                 if let Some(parsed) = parse_one::<i32>(value) {
-                    self.config.runtime.compute_vct = parsed != 0;
+                    self.config.runtime.set_compute_vct(parsed != 0);
                     self.searcher = None;
                 }
             }

@@ -1421,7 +1421,7 @@ impl RootSearcher {
         }
 
         if !self.vcf.budget.stopped()
-            && self.config.runtime.compute_vct
+            && self.config.runtime.effective_compute_vct(self.has_nnue())
             && self.config.runtime.root_vct_depth > 0
         {
             trace.used_vct = true;
