@@ -108,6 +108,7 @@ pub struct RootTrace {
     pub overlap_wait_ms: Option<f64>,
     pub tt_snapshot_ms: Option<f64>,
     pub tactical_path: &'static str,
+    pub stop_reason: Option<&'static str>,
     pub root_profiles: Vec<RootDepthProfile>,
     pub tt_bestmove_current_generation: usize,
     pub tt_bestmove_old_generation: usize,
@@ -133,6 +134,7 @@ impl Default for RootTrace {
             overlap_wait_ms: None,
             tt_snapshot_ms: None,
             tactical_path: "alphabeta",
+            stop_reason: None,
             root_profiles: Vec::new(),
             tt_bestmove_current_generation: 0,
             tt_bestmove_old_generation: 0,
@@ -764,12 +766,16 @@ impl RootSearcher {
                 let mut completed_depth = 0_i32;
                 let mut first_win_mate_depth: Option<i32> = None;
                 let mut first_loss_mate_depth: Option<i32> = None;
+                let mut real_win_mate_confirms = 0_i32;
+                let mut real_loss_mate_confirms = 0_i32;
+                let mut stop_reason: &'static str = "max_depth";
                 for depth in 1..=limits.max_depth {
                     if self.vcf.budget.stopped()
                         || cancel
                             .as_ref()
                             .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
                     {
+                        stop_reason = "budget_or_cancel";
                         break;
                     }
                     let depth_start = Instant::now();
@@ -825,6 +831,7 @@ impl RootSearcher {
                         self.last_trace = Some(trace.clone());
                     }
                     if stats.stop || (best_move.is_some() && self.vcf.budget.stopped()) {
+                        stop_reason = "budget_or_cancel";
                         break;
                     }
                     completed_depth = depth;
@@ -845,28 +852,59 @@ impl RootSearcher {
                     }
                     job.latest_scores[0].store(best_score, Ordering::Relaxed);
                     job.completed_depths[0].store(completed_depth, Ordering::Release);
+                    // An iteration that only returned via root TT cutoff
+                    // (`nodes == 1, tt_hits == 1`) or solely via 1-node TT
+                    // cutoffs on root children (`nodes == k + 1, tt_hits == k`)
+                    // did not perform an actual deeper re-search and must not
+                    // count as an independent mate confirmation round.
+                    let tt_only_iter = stats.nodes <= stats.tt_hits + 1;
                     if best_score >= WIN {
                         first_loss_mate_depth = None;
-                        let start = *first_win_mate_depth.get_or_insert(depth);
-                        if best_score >= INF - 2 || depth - start >= WIN_MATE_CONFIRM_ITERS {
+                        real_loss_mate_confirms = 0;
+                        if first_win_mate_depth.is_none() {
+                            first_win_mate_depth = Some(depth);
+                            real_win_mate_confirms = 0;
+                        } else if !tt_only_iter {
+                            real_win_mate_confirms += 1;
+                        }
+                        if best_score >= INF - 2 || real_win_mate_confirms >= WIN_MATE_CONFIRM_ITERS
+                        {
+                            stop_reason = "win_mate_confirm";
                             break;
                         }
                     } else if best_score <= -WIN {
                         first_win_mate_depth = None;
-                        let start = *first_loss_mate_depth.get_or_insert(depth);
-                        if depth - start >= LOSS_MATE_CONFIRM_ITERS {
+                        real_win_mate_confirms = 0;
+                        let start = if let Some(s) = first_loss_mate_depth {
+                            if !tt_only_iter {
+                                real_loss_mate_confirms += 1;
+                            }
+                            s
+                        } else {
+                            first_loss_mate_depth = Some(depth);
+                            real_loss_mate_confirms = 0;
+                            depth
+                        };
+                        if real_loss_mate_confirms >= LOSS_MATE_CONFIRM_ITERS {
                             let helper_disagrees = (1..total_threads).any(|tid| {
                                 job.completed_depths[tid].load(Ordering::Acquire) >= start
                                     && job.latest_scores[tid].load(Ordering::Relaxed) > -WIN
                             });
                             if !helper_disagrees {
+                                stop_reason = "loss_mate_confirm";
                                 break;
                             }
                         }
                     } else {
                         first_win_mate_depth = None;
                         first_loss_mate_depth = None;
+                        real_win_mate_confirms = 0;
+                        real_loss_mate_confirms = 0;
                     }
+                }
+                trace.stop_reason = Some(stop_reason);
+                if self.config.runtime.root_profile {
+                    self.last_trace = Some(trace.clone());
                 }
 
                 stop_flag.store(true, Ordering::Relaxed);

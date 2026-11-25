@@ -1156,20 +1156,17 @@ impl AlphaBetaSearcher {
                     if alpha >= beta {
                         hash_flag = HASHF_BETA;
                         stats.cutoffs += 1;
-                        let mut store_depth = hash_depth;
-                        if (current >= WIN && current > original_alpha)
-                            || (current <= -WIN && current < original_beta)
-                        {
-                            hash_flag = HASHF_EXACT;
-                            store_depth += if subply_tt { SUBPLY_TT_WIN_BONUS } else { 10 };
-                        }
                         if let Some(tt4) = tt_view4 {
+                            // Match Rapfi (`search.cpp:1950, 1999`): a beta
+                            // cutoff only proves a lower bound (`HASHF_BETA`)
+                            // at `hash_depth`, never exact mate distance or
+                            // +10 bonus plies.
                             tt4.store(TTEntry4 {
                                 key: board.zobrist_key(),
                                 value: score_to_tt(current, options.ply),
                                 static_eval: tt_static_eval.unwrap_or(TT_VALUE_NONE),
                                 flag: hash_flag,
-                                depth: store_depth,
+                                depth: hash_depth,
                                 best_move,
                                 tt_pv: is_pv || tt_was_pv,
                                 generation: self.tt_generation,
@@ -1926,14 +1923,20 @@ impl AlphaBetaSearcher {
         }
 
         if !root_restricted && !in_singular {
-            let mut store_depth = hash_depth;
-            if (current >= WIN && current > original_alpha)
-                || (current <= -WIN && current < original_beta)
-            {
-                hash_flag = HASHF_EXACT;
-                store_depth += if subply_tt { SUBPLY_TT_WIN_BONUS } else { 10 };
-            }
             if let Some(tt4) = tt_view4 {
+                // Keep true alpha-beta bound (`HASHF_BETA` / `HASHF_EXACT` /
+                // `HASHF_ALPHA`), never promoting narrow-window mate bounds to
+                // `HASHF_EXACT`. Never inflate root or root-child (`ply <= 1`)
+                // depths so 4T mate confirmation cannot loop on cached hits;
+                // retain `+10` bonus plies only for genuine deep internal
+                // (`ply >= 2`) `HASHF_EXACT` mates so Lazy SMP threads can
+                // share proven mate subtrees across depths.
+                let store_depth =
+                    if options.ply >= 2 && hash_flag == HASHF_EXACT && current.abs() >= WIN {
+                        hash_depth + if subply_tt { SUBPLY_TT_WIN_BONUS } else { 10 }
+                    } else {
+                        hash_depth
+                    };
                 tt4.store(TTEntry4 {
                     key: board.zobrist_key(),
                     value: score_to_tt(current, options.ply),
@@ -1945,6 +1948,13 @@ impl AlphaBetaSearcher {
                     generation: self.tt_generation,
                 });
             } else if let Some(tt2) = tt_view {
+                let mut store_depth = hash_depth;
+                if (current >= WIN && current > original_alpha)
+                    || (current <= -WIN && current < original_beta)
+                {
+                    hash_flag = HASHF_EXACT;
+                    store_depth += if subply_tt { SUBPLY_TT_WIN_BONUS } else { 10 };
+                }
                 tt2.store(TTEntry {
                     key: board.zobrist_key(),
                     value: score_to_tt(current, options.ply),
@@ -3128,5 +3138,116 @@ mod tests {
             .probe(key, QVCF_TT_DEPTH_FULL, -INF, INF);
         assert_eq!(p_exact.tt_flag, HASHF_EXACT);
         assert_eq!(p_exact.value, Some(INF - 4));
+
+        // Main alpha-beta (`d=3`, both `ply=0` and `ply=4`): a narrow-window
+        // fail-high on the slower mate `(5, 7)` must store `HASHF_BETA` at the
+        // true subply depth (`3*64 + 3 = 195`, NOT `195 + 640 = 835` and NOT
+        // `HASHF_EXACT`), so a subsequent full-window `[-INF, INF]` search on
+        // the same TT recovers the exact same shorter mate `(5, 10)` as a cold
+        // full-window search.
+        let with_hint = |base_cfg: &EngineConfig| {
+            let mut engine = AlphaBetaSearcher::new(base_cfg.clone());
+            engine.tt.set_subply(true);
+            engine
+                .tt
+                .view4_with_salt(key_salt)
+                .unwrap()
+                .store(TTEntry4 {
+                    key,
+                    value: TT_VALUE_NONE,
+                    static_eval: TT_VALUE_NONE,
+                    flag: HASHF_EMPTY,
+                    depth: 0,
+                    best_move: Some(slow_mv),
+                    tt_pv: false,
+                    generation: engine.tt_generation,
+                });
+            engine
+        };
+        let run_main = |engine: &mut AlphaBetaSearcher,
+                        board: &mut Board,
+                        caches: &mut EvalCaches,
+                        ply: i32,
+                        alpha: i32,
+                        beta: i32| {
+            let mut stats = SearchStats::default();
+            let (score, mv) = engine.search(
+                board,
+                caches,
+                BLACK,
+                3.0,
+                alpha,
+                beta,
+                40,
+                &mut stats,
+                SearchOptions {
+                    opo: 1,
+                    ply,
+                    root: false,
+                    ..SearchOptions::default()
+                },
+            );
+            (score, mv, stats.nodes, stats.tt_hits)
+        };
+
+        let expected_d3_depth = 3 * 64 + NNUE_MAIN_TT_DEPTH_OFFSET;
+        for ply in [0_i32, 4_i32] {
+            let mut cold_engine = with_hint(&searcher.config);
+            let main_cold = run_main(&mut cold_engine, &mut board, &mut caches, ply, -INF, INF);
+
+            let mut warm_engine = with_hint(&searcher.config);
+            let main_lower = run_main(&mut warm_engine, &mut board, &mut caches, ply, 1_500, 1_501);
+            let saved = warm_engine.tt.view4_with_salt(key_salt).unwrap().probe(
+                key,
+                expected_d3_depth,
+                -INF,
+                INF,
+            );
+            assert_eq!(
+                saved.tt_flag, HASHF_BETA,
+                "ply={ply}: main d3 narrow fail-high must store HASHF_BETA, not HASHF_EXACT"
+            );
+            assert_eq!(
+                saved.tt_depth, expected_d3_depth,
+                "ply={ply}: main d3 mate cutoff must store true depth {expected_d3_depth}, not +10 bonus"
+            );
+
+            let main_warm = run_main(&mut warm_engine, &mut board, &mut caches, ply, -INF, INF);
+            eprintln!(
+                "d3 ply={ply} cold={main_cold:?} lower={main_lower:?} flag={} depth={} warm={main_warm:?}",
+                saved.tt_flag, saved.tt_depth
+            );
+            assert_eq!(
+                main_warm.0, main_cold.0,
+                "ply={ply}: warm full-window score must match cold short mate"
+            );
+            assert_eq!(
+                main_warm.1, main_cold.1,
+                "ply={ply}: warm full-window best move must match cold short mate"
+            );
+        }
+
+        // Verify fail-low at `d=3` stores `HASHF_ALPHA` at true `expected_d3_depth`
+        // (no `HASHF_EXACT` promotion and no +10 ply depth bonus).
+        {
+            let mut fail_low_engine = with_hint(&searcher.config);
+            let fl = run_main(
+                &mut fail_low_engine,
+                &mut board,
+                &mut caches,
+                0,
+                INF - 1,
+                INF,
+            );
+            assert!(fl.0 <= INF - 1);
+            let saved_fl = fail_low_engine.tt.view4_with_salt(key_salt).unwrap().probe(
+                key,
+                expected_d3_depth,
+                -INF,
+                INF,
+            );
+            assert_eq!(saved_fl.tt_flag, HASHF_ALPHA);
+            assert_eq!(saved_fl.tt_depth, expected_d3_depth);
+        }
     }
 }
