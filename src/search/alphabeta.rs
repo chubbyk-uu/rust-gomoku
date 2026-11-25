@@ -1525,11 +1525,14 @@ impl AlphaBetaSearcher {
                                 r += 1.0;
                             }
                             if use_nnue_policy && policy_top_logit.is_finite() {
-                                let gap = (policy_top_logit - candidate.order_score).max(0.0);
-                                if gap > 1.0 {
-                                    let scale = if is_pv { 0.25 } else { 0.45 };
-                                    r += (scale * (gap - 1.0)).min(3.0);
-                                }
+                                // Rapfi exact `policyReduction` (`parameter.h:270-278`, ~59 Elo):
+                                // `scaledMoveScore = curMoveScore * (0.1 / ScoreScale) = policy * 0.1`.
+                                let scaled = candidate.order_score * 0.1;
+                                let (bias, scale, max_red) = match self.config.rule_set {
+                                    RuleSet::Renju => (3.39_f64, 3.15_f64, 4.90_f64),
+                                    RuleSet::Freestyle => (2.53_f64, 3.60_f64, 5.18_f64),
+                                };
+                                r += (bias - scale * scaled).clamp(0.0, max_red);
                             }
                             if is_pv || tt_was_pv {
                                 r -= 0.71;
