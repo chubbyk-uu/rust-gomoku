@@ -63,38 +63,9 @@ static LMR_LUT: LazyLock<[[f64; 64]; 2]> = LazyLock::new(|| {
 });
 
 #[inline(always)]
-fn update_lmr_quiet_history(entry: &mut i32, bonus: i32) {
+fn update_quiet_history(entry: &mut i32, bonus: i32) {
     let clamped = bonus.clamp(-400, 400);
     *entry += clamped - (*entry * clamped.abs()) / 4096;
-}
-
-const MAIN_HISTORY_RANGE: i32 = 10_692;
-const NO_COUNTER_MOVE: Move = u16::MAX;
-
-#[inline(always)]
-fn update_main_history(entry: &mut i16, bonus: i32) {
-    let clamped = bonus.clamp(-MAIN_HISTORY_RANGE, MAIN_HISTORY_RANGE);
-    let current = i32::from(*entry);
-    let next = current + clamped - (current * clamped.abs()) / MAIN_HISTORY_RANGE;
-    *entry = next.clamp(-MAIN_HISTORY_RANGE, MAIN_HISTORY_RANGE) as i16;
-}
-
-#[inline(always)]
-fn nnue_stat_bonus(rule: RuleSet, depth: f64) -> i32 {
-    let quad = match rule {
-        RuleSet::Renju => 23.0,
-        RuleSet::Freestyle => 29.0,
-    };
-    ((quad * depth * depth + 99.0 * depth - 164.0) as i32).clamp(1, 8_927)
-}
-
-#[inline(always)]
-fn nnue_history_weights(rule: RuleSet, side: Side) -> (i32, i32, i32) {
-    match (rule, side == BLACK) {
-        (RuleSet::Freestyle, _) => (492, 265, 38),
-        (RuleSet::Renju, true) => (511, 270, 31),
-        (RuleSet::Renju, false) => (520, 268, 33),
-    }
 }
 
 /// Precomputed `RANGE_SQUARE2_LINE4` neighborhood bitboards for each board square
@@ -329,12 +300,7 @@ pub struct AlphaBetaSearcher {
     movegen_scratch: MoveAnalysis,
     nnue: Option<Mix9svqEvaluator>,
     static_eval_stack: [i32; 128],
-    /// Legacy conservative quiet history exclusively for LMR (kept untouched
-    /// when tuning move-ordering histories so LMR aggressiveness cannot drift).
-    lmr_quiet_history: [[i32; BOARD_AREA]; 2],
-    quiet_history: [[i16; BOARD_AREA]; 2],
-    attack_history: [[i16; BOARD_AREA]; 2],
-    counter_move_history: [[(Move, u8); BOARD_AREA]; 2],
+    quiet_history: [[i32; BOARD_AREA]; 2],
 }
 
 pub(crate) fn load_nnue_for_config(config: &EngineConfig) -> Option<Mix9svqEvaluator> {
@@ -373,10 +339,7 @@ impl AlphaBetaSearcher {
             movegen_scratch: MoveAnalysis::new(),
             nnue,
             static_eval_stack: [TT_VALUE_NONE; 128],
-            lmr_quiet_history: [[0; BOARD_AREA]; 2],
             quiet_history: [[0; BOARD_AREA]; 2],
-            attack_history: [[0; BOARD_AREA]; 2],
-            counter_move_history: [[(NO_COUNTER_MOVE, 0); BOARD_AREA]; 2],
         }
     }
 
@@ -399,72 +362,8 @@ impl AlphaBetaSearcher {
             movegen_scratch: MoveAnalysis::new(),
             nnue,
             static_eval_stack: [TT_VALUE_NONE; 128],
-            lmr_quiet_history: [[0; BOARD_AREA]; 2],
             quiet_history: [[0; BOARD_AREA]; 2],
-            attack_history: [[0; BOARD_AREA]; 2],
-            counter_move_history: [[(NO_COUNTER_MOVE, 0); BOARD_AREA]; 2],
         }
-    }
-
-    #[inline]
-    fn clear_nnue_histories(&mut self) {
-        self.lmr_quiet_history = [[0; BOARD_AREA]; 2];
-        self.quiet_history = [[0; BOARD_AREA]; 2];
-        self.attack_history = [[0; BOARD_AREA]; 2];
-        self.counter_move_history = [[(NO_COUNTER_MOVE, 0); BOARD_AREA]; 2];
-    }
-
-    #[inline]
-    fn score_nnue_candidates_fused(
-        &mut self,
-        board: &Board,
-        side: Side,
-        single_forcing: bool,
-        candidates: &mut [Candidate],
-        raw_policy_by_mv: &mut [f32; BOARD_AREA],
-    ) -> f64 {
-        let n = candidates.len();
-        let mut move_buf = [0_u16; BOARD_AREA];
-        let mut score_buf = [0.0_f32; BOARD_AREA];
-        for (i, c) in candidates.iter().enumerate() {
-            move_buf[i] = c.move_;
-        }
-        if let Some(nnue) = self.nnue.as_mut() {
-            nnue.evaluate_policy_moves(side, &move_buf[..n], &mut score_buf[..n]);
-        }
-        let player = if side == BLACK { 0 } else { 1 };
-        let (attack_w, quiet_w, counter_b) = nnue_history_weights(self.config.rule_set, side);
-        let counter = (!single_forcing)
-            .then(|| board.move_history().last())
-            .flatten()
-            .map(|played| self.counter_move_history[1 - player][played.move_ as usize]);
-        let mut raw_top_logit = f64::NEG_INFINITY;
-        for (i, c) in candidates.iter_mut().enumerate() {
-            let mv_idx = c.move_ as usize;
-            let raw_p = score_buf[i];
-            raw_policy_by_mv[mv_idx] = raw_p;
-            let raw_f64 = f64::from(raw_p);
-            if raw_f64 > raw_top_logit {
-                raw_top_logit = raw_f64;
-            }
-            let hist_bonus = if c.self_attack >= 3 {
-                (i32::from(self.attack_history[player][mv_idx]) * attack_w) / 65_536
-            } else {
-                (i32::from(self.quiet_history[player][mv_idx]) * quiet_w) / 65_536
-            };
-            let cm_bonus = match counter {
-                Some((cm_mv, cm_atk))
-                    if cm_mv == c.move_ && c.self_attack >= i32::from(cm_atk) =>
-                {
-                    counter_b
-                }
-                _ => 0,
-            };
-            // Ordering uses fused `Policy + MainHistory + CounterMove` while
-            // LMR continues reading untouched `raw_policy_by_mv` / `raw_top_logit`.
-            c.order_score = raw_f64 + f64::from(hist_bonus + cm_bonus) / 32.0;
-        }
-        raw_top_logit
     }
 
     pub fn advance_tt_generation(&mut self) {
@@ -526,7 +425,7 @@ impl AlphaBetaSearcher {
         self.tt
             .set_subply(self.config.runtime.threads > 1 || self.nnue.is_some());
         if self.tt_generation != tt_generation {
-            self.clear_nnue_histories();
+            self.quiet_history = [[0; BOARD_AREA]; 2];
         }
         self.tt_generation = tt_generation;
     }
@@ -625,7 +524,7 @@ impl AlphaBetaSearcher {
             self.static_eval_stack[0] = TT_VALUE_NONE;
             self.static_eval_stack[1] = TT_VALUE_NONE;
             if depth <= 1.0 && self.nnue.is_some() {
-                self.clear_nnue_histories();
+                self.quiet_history = [[0; BOARD_AREA]; 2];
             }
         }
         let root_depth = options.root_depth.unwrap_or(depth);
@@ -1272,25 +1171,6 @@ impl AlphaBetaSearcher {
                         found_pv = true;
                     }
                     if alpha >= beta {
-                        if self.nnue.is_some() {
-                            let player = if side == BLACK { 0 } else { 1 };
-                            let bonus = nnue_stat_bonus(self.config.rule_set, depth);
-                            if tt_self_attack >= 3 {
-                                update_main_history(
-                                    &mut self.attack_history[player][tt_mv as usize],
-                                    bonus,
-                                );
-                            } else {
-                                update_main_history(
-                                    &mut self.quiet_history[player][tt_mv as usize],
-                                    bonus,
-                                );
-                            }
-                            if let Some(last) = board.move_history().last() {
-                                self.counter_move_history[1 - player][last.move_ as usize] =
-                                    (tt_mv, tt_self_attack.clamp(0, 255) as u8);
-                            }
-                        }
                         hash_flag = HASHF_BETA;
                         stats.cutoffs += 1;
                         if let Some(tt4) = tt_view4 {
@@ -1346,9 +1226,6 @@ impl AlphaBetaSearcher {
         let lazy_tie_ordering = !options.root && !self.config.runtime.nonroot_vcf;
         let mut rest_primary_sorted = true;
         let mut policy_rest_sorted = true;
-        let mut policy_lazy_from = usize::MAX;
-        let mut policy_top_logit = f64::NEG_INFINITY;
-        let mut raw_policy_by_mv = [0.0_f32; BOARD_AREA];
         let use_nnue_policy = self.nnue.is_some()
             && !win_priority
             && !single_forcing
@@ -1365,21 +1242,26 @@ impl AlphaBetaSearcher {
                         .position(|candidate| candidate.move_ == tt_mv)
                 })
             {
-                // Defer NNUE Policy evaluation until `index == 1` (only when
-                // `tt_best_move` fails to cause an immediate cutoff).
-                candidates.swap(0, pos);
+                // Keep exact relative scan order for `candidates[1..]` while
+                // deferring NNUE Policy evaluation until `index == 1` (only
+                // when `tt_best_move` fails to cause an immediate cutoff).
+                candidates[..=pos].rotate_right(1);
                 policy_rest_sorted = false;
-                policy_lazy_from = 1;
                 candidates
             } else {
-                policy_top_logit = self.score_nnue_candidates_fused(
-                    board,
-                    side,
-                    single_forcing,
-                    &mut candidates,
-                    &mut raw_policy_by_mv,
-                );
-                policy_lazy_from = 0;
+                let n = candidates.len();
+                let mut move_buf = [0_u16; BOARD_AREA];
+                let mut score_buf = [0.0_f32; BOARD_AREA];
+                for (i, c) in candidates.iter().enumerate() {
+                    move_buf[i] = c.move_;
+                }
+                if let Some(nnue) = self.nnue.as_mut() {
+                    nnue.evaluate_policy_moves(side, &move_buf[..n], &mut score_buf[..n]);
+                }
+                for (i, c) in candidates.iter_mut().enumerate() {
+                    c.order_score = f64::from(score_buf[i]);
+                }
+                candidates.sort_by(|a, b| b.order_score.total_cmp(&a.order_score));
                 candidates
             }
         } else if options.root {
@@ -1513,6 +1395,10 @@ impl AlphaBetaSearcher {
         } else {
             raw_depthdown
         };
+        let mut policy_top_logit = f64::NEG_INFINITY;
+        if use_nnue_policy && policy_rest_sorted && !ordered.is_empty() {
+            policy_top_logit = ordered[0].order_score;
+        }
         let nnue_lmp_limit = if self.nnue.is_some()
             && !options.root
             && !is_pv
@@ -1552,8 +1438,6 @@ impl AlphaBetaSearcher {
         let mut deferred_len = 0_usize;
         let mut searched_quiets = [0_u16; 64];
         let mut searched_quiets_len = 0_usize;
-        let mut searched_attacks = [0_u16; 48];
-        let mut searched_attacks_len = 0_usize;
         let mut early_exit = false;
 
         for pass in 0..2 {
@@ -1570,27 +1454,24 @@ impl AlphaBetaSearcher {
                 let (index, candidate, local_downf, depthdown, mut lmr_reduction) = if pass == 0 {
                     let index = step + tt_offset;
                     if !policy_rest_sorted && index == 1 {
-                        policy_top_logit = self.score_nnue_candidates_fused(
-                            board,
-                            side,
-                            single_forcing,
-                            &mut ordered[1..],
-                            &mut raw_policy_by_mv,
-                        );
+                        let rest = &mut ordered[1..];
+                        let n = rest.len();
+                        let mut move_buf = [0_u16; BOARD_AREA];
+                        let mut score_buf = [0.0_f32; BOARD_AREA];
+                        for (i, c) in rest.iter().enumerate() {
+                            move_buf[i] = c.move_;
+                        }
+                        if let Some(nnue) = self.nnue.as_mut() {
+                            nnue.evaluate_policy_moves(side, &move_buf[..n], &mut score_buf[..n]);
+                        }
+                        for (i, c) in rest.iter_mut().enumerate() {
+                            c.order_score = f64::from(score_buf[i]);
+                        }
+                        rest.sort_by(|a, b| b.order_score.total_cmp(&a.order_score));
+                        if let Some(first) = rest.first() {
+                            policy_top_logit = first.order_score;
+                        }
                         policy_rest_sorted = true;
-                    }
-                    if step >= policy_lazy_from {
-                        let mut best_i = step;
-                        let mut best_s = ordered[step].order_score;
-                        for j in (step + 1)..ordered.len() {
-                            if ordered[j].order_score > best_s {
-                                best_s = ordered[j].order_score;
-                                best_i = j;
-                            }
-                        }
-                        if best_i != step {
-                            ordered.swap(step, best_i);
-                        }
                     }
                     if !rest_primary_sorted && index == 1 {
                         order_candidates_primary_slice(&mut ordered[1..]);
@@ -1644,8 +1525,7 @@ impl AlphaBetaSearcher {
                                 r += 1.0;
                             }
                             if use_nnue_policy && policy_top_logit.is_finite() {
-                                let raw_p = f64::from(raw_policy_by_mv[candidate.move_ as usize]);
-                                let gap = (policy_top_logit - raw_p).max(0.0);
+                                let gap = (policy_top_logit - candidate.order_score).max(0.0);
                                 if gap > 1.0 {
                                     let scale = if is_pv { 0.25 } else { 0.45 };
                                     r += (scale * (gap - 1.0)).min(3.0);
@@ -1658,7 +1538,7 @@ impl AlphaBetaSearcher {
                                 r += 1.25;
                             }
                             let player = if side == BLACK { 0 } else { 1 };
-                            let h = self.lmr_quiet_history[player][candidate.move_ as usize];
+                            let h = self.quiet_history[player][candidate.move_ as usize];
                             r -= (f64::from(h) / 2048.0).clamp(-1.5, 1.5);
                             if candidate.opp_attack >= 4 || hostile_threat {
                                 r *= 0.5;
@@ -2020,52 +1900,18 @@ impl AlphaBetaSearcher {
                     break;
                 }
                 if beta_cutoff {
-                    if self.nnue.is_some() {
+                    if self.nnue.is_some() && candidate.self_attack < 4 {
                         let player = if side == BLACK { 0 } else { 1 };
-                        if candidate.self_attack < 4 {
-                            let lmr_bonus = ((depth * depth * 4.0) as i32).clamp(1, 400);
-                            update_lmr_quiet_history(
-                                &mut self.lmr_quiet_history[player][candidate.move_ as usize],
-                                lmr_bonus,
-                            );
-                            for &prev_mv in &searched_quiets[..searched_quiets_len] {
-                                update_lmr_quiet_history(
-                                    &mut self.lmr_quiet_history[player][prev_mv as usize],
-                                    -lmr_bonus,
-                                );
-                            }
-                        }
-                        let bonus = nnue_stat_bonus(self.config.rule_set, depth);
-                        if candidate.self_attack >= 3 {
-                            update_main_history(
-                                &mut self.attack_history[player][candidate.move_ as usize],
-                                bonus,
-                            );
-                        } else if !hostile_threat && !single_forcing {
-                            update_main_history(
-                                &mut self.quiet_history[player][candidate.move_ as usize],
-                                bonus,
-                            );
-                            for &prev_mv in &searched_quiets[..searched_quiets_len] {
-                                update_main_history(
-                                    &mut self.quiet_history[player][prev_mv as usize],
-                                    -bonus,
-                                );
-                            }
-                        }
-                        for &prev_mv in &searched_attacks[..searched_attacks_len] {
-                            update_main_history(
-                                &mut self.attack_history[player][prev_mv as usize],
+                        let bonus = ((depth * depth * 4.0) as i32).clamp(1, 400);
+                        update_quiet_history(
+                            &mut self.quiet_history[player][candidate.move_ as usize],
+                            bonus,
+                        );
+                        for &prev_mv in &searched_quiets[..searched_quiets_len] {
+                            update_quiet_history(
+                                &mut self.quiet_history[player][prev_mv as usize],
                                 -bonus,
                             );
-                        }
-                        if !single_forcing {
-                            if let Some(last) = board.move_history().last() {
-                                self.counter_move_history[1 - player][last.move_ as usize] = (
-                                    candidate.move_,
-                                    candidate.self_attack.clamp(0, 255) as u8,
-                                );
-                            }
                         }
                     }
                     hash_flag = HASHF_BETA;
@@ -2073,19 +1919,12 @@ impl AlphaBetaSearcher {
                     early_exit = true;
                     break;
                 }
-                if self.nnue.is_some() {
-                    if candidate.self_attack >= 3 {
-                        if searched_attacks_len < searched_attacks.len() {
-                            searched_attacks[searched_attacks_len] = candidate.move_;
-                            searched_attacks_len += 1;
-                        }
-                    } else if !hostile_threat
-                        && !single_forcing
-                        && searched_quiets_len < searched_quiets.len()
-                    {
-                        searched_quiets[searched_quiets_len] = candidate.move_;
-                        searched_quiets_len += 1;
-                    }
+                if self.nnue.is_some()
+                    && candidate.self_attack < 4
+                    && searched_quiets_len < searched_quiets.len()
+                {
+                    searched_quiets[searched_quiets_len] = candidate.move_;
+                    searched_quiets_len += 1;
                 }
             }
         }
