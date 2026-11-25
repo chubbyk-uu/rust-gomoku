@@ -12,22 +12,22 @@ Download the Windows x64 program and signed Android ARM64 APK / AAB from the [la
 
 The Windows program opens this local browser interface. Play against the engine or another person, choose freestyle or Renju, switch between Pro mode (NNUE `Mix9svq` with per-move time budgets `500 ms`–`5000 ms`, default `1000 ms`) and Casual mode (four classical fixed-depth presets), and toggle multi-threaded search from the side panel.
 
-![Desktop GUI showing a game against the engine and the rule, thinking-mode, difficulty, and multi-thread controls](docs/screenshots/desktop-gui.png)
+![Desktop GUI showing a Renju game against the engine with Pro NNUE 1s mode and multi-thread controls](docs/screenshots/desktop-gui.png)
 
 ### Android
 
 The mobile interface puts the board, turn status, and undo/new-game controls together. It bundles the `Mix9svq` NNUE weights and defaults to Pro timed mode (`500 ms` / `1000 ms` / `2500 ms` / `5000 ms`, default `1000 ms`, unified `tt_bits = 20` / 32 MiB TT), while also offering Casual fixed-depth mode (Beginner / Normal / Senior / Master) and a multi-threaded search toggle.
 
 <p>
-  <img src="docs/screenshots/android-portrait.png" alt="Android interface in portrait orientation during a Renju game" width="320">
-  <img src="docs/screenshots/android-difficulty.png" alt="Android settings preview from an earlier release" width="320">
+  <img src="docs/screenshots/android-portrait.png" alt="Android interface in portrait orientation during a Renju Pro 1s game" width="320">
+  <img src="docs/screenshots/android-difficulty.png" alt="Android new-game sheet with Pro NNUE time limits and Casual mode toggle" width="320">
 </p>
 
 Landscape mode places the controls beside the board:
 
 ![Android interface in landscape orientation](docs/screenshots/android-landscape.png)
 
-Capture notes: the desktop screenshot was taken from the running GUI in WSL, which serves the same page as the Windows build. Android images are browser previews from an earlier release using a real Rust-controller snapshot, without Android system bars; current builds use the Pro (`500 ms`–`5000 ms`, default `1000 ms`) + Casual (4-level) segmented controls.
+Capture notes: the desktop screenshot was taken from the running GUI in WSL, which serves the same page as the Windows build. Android images are browser previews of the app's bundled HTML/CSS/JavaScript using a real Rust-controller game snapshot, without Android system bars. They are not device screenshots.
 
 ## Current Status
 

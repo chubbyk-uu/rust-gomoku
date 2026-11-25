@@ -10,22 +10,22 @@ Windows x64 程序和已签名的 Android ARM64 APK / AAB 可从[最新 Release]
 
 Windows 程序启动后打开本地网页界面。可与引擎对弈或进行双人对局，在右侧选择无禁手或连珠规则、切换专业模式（NNUE `Mix9svq` 每步限时 `500 ms`–`5000 ms`，默认 `1000 ms`）或休闲模式（四档经典固定深度），并可开关多线程搜索。
 
-![桌面 GUI：与引擎对弈，右侧提供规则、思考模式、难度与多线程设置](docs/screenshots/desktop-gui.png)
+![桌面 GUI：连珠人机对局，右侧提供规则、休闲/专业 NNUE 限时与多线程设置](docs/screenshots/desktop-gui.png)
 
 ### Android
 
 手机界面集中展示棋盘、当前回合，以及悔棋和新局操作。内置打包 `Mix9svq` NNUE 权重，默认启用专业限时模式（`500 ms` / `1000 ms` / `2500 ms` / `5000 ms`，默认 `1000 ms`，统一 `tt_bits = 20` / 32 MiB TT），同时提供休闲四档难度（入门、普通、高级、大师）以及多线程搜索开关。
 
 <p>
-  <img src="docs/screenshots/android-portrait.png" alt="Android 竖屏界面：连珠对局进行中" width="320">
-  <img src="docs/screenshots/android-difficulty.png" alt="Android 早期版本设置界面预览" width="320">
+  <img src="docs/screenshots/android-portrait.png" alt="Android 竖屏界面：连珠专业 1s 对局进行中" width="320">
+  <img src="docs/screenshots/android-difficulty.png" alt="Android 新局设置面板：支持休闲/专业 NNUE 模式与四档限时分段切换" width="320">
 </p>
 
 横屏时，操作区排列在棋盘旁边：
 
 ![Android 横屏对局界面](docs/screenshots/android-landscape.png)
 
-截图说明：桌面图截自 WSL 中实际运行的 GUI，与 Windows 版本使用同一网页。Android 图片为早期版本在浏览器中预览截取的界面，不含 Android 系统栏；当前版本已升级为「专业（`500 ms`–`5000 ms`，默认 `1000 ms`）+ 休闲（四档）」分段按钮交互。
+截图说明：桌面图截自 WSL 中实际运行的 GUI，与 Windows 版本使用同一网页。Android 图片使用应用内置的 HTML/CSS/JavaScript 和 Rust 控制器产生的真实对局状态，在浏览器中预览截取，不含 Android 系统栏，非手机实机截图。
 
 ## 当前状态
 
