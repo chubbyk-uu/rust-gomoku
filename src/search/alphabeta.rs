@@ -1195,31 +1195,61 @@ impl AlphaBetaSearcher {
             }
         }
 
-        let mut generated = generate_candidates_with_coverage_scratch(
-            board,
-            caches,
-            side,
-            &self.config,
-            Some(wide),
-            root_allowed_moves,
-            tt_best_move,
-            options.root,
-            coverage,
-            &mut self.movegen_scratch,
-        );
-        let win_priority = generated.win_priority;
-        let single_forcing = generated.single_forcing;
-        let hostile_threat = generated.hostile_threat;
+        // O(1) NNUE forced-defense fast path: when `quick_win_check_nnue`
+        // confirmed we have no L5 and opponent has exactly one legal-to-block
+        // L5, skip full board movegen and emit that unique forced reply directly.
+        let (mut generated_candidates, win_priority, single_forcing, hostile_threat) =
+            if self.nnue.is_some()
+                && !options.root
+                && !in_singular
+                && !self.config.runtime.nonroot_vcf
+                && caches.initialized
+                && caches.rule_set == self.config.rule_set
+                && !no_l4_l5
+                && caches.l5_count(-side) == 1
+            {
+                let mv = caches.first_l5_move(-side).expect("opp_l5_count == 1");
+                let (mx, my) = move_to_xy(mv).expect("forced L5 block valid");
+                (
+                    vec![Candidate {
+                        move_: mv,
+                        order_score: 0.0,
+                        self_attack: attack_level(caches, mx, my, side),
+                        opp_attack: 6,
+                    }],
+                    false,
+                    true,
+                    false,
+                )
+            } else {
+                let generated = generate_candidates_with_coverage_scratch(
+                    board,
+                    caches,
+                    side,
+                    &self.config,
+                    Some(wide),
+                    root_allowed_moves,
+                    tt_best_move,
+                    options.root,
+                    coverage,
+                    &mut self.movegen_scratch,
+                );
+                (
+                    generated.candidates,
+                    generated.win_priority,
+                    generated.single_forcing,
+                    generated.hostile_threat,
+                )
+            };
         if no_l4_l5 {
             debug_assert!(!win_priority && !single_forcing && !hostile_threat);
         }
         if let Some(tt_mv) = pre_searched_tt_move {
-            if let Some(pos) = generated
-                .candidates
+            if let Some(pos) = generated_candidates
                 .iter()
                 .position(|candidate| candidate.move_ == tt_mv)
             {
-                generated.candidates.remove(pos);
+                generated_candidates.remove(pos);
             }
         }
 
@@ -1229,10 +1259,10 @@ impl AlphaBetaSearcher {
         let use_nnue_policy = self.nnue.is_some()
             && !win_priority
             && !single_forcing
-            && generated.candidates.len() > 1
+            && generated_candidates.len() > 1
             && (options.root || depth >= 2.0);
         let mut ordered = if use_nnue_policy {
-            let mut candidates = generated.candidates;
+            let mut candidates = generated_candidates;
             if let Some(pos) = (pre_searched_tt_move.is_none())
                 .then_some(tt_best_move)
                 .flatten()
@@ -1265,9 +1295,9 @@ impl AlphaBetaSearcher {
                 candidates
             }
         } else if options.root {
-            order_candidates_root_classic(board, &generated.candidates, side)
+            order_candidates_root_classic(board, &generated_candidates, side)
         } else if lazy_tie_ordering {
-            let mut candidates = generated.candidates;
+            let mut candidates = generated_candidates;
             if pre_searched_tt_move.is_none()
                 && !win_priority
                 && !single_forcing
@@ -1288,7 +1318,7 @@ impl AlphaBetaSearcher {
                 order_candidates_primary_owned(candidates, tt_best_move)
             }
         } else {
-            order_candidates_owned(board, generated.candidates, side, tt_best_move)
+            order_candidates_owned(board, generated_candidates, side, tt_best_move)
         };
         let mut tie_sorted_until = if use_nnue_policy || !lazy_tie_ordering {
             ordered.len()
