@@ -511,7 +511,9 @@ pub struct Mix9svqAccumulator {
     map_conv: Vec<[i16; FEAT_DWCONV_DIM]>,
     current_version: i32,
     group_index: [usize; BOARD_SIZE],
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     use_avx2: bool,
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     use_avxvnni: bool,
 }
 

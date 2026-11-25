@@ -44,13 +44,11 @@
     document_.getElementById("btn-newgame").disabled = busy || engineThinking;
     document_.getElementById("btn-start").disabled = busy || engineThinking;
     for (const button of document_.querySelectorAll(
-      "#opt-gamemode button, #opt-side button, #opt-rule button, #opt-clockmode button",
+      "#opt-gamemode button, #opt-side button, #opt-rule button, #opt-clockmode button, #opt-difficulty button, #opt-timelimit button",
     )) {
       button.disabled = busy || engineThinking;
     }
-    document_.getElementById("opt-difficulty").disabled =
-      busy || engineThinking;
-    for (const id of ["opt-timelimit", "more-difficulty", "more-timelimit", "opt-multithread"]) {
+    for (const id of ["more-difficulty", "more-timelimit", "opt-multithread"]) {
       const el = document_.getElementById(id);
       if (el) el.disabled = busy || engineThinking;
     }

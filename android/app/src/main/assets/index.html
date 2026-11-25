@@ -13,7 +13,7 @@
       <div id="meta">
         <span class="chip" id="meta-rule">—</span>
         <span class="chip" id="meta-side">—</span>
-        <span class="chip" id="meta-difficulty">中级</span>
+        <span class="chip" id="meta-difficulty">专业 1s</span>
         <span class="chip" id="meta-moves">第 0 手</span>
       </div>
     </header>
@@ -66,67 +66,31 @@
       <div class="option-row" data-engine-only>
         <label>模式</label>
         <div class="segmented compact" id="opt-clockmode">
-          <button data-value="untimed" aria-pressed="true">不限时</button>
-          <button data-value="timed" aria-pressed="false">限时</button>
+          <button data-value="untimed" aria-pressed="false">休闲</button>
+          <button data-value="timed" aria-pressed="true">专业 · NNUE</button>
         </div>
       </div>
-      <div class="option-row difficulty-row" id="newgame-difficulty-row" data-engine-only>
+      <div class="option-row" id="newgame-difficulty-row" data-engine-only hidden>
         <label>难度</label>
-        <button id="opt-difficulty" class="option-link" type="button" data-value="intermediate">
-          <span id="difficulty-summary">中级</span>
-          <span class="chevron" aria-hidden="true"></span>
-        </button>
+        <div class="segmented compact quad" id="opt-difficulty">
+          <button data-value="beginner" aria-pressed="false">入门</button>
+          <button data-value="normal" aria-pressed="true">普通</button>
+          <button data-value="senior" aria-pressed="false">高级</button>
+          <button data-value="master" aria-pressed="false">大师</button>
+        </div>
       </div>
-      <div class="option-row" id="newgame-timelimit-row" data-engine-only hidden>
-        <label for="opt-timelimit">限时</label>
-        <select id="opt-timelimit" class="option-select">
-          <option value="200">200 ms</option>
-          <option value="500" selected>500 ms</option>
-          <option value="1000">1000 ms (1s)</option>
-          <option value="2000">2000 ms (2s)</option>
-          <option value="5000">5000 ms (5s)</option>
-        </select>
+      <div class="option-row" id="newgame-timelimit-row" data-engine-only>
+        <label>限时</label>
+        <div class="segmented compact quad" id="opt-timelimit">
+          <button data-value="500" aria-pressed="false">0.5s</button>
+          <button data-value="1000" aria-pressed="true">1s</button>
+          <button data-value="2500" aria-pressed="false">2.5s</button>
+          <button data-value="5000" aria-pressed="false">5s</button>
+        </div>
       </div>
     </div>
     <div class="sheet-actions">
       <button class="primary" id="btn-start">开始</button>
-    </div>
-  </section>
-
-  <!-- Difficulty picker -->
-  <div id="difficulty-backdrop" aria-hidden="true"></div>
-  <section id="difficulty-dialog" role="dialog" aria-modal="true" aria-labelledby="difficulty-title" aria-hidden="true">
-    <div class="sheet-handle" aria-hidden="true"></div>
-    <div class="sheet-heading">
-      <h2 id="difficulty-title">选择难度</h2>
-      <button class="sheet-close" type="button" id="btn-difficulty-close" aria-label="关闭">×</button>
-    </div>
-    <div id="difficulty-options">
-      <button class="difficulty-option" type="button" data-value="beginner" aria-pressed="false">
-        <span class="strength-icon level-1" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-        <span class="difficulty-copy"><strong>入门</strong><small>d1 / w10 · 无战术搜索</small></span>
-        <span class="difficulty-check" aria-hidden="true">✓</span>
-      </button>
-      <button class="difficulty-option" type="button" data-value="junior" aria-pressed="false">
-        <span class="strength-icon level-2" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-        <span class="difficulty-copy"><strong>初级</strong><small>d2 / w10 · 无战术搜索</small></span>
-        <span class="difficulty-check" aria-hidden="true">✓</span>
-      </button>
-      <button class="difficulty-option" type="button" data-value="intermediate" aria-pressed="true">
-        <span class="strength-icon level-3" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-        <span class="difficulty-copy"><strong>中级</strong><small>d4 / w20 · 无战术搜索</small></span>
-        <span class="difficulty-check" aria-hidden="true">✓</span>
-      </button>
-      <button class="difficulty-option" type="button" data-value="senior" aria-pressed="false">
-        <span class="strength-icon level-4" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-        <span class="difficulty-copy"><strong>高级</strong><small>d6 / w30 · VCF / VCT</small></span>
-        <span class="difficulty-check" aria-hidden="true">✓</span>
-      </button>
-      <button class="difficulty-option" type="button" data-value="master" aria-pressed="false">
-        <span class="strength-icon level-5" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-        <span class="difficulty-copy"><strong>大师</strong><small>d8 / w40 · VCF / VCT</small></span>
-        <span class="difficulty-check" aria-hidden="true">✓</span>
-      </button>
     </div>
   </section>
 
@@ -142,24 +106,22 @@
       <span>落子音效</span>
       <button id="opt-sound" aria-pressed="true">开</button>
     </div>
-    <div class="toggle-row" id="more-difficulty-row">
-      <label for="more-difficulty">难度</label>
+    <div class="toggle-row" id="more-difficulty-row" hidden>
+      <label for="more-difficulty">休闲难度</label>
       <select id="more-difficulty" class="more-select">
-        <option value="beginner">入门 · d1</option>
-        <option value="junior">初级 · d2</option>
-        <option value="intermediate" selected>中级 · d4</option>
-        <option value="senior">高级 · d6</option>
-        <option value="master">大师 · d8</option>
+        <option value="beginner">入门 · d2</option>
+        <option value="normal" selected>普通 · d4</option>
+        <option value="senior">高级 · d6 + VCF</option>
+        <option value="master">大师 · d8 + VCF/VCT</option>
       </select>
     </div>
-    <div class="toggle-row" id="more-timelimit-row" hidden>
-      <label for="more-timelimit">每步限时</label>
+    <div class="toggle-row" id="more-timelimit-row">
+      <label for="more-timelimit">专业限时</label>
       <select id="more-timelimit" class="more-select">
-        <option value="200">200 ms</option>
-        <option value="500" selected>500 ms</option>
-        <option value="1000">1000 ms (1s)</option>
-        <option value="2000">2000 ms (2s)</option>
-        <option value="5000">5000 ms (5s)</option>
+        <option value="500">0.5 秒 (500 ms)</option>
+        <option value="1000" selected>1 秒 (1000 ms)</option>
+        <option value="2500">2.5 秒 (2500 ms)</option>
+        <option value="5000">5 秒 (5000 ms)</option>
       </select>
     </div>
     <label class="toggle-row" id="row-multithread" for="opt-multithread">
@@ -169,6 +131,7 @@
     <details class="advanced">
       <summary>高级 / 引擎信息</summary>
       <div class="kv" id="adv-kv">
+        <span class="k">评估</span><span class="v" data-adv="eval">—</span>
         <span class="k">分数</span><span class="v" data-adv="score">—</span>
         <span class="k">深度</span><span class="v" data-adv="depth">—</span>
         <span class="k">节点</span><span class="v" data-adv="nodes">—</span>

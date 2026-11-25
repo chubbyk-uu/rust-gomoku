@@ -81,6 +81,13 @@ fn load_cached_weight(path: &Path, rule: RuleSet) -> io::Result<Arc<Mix9svqWeigh
     }
 }
 
+/// Standard Rapfi `Mix9svq` weight filenames used for Freestyle and Renju.
+pub const MIX9SVQ_FILENAMES: &[&str] = &[
+    "mix9svqfreestyle_bsmix.bin.lz4",
+    "mix9svqrenju_bs15_black.bin.lz4",
+    "mix9svqrenju_bs15_white.bin.lz4",
+];
+
 /// Fast metadata check whether the expected `.bin.lz4` weight files for
 /// `(dir, rule)` exist on disk.
 pub fn mix9svq_files_exist_for_rule(dir: &Path, rule: RuleSet) -> bool {
@@ -91,6 +98,45 @@ pub fn mix9svq_files_exist_for_rule(dir: &Path, rule: RuleSet) -> bool {
                 && dir.join("mix9svqrenju_bs15_white.bin.lz4").exists()
         }
     }
+}
+
+/// Fast metadata check whether `dir` contains valid `Mix9svq` weight files for at
+/// least one supported ruleset (Freestyle or Renju).
+pub fn dir_has_any_mix9svq(dir: &Path) -> bool {
+    mix9svq_files_exist_for_rule(dir, RuleSet::Freestyle)
+        || mix9svq_files_exist_for_rule(dir, RuleSet::Renju)
+}
+
+/// Resolve the NNUE weight directory for interactive applications (desktop GUI).
+///
+/// Search order:
+/// 1. Explicit path (e.g. CLI `--nnue-dir`).
+/// 2. `RUST_GOMOKU_NNUE_DIR` environment variable.
+/// 3. `<exe_dir>/nnue`, `<exe_dir>`, `./nnue`, and repo dev path
+///    `opponent/rapfi-networks/mix9svq` (first existing directory containing
+///    valid `Mix9svq` files).
+pub fn resolve_default_nnue_dir(explicit: Option<&str>) -> Option<PathBuf> {
+    if let Some(dir) = explicit.filter(|s| !s.trim().is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    if let Ok(env_dir) = std::env::var("RUST_GOMOKU_NNUE_DIR") {
+        let trimmed = env_dir.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("nnue"));
+            candidates.push(exe_dir.to_path_buf());
+        }
+    }
+    candidates.push(PathBuf::from("nnue"));
+    candidates.push(PathBuf::from("opponent/rapfi-networks/mix9svq"));
+
+    candidates.into_iter().find(|dir| dir_has_any_mix9svq(dir))
 }
 
 /// Non-blocking check whether the `Mix9svq` weights for `(dir, rule)` are

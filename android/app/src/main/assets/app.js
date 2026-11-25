@@ -52,12 +52,17 @@ const turnDot = document.getElementById("turn-dot");
 const toastEl = document.getElementById("toast");
 const difficultyNames = {
   beginner: "入门",
-  junior: "初级",
-  intermediate: "中级",
+  normal: "普通",
   senior: "高级",
   master: "大师",
   custom: "自定义",
 };
+
+function formatTimeLimit(ms) {
+  if (ms % 1000 === 0) return `${ms / 1000}s`;
+  if (ms % 100 === 0) return `${(ms / 1000).toFixed(1)}s`;
+  return `${ms}ms`;
+}
 
 let lastState = null;     // latest controller snapshot
 let ghost = null;         // pending stone awaiting same-point confirmation: {x,y}
@@ -307,12 +312,12 @@ function render(state) {
   const sideChip = document.getElementById("meta-side");
   sideChip.textContent = twoPlayer ? "双人对弈" : (state.human_side === WHITE ? "你执白" : "你执黑");
   const isTimed = state.params.clock_mode === "timed";
-  const timeLimitMs = state.params.time_limit_ms || 500;
+  const timeLimitMs = state.params.time_limit_ms || 1000;
   const difficultyChip = document.getElementById("meta-difficulty");
   difficultyChip.hidden = twoPlayer;
   difficultyChip.textContent = isTimed
-    ? (timeLimitMs >= 1000 ? `${timeLimitMs / 1000}s` : `${timeLimitMs}ms`)
-    : (difficultyNames[state.params.difficulty] || state.params.difficulty);
+    ? `专业 ${formatTimeLimit(timeLimitMs)}`
+    : `休闲·${difficultyNames[state.params.difficulty] || state.params.difficulty}`;
   document.getElementById("meta-moves").textContent = "第 " + state.move_count + " 手";
   setSegmentValue("opt-gamemode", state.params.mode);
   setSegmentValue("opt-clockmode", isTimed ? "timed" : "untimed");
@@ -320,10 +325,9 @@ function render(state) {
   setSegmentValue("opt-side", state.human_side === WHITE ? "white" : "black");
   setSegmentValue("opt-rule", state.params.rule);
   if (state.params.difficulty !== "custom") {
-    setDifficultyValue(state.params.difficulty);
+    setSegmentValue("opt-difficulty", state.params.difficulty);
   }
-  const optTimeLimit = document.getElementById("opt-timelimit");
-  if (optTimeLimit) optTimeLimit.value = String(timeLimitMs);
+  setSegmentValue("opt-timelimit", String(timeLimitMs));
   const moreDiffRow = document.getElementById("more-difficulty-row");
   const moreDiff = document.getElementById("more-difficulty");
   if (moreDiffRow && moreDiff) {
@@ -359,8 +363,10 @@ function fillAdvanced(res, params) {
     if (el) el.textContent = val;
   };
   const isTimed = params.clock_mode === "timed";
-  set("clock", isTimed ? `限时（上限 ${params.time_limit_ms || 500} ms）` : "不限时");
-  set("difficulty", isTimed ? "不限深度" : (difficultyNames[params.difficulty] || params.difficulty || "—"));
+  const limitLabel = formatTimeLimit(params.time_limit_ms || 1000);
+  set("eval", isTimed ? (params.use_nnue ? "NNUE (Mix9svq)" : "经典评估（未找到权重）") : "经典评估");
+  set("clock", isTimed ? `专业（每步 ${limitLabel}）` : "休闲（固定深度）");
+  set("difficulty", isTimed ? "自动深度" : (difficultyNames[params.difficulty] || params.difficulty || "—"));
   set("threads", params.threads != null ? params.threads + " 线程" : "—");
   if (!res) { set("score", "—"); set("depth", "—"); set("nodes", "—"); set("ms", "—"); return; }
   set("score", res.score);
@@ -509,25 +515,6 @@ function syncNewGameMode() {
   if (timeRow) timeRow.hidden = twoPlayer || !timed;
 }
 
-function setDifficultyOpen(open) {
-  const dialog = document.getElementById("difficulty-dialog");
-  const backdrop = document.getElementById("difficulty-backdrop");
-  dialog.classList.toggle("open", open);
-  dialog.setAttribute("aria-hidden", String(!open));
-  backdrop.classList.toggle("open", open);
-  backdrop.setAttribute("aria-hidden", String(!open));
-}
-
-function setDifficultyValue(value) {
-  const trigger = document.getElementById("opt-difficulty");
-  trigger.dataset.value = value;
-  document.getElementById("difficulty-summary").textContent =
-    difficultyNames[value] || value;
-  for (const button of document.querySelectorAll(".difficulty-option")) {
-    button.setAttribute("aria-pressed", String(button.dataset.value === value));
-  }
-}
-
 /* ===================================================================== *
  * Wiring.
  * ===================================================================== */
@@ -572,23 +559,8 @@ function bindEvents() {
   document.getElementById("opt-clockmode").addEventListener("click", (e) => {
     if (e.target.closest("button")) syncNewGameMode();
   });
-  document.getElementById("opt-difficulty").addEventListener("click", () => {
-    if (!busy && !(lastState && lastState.engine_thinking)) {
-      setDifficultyOpen(true);
-    }
-  });
-  document.getElementById("btn-difficulty-close").addEventListener("click", () => {
-    setDifficultyOpen(false);
-  });
-  document.getElementById("difficulty-backdrop").addEventListener("click", () => {
-    setDifficultyOpen(false);
-  });
-  document.getElementById("difficulty-options").addEventListener("click", (event) => {
-    const button = event.target.closest(".difficulty-option");
-    if (!button) return;
-    setDifficultyValue(button.dataset.value);
-    setDifficultyOpen(false);
-  });
+  bindSegmented("opt-difficulty");
+  bindSegmented("opt-timelimit");
 
   document.getElementById("btn-start").addEventListener("click", () => {
     if (busy || (lastState && lastState.engine_thinking)) {
@@ -599,8 +571,8 @@ function bindEvents() {
     const human_side = segValue("opt-side");
     const rule = segValue("opt-rule");
     const clock_mode = segValue("opt-clockmode");
-    const difficulty = document.getElementById("opt-difficulty").dataset.value;
-    const time_limit_ms = Number(document.getElementById("opt-timelimit").value) || 500;
+    const difficulty = segValue("opt-difficulty");
+    const time_limit_ms = Number(segValue("opt-timelimit")) || 1000;
     closeSheet("newgame");
     guarded(async () => {
       ghost = null;

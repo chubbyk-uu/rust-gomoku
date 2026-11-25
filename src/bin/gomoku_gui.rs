@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use rust_gomoku::{
-    default_interactive_threads, load_default_config, EngineSearchCompletion, GameController,
-    GameMode, RuleSet, SearchClockMode, SearchDifficulty, Side, BLACK, MAX_SEARCH_THREADS, WHITE,
+    default_interactive_threads, load_default_config, nnue::resolve_default_nnue_dir,
+    EngineSearchCompletion, GameController, GameMode, RuleSet, SearchClockMode, SearchDifficulty,
+    Side, BLACK, MAX_SEARCH_THREADS, WHITE,
 };
 
 const DEFAULT_ADDR: &str = "127.0.0.1:18080";
@@ -39,6 +40,21 @@ fn main() {
     // VCT/AB overlap forks a full TT snapshot and competes with ABDADA workers;
     // keep it enabled only for single-threaded desktop play.
     config.runtime.overlap_vct_alphabeta = config.runtime.threads == 1;
+    if !args.no_nnue {
+        if let Some(nnue_dir) = resolve_default_nnue_dir(args.nnue_dir.as_deref()) {
+            let dir_str = nnue_dir.to_string_lossy().into_owned();
+            eprintln!("gomoku gui NNUE weights dir: {dir_str}");
+            config.runtime.nnue_dir = Some(dir_str);
+            config.runtime.use_nnue = true;
+        } else {
+            eprintln!("gomoku gui NNUE weights not found; Pro mode will use classical fallback.");
+        }
+    }
+    let initial_clock = if args.depth.is_some() {
+        SearchClockMode::Untimed
+    } else {
+        SearchClockMode::Timed
+    };
     if let Some(depth) = args.depth {
         config.root_search.depth = depth;
     }
@@ -46,7 +62,10 @@ fn main() {
         config.root_search.wide = width;
         config.root_search.timed_max_wide = width;
     }
-    let state = Arc::new(Mutex::new(GameController::new(config)));
+    let state = Arc::new(Mutex::new(GameController::new_with_clock(
+        config,
+        initial_clock,
+    )));
     let browser_activity = Arc::new(Mutex::new(BrowserActivity::default()));
     start_browser_watchdog(Arc::clone(&browser_activity));
     let addr = args.addr;
@@ -126,6 +145,8 @@ struct GuiArgs {
     depth: Option<i32>,
     width: Option<i32>,
     threads: Option<usize>,
+    nnue_dir: Option<String>,
+    no_nnue: bool,
     open_browser: bool,
 }
 
@@ -135,6 +156,8 @@ fn parse_args() -> GuiArgs {
         depth: None,
         width: None,
         threads: None,
+        nnue_dir: None,
+        no_nnue: false,
         open_browser: true,
     };
     let mut args = std::env::args().skip(1);
@@ -159,6 +182,14 @@ fn parse_args() -> GuiArgs {
                 if let Some(value) = args.next().and_then(|value| value.parse::<usize>().ok()) {
                     result.threads = Some(value.clamp(1, MAX_SEARCH_THREADS));
                 }
+            }
+            "--nnue-dir" => {
+                if let Some(value) = args.next() {
+                    result.nnue_dir = Some(value);
+                }
+            }
+            "--no-nnue" => {
+                result.no_nnue = true;
             }
             "--no-open-browser" => {
                 result.open_browser = false;
@@ -341,7 +372,7 @@ fn handle_client(
             };
             let clock_mode = query_param(query, "clock")
                 .and_then(|value| value.parse::<SearchClockMode>().ok())
-                .unwrap_or(SearchClockMode::Untimed);
+                .unwrap_or_default();
             {
                 let mut game = state.lock().expect("state lock");
                 game.new_game_with_clock(side, rule, mode, clock_mode);
@@ -380,9 +411,7 @@ fn handle_client(
                 if let Some(difficulty) = difficulty {
                     game.set_difficulty(difficulty);
                 } else {
-                    game.set_error(
-                        "未知难度，请选择 beginner、junior、intermediate、senior 或 master。",
-                    );
+                    game.set_error("未知难度，请选择 beginner、normal、senior 或 master。");
                 }
             }
             json_response(&state.lock().expect("state lock").snapshot())
@@ -542,9 +571,17 @@ mod tests {
     fn desktop_gui_contains_difficulty_controls_and_result_dialog() {
         for marker in [
             "difficulty-select",
-            "入门 · d1 / w10 · 无战术搜索",
-            "中级 · d4 / w20 · 无战术搜索",
-            "大师 · d8 / w40 · VCF/VCT",
+            "入门 · d2 / w10 · 经典",
+            "普通 · d4 / w20 · 经典",
+            "高级 · d6 / w30 · 经典 + VCF",
+            "大师 · d8 / w40 · 经典 + VCF/VCT",
+            "time-limit-select",
+            "0.5 秒 (500 ms)",
+            "1 秒 (1000 ms)",
+            "2.5 秒 (2500 ms)",
+            "5 秒 (5000 ms)",
+            "selectClock('untimed')",
+            "selectClock('timed')",
             "result-backdrop",
             "你赢了",
             "引擎获胜",
@@ -851,30 +888,28 @@ const INDEX_HTML: &str = r#"<!doctype html>
             </div>
           </div>
           <div class="setting-row" id="row-clock-mode">
-            <span class="setting-label">思考模式</span>
+            <span class="setting-label">模式</span>
             <div class="rule-switch">
-              <button id="clock-untimed" class="secondary" onclick="selectClock('untimed')">不限时</button>
-              <button id="clock-timed" class="secondary" onclick="selectClock('timed')">限时</button>
+              <button id="clock-untimed" class="secondary" onclick="selectClock('untimed')">休闲</button>
+              <button id="clock-timed" class="secondary" onclick="selectClock('timed')">专业 · NNUE</button>
             </div>
           </div>
-          <label class="setting-row" id="row-difficulty" for="difficulty-select">
-            <span class="setting-label">难度</span>
+          <label class="setting-row" id="row-difficulty" for="difficulty-select" hidden>
+            <span class="setting-label">休闲难度</span>
             <select id="difficulty-select" onchange="setDifficulty(this.value)">
-              <option value="beginner">入门 · d1 / w10 · 无战术搜索</option>
-              <option value="junior">初级 · d2 / w10 · 无战术搜索</option>
-              <option value="intermediate" selected>中级 · d4 / w20 · 无战术搜索</option>
-              <option value="senior">高级 · d6 / w30 · VCF/VCT</option>
-              <option value="master">大师 · d8 / w40 · VCF/VCT</option>
+              <option value="beginner">入门 · d2 / w10 · 经典</option>
+              <option value="normal" selected>普通 · d4 / w20 · 经典</option>
+              <option value="senior">高级 · d6 / w30 · 经典 + VCF</option>
+              <option value="master">大师 · d8 / w40 · 经典 + VCF/VCT</option>
             </select>
           </label>
-          <label class="setting-row" id="row-time-limit" for="time-limit-select" hidden>
-            <span class="setting-label">每步限时</span>
+          <label class="setting-row" id="row-time-limit" for="time-limit-select">
+            <span class="setting-label">专业限时</span>
             <select id="time-limit-select" onchange="setTimeLimit(this.value)">
-              <option value="200">200 ms</option>
-              <option value="500" selected>500 ms</option>
-              <option value="1000">1000 ms (1s)</option>
-              <option value="2000">2000 ms (2s)</option>
-              <option value="5000">5000 ms (5s)</option>
+              <option value="500">0.5 秒 (500 ms)</option>
+              <option value="1000" selected>1 秒 (1000 ms)</option>
+              <option value="2500">2.5 秒 (2500 ms)</option>
+              <option value="5000">5 秒 (5000 ms)</option>
             </select>
           </label>
           <label class="setting-row" id="row-multithread" for="multithread-toggle">
@@ -900,7 +935,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="actions">
           <button id="undo-btn" class="warn" onclick="undo()">悔棋</button>
         </div>
-        <div class="hint">棋盘会自动刷新；规则与「不限时/限时」仅在新局生效。对局中途可在引擎空闲时调整当前模式的难度或每步限时（下一次引擎思考生效，限时仅限 AI）。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
+        <div class="hint">棋盘会自动刷新；规则与「休闲 / 专业」模式仅在新局生效。对局中途可在引擎空闲时调整当前模式的休闲难度或专业限时（下一次引擎思考生效，限时仅限 AI）。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
       </div>
       <div class="kv" id="info"></div>
     </aside>
@@ -921,7 +956,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let state = null;
     let selectedRule = 'freestyle';
     let selectedMode = 'vs_engine';
-    let selectedClock = 'untimed';
+    let selectedClock = 'timed';
     let syncedInitialSelection = false;
     let announcedResult = null;
     let soundOn = true;
@@ -1054,7 +1089,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         p.rule === 'renju' ? '有禁手' : '无禁手',
       ];
       if (p.mode !== 'two_player') {
-        curParts.push(p.clock_mode === 'timed' ? '限时' : '不限时');
+        curParts.push(p.clock_mode === 'timed' ? '专业' : '休闲');
       }
       notice.textContent = `当前对局仍为「${curParts.join(' / ')}」，点击下方开局按钮后才会切换为新设置。`;
       notice.hidden = false;
@@ -1311,21 +1346,27 @@ const INDEX_HTML: &str = r#"<!doctype html>
         renderResult();
         return;
       }
+      const diffLabel = {
+        beginner: '入门',
+        normal: '普通',
+        senior: '高级',
+        master: '大师',
+        custom: '自定义',
+      }[p.difficulty] || p.difficulty;
+      const limitLabel = p.time_limit_ms % 1000 === 0
+        ? `${p.time_limit_ms / 1000}s`
+        : `${p.time_limit_ms / 1000}s`;
+      const evalLabel = p.clock_mode === 'timed'
+        ? (p.use_nnue ? 'NNUE (Mix9svq)' : '经典评估（未找到 NNUE 权重）')
+        : '经典评估（休闲）';
       const rows = [
         ['你执', sideName(state.human_side)],
         ['轮到', sideName(state.side_to_move)],
         ['胜者', sideName(state.winner)],
         ['手数', state.move_count],
         ['规则', p.rule === 'renju' ? '有禁手' : '无禁手'],
-        ['思考模式', p.clock_mode === 'timed' ? `限时（AI 每步上限 ${p.time_limit_ms} ms）` : '不限时'],
-        ['难度', p.clock_mode === 'timed' ? '不限深度' : ({
-          beginner: '入门',
-          junior: '初级',
-          intermediate: '中级',
-          senior: '高级',
-          master: '大师',
-          custom: '自定义',
-        }[p.difficulty] || p.difficulty)],
+        ['模式', p.clock_mode === 'timed' ? `专业（每步 ${limitLabel}）` : `休闲（${diffLabel}）`],
+        ['评估', evalLabel],
         ['搜索参数', p.clock_mode === 'timed' ? `限时 ${p.time_limit_ms}ms / w${p.width} / ${p.threads}T` : `d${p.depth} / w${p.width} / ${p.threads}T`],
         ['VCF/VCT', `${p.compute_vcf ? 'VCF' + p.root_vcf_depth : 'VCF off'} / ${p.compute_vct ? 'VCT' + p.root_vct_depth : 'VCT off'}`],
         ['Overlap VCT/AB', yesNo(p.overlap_vct_alphabeta)],

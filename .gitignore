@@ -1,6 +1,7 @@
 /target/
 /dist/
 /android/.gradle/
+/android/.kotlin/
 /android/**/build/
 /android/rust_bridge/target/
 /android/local.properties

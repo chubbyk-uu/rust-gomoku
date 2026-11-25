@@ -32,8 +32,8 @@ android {
         applicationId = "io.github.chubbykuu.rustgomoku"
         minSdk = 26
         targetSdk = 36
-        versionCode = 16
-        versionName = "0.1.16"
+        versionCode = 17
+        versionName = "0.1.17"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -65,9 +65,49 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    androidResources {
+        // Mix9svq weights are already LZ4-compressed; store uncompressed in APK
+        // for faster asset extraction and AssetFileDescriptor length checks.
+        noCompress += "lz4"
+    }
+
     sourceSets {
         named("main") {
             jniLibs.directories.add("build/generated/rustJniLibs")
+            assets.directories.add("build/generated/nnueAssets")
+        }
+    }
+}
+
+val stageNnueAssets by tasks.registering(Sync::class) {
+    val repositoryRoot = rootProject.projectDir.parentFile
+    val nnueSourceDir = file(
+        System.getenv("RUST_GOMOKU_NNUE_DIR")
+            ?: repositoryRoot.resolve("opponent/rapfi-networks/mix9svq").absolutePath
+    )
+    val outputDirectory = layout.buildDirectory.dir("generated/nnueAssets/nnue")
+
+    from(nnueSourceDir) {
+        include(
+            "mix9svqfreestyle_bsmix.bin.lz4",
+            "mix9svqrenju_bs15_black.bin.lz4",
+            "mix9svqrenju_bs15_white.bin.lz4",
+        )
+    }
+    into(outputDirectory)
+    doLast {
+        val stagedDir = outputDirectory.get().asFile
+        val expected = listOf(
+            "mix9svqfreestyle_bsmix.bin.lz4",
+            "mix9svqrenju_bs15_black.bin.lz4",
+            "mix9svqrenju_bs15_white.bin.lz4",
+        )
+        val missing = expected.filter { !stagedDir.resolve(it).isFile }
+        if (missing.isNotEmpty()) {
+            logger.warn(
+                "NNUE weight files missing from ${nnueSourceDir.absolutePath}: $missing. " +
+                    "APK will fall back to classical evaluation unless weights are provided."
+            )
         }
     }
 }
@@ -103,7 +143,7 @@ val buildRustArm64 by tasks.registering(Exec::class) {
 }
 
 tasks.named("preBuild").configure {
-    dependsOn(buildRustArm64)
+    dependsOn(buildRustArm64, stageNnueAssets)
 }
 
 val verifyReleaseSigning by tasks.registering {

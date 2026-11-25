@@ -20,7 +20,8 @@ pub mod zobrist;
 pub use app::{
     EngineSearchCompletion, EngineSearchTask, ForbiddenPointSnapshot, GameController, GameMode,
     GameMoveSnapshot, GameParamsSnapshot, GameStateSnapshot, SearchClockMode, SearchDifficulty,
-    SearchResultSnapshot, SearchTraceSnapshot, DEFAULT_TIME_LIMIT_MS, SUPPORTED_TIME_LIMITS_MS,
+    SearchResultSnapshot, SearchTraceSnapshot, DEFAULT_INTERACTIVE_TT_BITS, DEFAULT_TIME_LIMIT_MS,
+    SUPPORTED_TIME_LIMITS_MS,
 };
 pub use board::{move_to_rc, move_to_xy, rc_to_move, xy_to_move, Board, BoardError};
 pub use config::{

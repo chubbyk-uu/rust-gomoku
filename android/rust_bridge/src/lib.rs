@@ -90,10 +90,18 @@ impl BridgeError {
 
 impl BridgeRegistry {
     fn create(&self) -> Result<i64, BridgeError> {
+        self.create_with_nnue_dir(None)
+    }
+
+    fn create_with_nnue_dir(&self, nnue_dir: Option<String>) -> Result<i64, BridgeError> {
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed) + 1;
         let mut config = load_default_config();
         SearchDifficulty::default().apply_to_config(&mut config);
         config.runtime.threads = default_interactive_threads();
+        if let Some(dir) = nnue_dir.filter(|s| !s.trim().is_empty()) {
+            config.runtime.nnue_dir = Some(dir);
+            config.runtime.use_nnue = true;
+        }
         let controller = Arc::new(Mutex::new(GameController::new(config)));
         self.controllers
             .lock()
@@ -227,7 +235,7 @@ fn dispatch_request(
         BridgeRequest::SetTimeLimit { time_limit_ms } => {
             if !SUPPORTED_TIME_LIMITS_MS.contains(&time_limit_ms) {
                 return Err(BridgeError::invalid_request(
-                    "time_limit_ms must be 200, 500, 1000, 2000, or 5000.",
+                    "time_limit_ms must be 500, 1000, 2500, or 5000.",
                 ));
             }
             controller
@@ -310,8 +318,8 @@ fn parse_mode(value: Option<&str>) -> Result<GameMode, BridgeError> {
 
 fn parse_clock_mode(value: Option<&str>) -> Result<SearchClockMode, BridgeError> {
     match value {
-        None | Some("untimed") => Ok(SearchClockMode::Untimed),
-        Some("timed") => Ok(SearchClockMode::Timed),
+        None | Some("timed") | Some("pro") => Ok(SearchClockMode::Timed),
+        Some("untimed") | Some("casual") | Some("fixed") => Ok(SearchClockMode::Untimed),
         Some(_) => Err(BridgeError::invalid_request(
             "clock_mode must be \"untimed\" or \"timed\".",
         )),
@@ -327,7 +335,7 @@ fn parse_rule(value: &str) -> Result<RuleSet, BridgeError> {
 fn parse_difficulty(value: &str) -> Result<SearchDifficulty, BridgeError> {
     value.parse().map_err(|_| {
         BridgeError::invalid_request(
-            "difficulty must be \"beginner\", \"junior\", \"intermediate\", \"senior\", or \"master\".",
+            "difficulty must be \"beginner\", \"normal\", \"senior\", or \"master\".",
         )
     })
 }
@@ -361,6 +369,25 @@ pub extern "system" fn Java_io_github_chubbykuu_rustgomoku_NativeBridge_nativeCr
     _class: JClass,
 ) -> jlong {
     catch_unwind(AssertUnwindSafe(|| registry().create().unwrap_or(0))).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_chubbykuu_rustgomoku_NativeBridge_nativeCreateWithNnueDir(
+    mut env: JNIEnv,
+    _class: JClass,
+    nnue_dir: JString,
+) -> jlong {
+    catch_unwind(AssertUnwindSafe(|| {
+        let dir = if nnue_dir.is_null() {
+            None
+        } else {
+            env.get_string(&nnue_dir)
+                .ok()
+                .map(|s| s.to_string_lossy().into_owned())
+        };
+        registry().create_with_nnue_dir(dir).unwrap_or(0)
+    }))
+    .unwrap_or(0)
 }
 
 #[no_mangle]
@@ -420,19 +447,24 @@ mod tests {
         let initial = response(&registry, handle, r#"{"op":"state"}"#);
         assert_eq!(initial["ok"], true);
         assert_eq!(initial["state"]["move_count"], 0);
-        assert_eq!(initial["state"]["params"]["difficulty"], "intermediate");
-        assert_eq!(initial["state"]["params"]["depth"], 4);
-        assert_eq!(initial["state"]["params"]["width"], 20);
-        assert_eq!(initial["state"]["params"]["compute_vcf"], false);
-        assert_eq!(initial["state"]["params"]["compute_vct"], false);
+        assert_eq!(initial["state"]["params"]["clock_mode"], "timed");
+        assert_eq!(initial["state"]["params"]["time_limit_ms"], 1000);
+        assert_eq!(initial["state"]["params"]["difficulty"], "normal");
+        assert_eq!(initial["state"]["params"]["use_nnue"], false);
 
-        let new_game = response(
+        let casual = response(
             &registry,
             handle,
-            r#"{"op":"new_game","human_side":"black","rule":"renju"}"#,
+            r#"{"op":"new_game","human_side":"black","rule":"renju","clock_mode":"untimed"}"#,
         );
-        assert_eq!(new_game["state"]["params"]["rule"], "renju");
-        assert_eq!(new_game["state"]["human_side"], BLACK);
+        assert_eq!(casual["state"]["params"]["rule"], "renju");
+        assert_eq!(casual["state"]["params"]["clock_mode"], "untimed");
+        assert_eq!(casual["state"]["params"]["difficulty"], "normal");
+        assert_eq!(casual["state"]["params"]["depth"], 4);
+        assert_eq!(casual["state"]["params"]["width"], 20);
+        assert_eq!(casual["state"]["params"]["compute_vcf"], false);
+        assert_eq!(casual["state"]["params"]["compute_vct"], false);
+        assert_eq!(casual["state"]["human_side"], BLACK);
 
         let played = response(&registry, handle, r#"{"op":"play","x":7,"y":7}"#);
         assert_eq!(played["state"]["move_count"], 1);
@@ -441,17 +473,28 @@ mod tests {
         let undone = response(&registry, handle, r#"{"op":"undo"}"#);
         assert_eq!(undone["state"]["move_count"], 0);
 
-        let difficulty = response(
+        let senior = response(
             &registry,
             handle,
             r#"{"op":"set_difficulty","difficulty":"senior"}"#,
         );
-        assert_eq!(difficulty["state"]["params"]["difficulty"], "senior");
-        assert_eq!(difficulty["state"]["params"]["depth"], 6);
-        assert_eq!(difficulty["state"]["params"]["width"], 30);
-        assert_eq!(difficulty["state"]["params"]["compute_vcf"], true);
-        assert_eq!(difficulty["state"]["params"]["compute_vct"], true);
-        assert_eq!(difficulty["state"]["params"]["root_vct_depth"], 6);
+        assert_eq!(senior["state"]["params"]["difficulty"], "senior");
+        assert_eq!(senior["state"]["params"]["depth"], 6);
+        assert_eq!(senior["state"]["params"]["width"], 30);
+        assert_eq!(senior["state"]["params"]["compute_vcf"], true);
+        assert_eq!(senior["state"]["params"]["compute_vct"], false);
+
+        let master = response(
+            &registry,
+            handle,
+            r#"{"op":"set_difficulty","difficulty":"master"}"#,
+        );
+        assert_eq!(master["state"]["params"]["difficulty"], "master");
+        assert_eq!(master["state"]["params"]["depth"], 8);
+        assert_eq!(master["state"]["params"]["width"], 40);
+        assert_eq!(master["state"]["params"]["compute_vcf"], true);
+        assert_eq!(master["state"]["params"]["compute_vct"], true);
+        assert_eq!(master["state"]["params"]["root_vct_depth"], 6);
 
         let threads = response(&registry, handle, r#"{"op":"set_threads","threads":1}"#);
         assert_eq!(threads["ok"], true);
@@ -483,15 +526,15 @@ mod tests {
         );
         assert_eq!(timed["ok"], true);
         assert_eq!(timed["state"]["params"]["clock_mode"], "timed");
-        assert_eq!(timed["state"]["params"]["time_limit_ms"], 500);
+        assert_eq!(timed["state"]["params"]["time_limit_ms"], 1000);
 
         let time_updated = response(
             &registry,
             handle,
-            r#"{"op":"set_time_limit","time_limit_ms":2000}"#,
+            r#"{"op":"set_time_limit","time_limit_ms":2500}"#,
         );
         assert_eq!(time_updated["ok"], true);
-        assert_eq!(time_updated["state"]["params"]["time_limit_ms"], 2000);
+        assert_eq!(time_updated["state"]["params"]["time_limit_ms"], 2500);
     }
 
     #[test]
@@ -610,7 +653,7 @@ mod tests {
         response(
             &registry,
             handle,
-            r#"{"op":"new_game","human_side":"white","rule":"renju"}"#,
+            r#"{"op":"new_game","human_side":"white","rule":"renju","clock_mode":"untimed"}"#,
         );
 
         let moved = response(&registry, handle, r#"{"op":"engine_move"}"#);
@@ -618,5 +661,35 @@ mod tests {
         assert_eq!(moved["state"]["move_count"], 1);
         assert_eq!(moved["state"]["moves"][0]["x"], BOARD_SIZE / 2);
         assert_eq!(moved["state"]["moves"][0]["y"], BOARD_SIZE / 2);
+    }
+
+    #[test]
+    fn create_with_nnue_dir_enables_nnue_in_pro_mode_only() {
+        let dir = std::path::Path::new("../../opponent/rapfi-networks/mix9svq");
+        if !rust_gomoku::nnue::mix9svq_files_exist_for_rule(dir, RuleSet::Renju) {
+            return;
+        }
+        let registry = BridgeRegistry::default();
+        let handle = registry
+            .create_with_nnue_dir(Some(dir.to_string_lossy().into_owned()))
+            .unwrap();
+
+        let pro = response(
+            &registry,
+            handle,
+            r#"{"op":"new_game","human_side":"black","rule":"renju","clock_mode":"timed"}"#,
+        );
+        assert_eq!(pro["ok"], true);
+        assert_eq!(pro["state"]["params"]["nnue_available"], true);
+        assert_eq!(pro["state"]["params"]["use_nnue"], true);
+
+        let casual = response(
+            &registry,
+            handle,
+            r#"{"op":"new_game","human_side":"black","rule":"renju","clock_mode":"untimed"}"#,
+        );
+        assert_eq!(casual["ok"], true);
+        assert_eq!(casual["state"]["params"]["nnue_available"], true);
+        assert_eq!(casual["state"]["params"]["use_nnue"], false);
     }
 }

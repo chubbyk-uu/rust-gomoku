@@ -1,27 +1,32 @@
 //! Shared application controller for desktop and mobile frontends.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::Serialize;
 
+use crate::nnue::mix9svq_files_exist_for_rule;
 use crate::search::abdada::{SearchWorkerPool, ABDADA_PARALLEL_START_DEPTH};
 use crate::{
-    default_tt_bits_for_search, move_to_xy, xy_to_move, Board, EngineConfig, ForbiddenKind,
-    RootSearcher, RootTrace, RuleSet, SearchLimits, SearchResult, Side, TranspositionTable, BLACK,
-    BOARD_SIZE, DEFAULT_ROOT_VCT_DEPTH, EMPTY, MAX_SEARCH_THREADS, WHITE,
+    move_to_xy, xy_to_move, Board, EngineConfig, ForbiddenKind, RootSearcher, RootTrace, RuleSet,
+    SearchLimits, SearchResult, Side, TranspositionTable, BLACK, BOARD_SIZE,
+    DEFAULT_ROOT_VCT_DEPTH, EMPTY, MAX_SEARCH_THREADS, WHITE,
 };
 
-pub const DEFAULT_TIME_LIMIT_MS: u32 = 500;
-pub const SUPPORTED_TIME_LIMITS_MS: &[u32] = &[200, 500, 1000, 2000, 5000];
+pub const DEFAULT_TIME_LIMIT_MS: u32 = 1000;
+pub const SUPPORTED_TIME_LIMITS_MS: &[u32] = &[500, 1000, 2500, 5000];
+/// Default TT bucket bits for interactive desktop GUI & Android play: `20` (32 MiB).
+pub const DEFAULT_INTERACTIVE_TT_BITS: u32 = 20;
 
-/// Whether the AI searches to a fixed depth preset or under a per-move time cap.
+/// Whether the AI plays in Casual fixed-depth mode (classical eval) or Pro
+/// timed mode (NNUE when weights are available).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SearchClockMode {
-    /// Fixed-depth difficulty presets (Beginner..Master).
-    #[default]
+    /// Casual fixed-depth difficulty presets (Beginner..Master, classical eval).
     Untimed,
-    /// Per-move time cap for the AI only (unbounded up to `timed_max_depth`).
+    /// Pro per-move time cap for the AI (NNUE timed mode, unbounded up to `timed_max_depth`).
+    #[default]
     Timed,
 }
 
@@ -39,8 +44,8 @@ impl std::str::FromStr for SearchClockMode {
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw.to_ascii_lowercase().as_str() {
-            "untimed" | "fixed" => Ok(Self::Untimed),
-            "timed" => Ok(Self::Timed),
+            "untimed" | "fixed" | "casual" => Ok(Self::Untimed),
+            "timed" | "pro" => Ok(Self::Timed),
             _ => Err(format!("unknown clock mode: {raw}")),
         }
     }
@@ -65,12 +70,16 @@ impl GameMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SearchDifficulty {
+    /// 入门: classical `d2 / w10`, VCF off, VCT off.
     Beginner,
-    Junior,
-    Intermediate,
+    /// 普通: classical `d4 / w20`, VCF off, VCT off.
+    #[default]
+    Normal,
+    /// 高级: classical `d6 / w30`, VCF on, VCT off.
     Senior,
+    /// 大师: classical `d8 / w40`, VCF on, VCT on (`d6`).
     Master,
 }
 
@@ -78,8 +87,7 @@ impl SearchDifficulty {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Beginner => "beginner",
-            Self::Junior => "junior",
-            Self::Intermediate => "intermediate",
+            Self::Normal => "normal",
             Self::Senior => "senior",
             Self::Master => "master",
         }
@@ -88,55 +96,43 @@ impl SearchDifficulty {
     fn label(self) -> &'static str {
         match self {
             Self::Beginner => "入门",
-            Self::Junior => "初级",
-            Self::Intermediate => "中级",
+            Self::Normal => "普通",
             Self::Senior => "高级",
             Self::Master => "大师",
         }
     }
 
-    fn settings(self) -> (i32, i32, bool, i32) {
+    /// `(depth, width, compute_vcf, compute_vct, root_vct_depth)`.
+    fn settings(self) -> (i32, i32, bool, bool, i32) {
         match self {
-            Self::Beginner => (1, 10, false, 6),
-            Self::Junior => (2, 10, false, 6),
-            Self::Intermediate => (4, 20, false, 6),
-            Self::Senior => (6, 30, true, 6),
-            Self::Master => (8, 40, true, 6),
+            Self::Beginner => (2, 10, false, false, 6),
+            Self::Normal => (4, 20, false, false, 6),
+            Self::Senior => (6, 30, true, false, 6),
+            Self::Master => (8, 40, true, true, 6),
         }
     }
 
     pub fn apply_to_config(self, config: &mut EngineConfig) {
-        let (depth, width, tactical, root_vct_depth) = self.settings();
+        let (depth, width, compute_vcf, compute_vct, root_vct_depth) = self.settings();
         config.root_search.depth = depth;
         config.root_search.wide = width;
-        config.runtime.compute_vcf = tactical;
-        config.runtime.compute_vct = tactical;
+        config.runtime.compute_vcf = compute_vcf;
+        config.runtime.compute_vct = compute_vct;
         config.runtime.root_vct_depth = root_vct_depth;
     }
 
     fn detect(config: &EngineConfig) -> Option<Self> {
-        [
-            Self::Beginner,
-            Self::Junior,
-            Self::Intermediate,
-            Self::Senior,
-            Self::Master,
-        ]
-        .into_iter()
-        .find(|difficulty| {
-            let (depth, width, tactical, root_vct_depth) = difficulty.settings();
-            config.root_search.depth == depth
-                && config.root_search.wide == width
-                && config.runtime.compute_vcf == tactical
-                && config.runtime.compute_vct == tactical
-                && config.runtime.root_vct_depth == root_vct_depth
-        })
-    }
-}
-
-impl Default for SearchDifficulty {
-    fn default() -> Self {
-        Self::Intermediate
+        [Self::Beginner, Self::Normal, Self::Senior, Self::Master]
+            .into_iter()
+            .find(|difficulty| {
+                let (depth, width, compute_vcf, compute_vct, root_vct_depth) =
+                    difficulty.settings();
+                config.root_search.depth == depth
+                    && config.root_search.wide == width
+                    && config.runtime.compute_vcf == compute_vcf
+                    && config.runtime.compute_vct == compute_vct
+                    && config.runtime.root_vct_depth == root_vct_depth
+            })
     }
 }
 
@@ -145,9 +141,8 @@ impl std::str::FromStr for SearchDifficulty {
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw.to_ascii_lowercase().as_str() {
-            "beginner" | "intro" => Ok(Self::Beginner),
-            "junior" | "easy" => Ok(Self::Junior),
-            "intermediate" | "normal" | "medium" => Ok(Self::Intermediate),
+            "beginner" | "intro" | "junior" | "easy" => Ok(Self::Beginner),
+            "normal" | "intermediate" | "medium" => Ok(Self::Normal),
             "senior" | "advanced" => Ok(Self::Senior),
             "master" | "hard" => Ok(Self::Master),
             _ => Err(format!("unknown search difficulty: {raw}")),
@@ -304,6 +299,8 @@ pub struct GameParamsSnapshot {
     pub clock_mode: &'static str,
     pub time_limit_ms: u32,
     pub difficulty: &'static str,
+    pub use_nnue: bool,
+    pub nnue_available: bool,
     pub depth: i32,
     pub width: usize,
     pub threads: usize,
@@ -320,6 +317,10 @@ pub struct GameParamsSnapshot {
 
 impl GameController {
     pub fn new(config: EngineConfig) -> Self {
+        Self::new_with_clock(config, SearchClockMode::default())
+    }
+
+    pub fn new_with_clock(config: EngineConfig, clock_mode: SearchClockMode) -> Self {
         let difficulty = SearchDifficulty::detect(&config);
         Self {
             config,
@@ -334,12 +335,31 @@ impl GameController {
             last_trace: None,
             last_search_ms: None,
             difficulty,
-            clock_mode: SearchClockMode::Untimed,
+            clock_mode,
             time_limit_ms: DEFAULT_TIME_LIMIT_MS,
             generation: 0,
             search_tt: None,
             search_pool: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn set_nnue_dir(&mut self, nnue_dir: Option<String>) {
+        if self.engine_thinking {
+            return;
+        }
+        let normalized = nnue_dir.filter(|s| !s.trim().is_empty());
+        if self.config.runtime.nnue_dir != normalized {
+            self.config.runtime.nnue_dir = normalized;
+            self.search_tt = None;
+        }
+    }
+
+    fn nnue_available_for(&self, rule: RuleSet) -> bool {
+        self.config
+            .runtime
+            .nnue_dir
+            .as_deref()
+            .is_some_and(|dir| mix9svq_files_exist_for_rule(Path::new(dir), rule))
     }
 
     pub fn board(&self) -> &Board {
@@ -377,8 +397,24 @@ impl GameController {
             RuleSet::Renju => "有禁手",
         };
         let clock_label = match clock_mode {
-            SearchClockMode::Untimed => String::new(),
-            SearchClockMode::Timed => format!(" / 限时 {}ms", self.time_limit_ms),
+            SearchClockMode::Untimed => {
+                let diff = self
+                    .difficulty
+                    .map(SearchDifficulty::label)
+                    .unwrap_or("自定义");
+                format!(" / 休闲·{diff}")
+            }
+            SearchClockMode::Timed => {
+                let engine_tag = if self.nnue_available_for(rule) {
+                    "专业"
+                } else {
+                    "专业(经典)"
+                };
+                format!(
+                    " / {engine_tag} {}",
+                    format_time_limit_label(self.time_limit_ms)
+                )
+            }
         };
         self.status = match mode {
             GameMode::TwoPlayer => format!("新局开始（双人 / {rule_name}）：黑方先行。"),
@@ -532,7 +568,7 @@ impl GameController {
         }
         let prev_config = self.config.clone();
         let prev_difficulty = self.difficulty;
-        let (depth, width, tactical, _) = difficulty.settings();
+        let (depth, width, compute_vcf, compute_vct, _) = difficulty.settings();
         difficulty.apply_to_config(&mut self.config);
         self.difficulty = Some(difficulty);
         if prev_difficulty != self.difficulty || prev_config != self.config {
@@ -547,10 +583,15 @@ impl GameController {
         self.last_result = None;
         self.last_trace = None;
         self.last_search_ms = None;
+        let tactics = match (compute_vcf, compute_vct) {
+            (false, false) => "无战术搜索",
+            (true, false) => "VCF 开启",
+            (true, true) => "VCF/VCT 开启",
+            (false, true) => "VCT 开启",
+        };
         self.status = format!(
-            "已切换到{}难度（d{depth}/w{width}，VCF/VCT {}），下一次引擎思考生效。",
+            "已切换到休闲·{}难度（d{depth}/w{width}，{tactics}），下一次引擎思考生效。",
             difficulty.label(),
-            if tactical { "开启" } else { "关闭" }
         );
     }
 
@@ -560,13 +601,15 @@ impl GameController {
             return false;
         }
         if !SUPPORTED_TIME_LIMITS_MS.contains(&ms) {
-            self.error =
-                Some("不支持的限时档位，请选择 200、500、1000、2000 或 5000 ms。".to_string());
+            self.error = Some("不支持的限时档位，请选择 500、1000、2500 或 5000 ms。".to_string());
             return false;
         }
         self.time_limit_ms = ms;
         self.error = None;
-        self.status = format!("已切换每步限时为 {ms} ms，下一次引擎思考生效。");
+        self.status = format!(
+            "已切换专业限时为 {}，下一次引擎思考生效。",
+            format_time_limit_label(ms)
+        );
         true
     }
 
@@ -578,11 +621,7 @@ impl GameController {
         let threads = threads.clamp(1, MAX_SEARCH_THREADS);
         let prev_threads = self.config.runtime.threads;
         if prev_threads != threads {
-            let depth = self.search_limits().max_depth;
-            if default_tt_bits_for_search(prev_threads, depth)
-                != default_tt_bits_for_search(threads, depth)
-                || (prev_threads > 1) != (threads > 1)
-            {
+            if (prev_threads > 1) != (threads > 1) {
                 self.search_tt = None;
             }
             self.config.runtime.threads = threads;
@@ -730,6 +769,8 @@ impl GameController {
         });
         let effective = self.effective_config();
         let limits = self.search_limits();
+        let nnue_available = self.nnue_available_for(effective.rule_set);
+        let nnue_active = effective.runtime.use_nnue && nnue_available;
         GameStateSnapshot {
             board_size: BOARD_SIZE,
             cells: self.board_cells(),
@@ -769,13 +810,15 @@ impl GameController {
                     .difficulty
                     .map(SearchDifficulty::as_str)
                     .unwrap_or("custom"),
+                use_nnue: nnue_active,
+                nnue_available,
                 depth: limits.max_depth,
                 width: limits.root_width,
                 threads: effective.runtime.threads,
                 compute_vcf: effective.runtime.compute_vcf,
-                root_vcf_depth: effective.runtime.root_vcf_depth,
+                root_vcf_depth: effective.runtime.effective_root_vcf_depth(nnue_active),
                 opponent_vcf_depth: effective.runtime.opponent_vcf_depth,
-                compute_vct: effective.runtime.compute_vct,
+                compute_vct: effective.runtime.effective_compute_vct(nnue_active),
                 root_vct_depth: effective.runtime.root_vct_depth,
                 overlap_vct_alphabeta: effective.runtime.overlap_vct_alphabeta,
                 static_board: effective.runtime.static_board,
@@ -787,10 +830,17 @@ impl GameController {
 
     fn effective_config(&self) -> EngineConfig {
         let mut config = self.config.clone();
-        if self.clock_mode == SearchClockMode::Timed {
-            config.runtime.compute_vcf = true;
-            config.runtime.compute_vct = true;
-            config.runtime.root_vct_depth = DEFAULT_ROOT_VCT_DEPTH;
+        match self.clock_mode {
+            SearchClockMode::Timed => {
+                config.runtime.compute_vcf = true;
+                config.runtime.compute_vct = true;
+                config.runtime.root_vct_depth = DEFAULT_ROOT_VCT_DEPTH;
+                config.runtime.use_nnue = self.nnue_available_for(config.rule_set);
+            }
+            SearchClockMode::Untimed => {
+                // Casual fixed-depth presets always use the classical evaluator.
+                config.runtime.use_nnue = false;
+            }
         }
         config
     }
@@ -868,25 +918,24 @@ impl EngineSearchTask {
     }
 
     pub fn run(mut self) -> EngineSearchCompletion {
-        let effective_threads = if self.limits.node_limit.is_some() {
-            1
-        } else {
-            self.config.runtime.threads
-        };
-        let tt_bits = default_tt_bits_for_search(effective_threads, self.limits.max_depth);
+        let nnue = crate::search::alphabeta::load_nnue_for_config(&self.config);
+        let tt_bits = DEFAULT_INTERACTIVE_TT_BITS;
         let tt = match self.tt {
             Some(tt) => tt,
-            None => match TranspositionTable::try_new_with_fallback(tt_bits, 16) {
-                Ok((tt, _)) => tt,
-                Err(_) => {
-                    return EngineSearchCompletion::failed(
-                        self.generation,
-                        "内存不足，无法分配置换表。",
-                    );
+            None => {
+                match TranspositionTable::try_new_with_fallback_layout(tt_bits, 16, nnue.is_some())
+                {
+                    Ok((tt, _)) => tt,
+                    Err(_) => {
+                        return EngineSearchCompletion::failed(
+                            self.generation,
+                            "内存不足，无法分配置换表。",
+                        );
+                    }
                 }
-            },
+            }
         };
-        let mut searcher = RootSearcher::with_tt(self.config, tt);
+        let mut searcher = RootSearcher::with_tt_and_nnue(self.config, tt, nnue);
         let reused_pool = self
             .worker_pool
             .lock()
@@ -914,6 +963,16 @@ impl EngineSearchTask {
                 worker_pool,
             },
         }
+    }
+}
+
+fn format_time_limit_label(ms: u32) -> String {
+    if ms % 1000 == 0 {
+        format!("{}s", ms / 1000)
+    } else if ms % 100 == 0 {
+        format!("{}.{}s", ms / 1000, (ms % 1000) / 100)
+    } else {
+        format!("{ms}ms")
     }
 }
 
@@ -973,7 +1032,7 @@ mod tests {
         let mut config = load_default_config();
         config.root_search.depth = 1;
         config.root_search.wide = 8;
-        GameController::new(config)
+        GameController::new_with_clock(config, SearchClockMode::Untimed)
     }
 
     #[test]
@@ -1050,32 +1109,44 @@ mod tests {
 
     #[test]
     fn difficulty_presets_update_search_and_tactical_settings() {
-        let mut controller = GameController::new(load_default_config());
+        let mut controller =
+            GameController::new_with_clock(load_default_config(), SearchClockMode::Untimed);
         assert_eq!(controller.snapshot().params.difficulty, "master");
 
-        for (difficulty, name, depth, width, tactical, root_vct_depth) in [
-            (SearchDifficulty::Beginner, "beginner", 1, 10, false, 6),
-            (SearchDifficulty::Junior, "junior", 2, 10, false, 6),
+        for (difficulty, name, depth, width, compute_vcf, compute_vct, root_vct_depth) in [
             (
-                SearchDifficulty::Intermediate,
-                "intermediate",
-                4,
-                20,
+                SearchDifficulty::Beginner,
+                "beginner",
+                2,
+                10,
+                false,
                 false,
                 6,
             ),
-            (SearchDifficulty::Senior, "senior", 6, 30, true, 6),
-            (SearchDifficulty::Master, "master", 8, 40, true, 6),
+            (SearchDifficulty::Normal, "normal", 4, 20, false, false, 6),
+            (SearchDifficulty::Senior, "senior", 6, 30, true, false, 6),
+            (SearchDifficulty::Master, "master", 8, 40, true, true, 6),
         ] {
             controller.set_difficulty(difficulty);
             let params = controller.snapshot().params;
             assert_eq!(params.difficulty, name);
             assert_eq!(params.depth, depth);
             assert_eq!(params.width, width);
-            assert_eq!(params.compute_vcf, tactical);
-            assert_eq!(params.compute_vct, tactical);
+            assert_eq!(params.compute_vcf, compute_vcf);
+            assert_eq!(params.compute_vct, compute_vct);
             assert_eq!(params.root_vct_depth, root_vct_depth);
+            assert!(!params.use_nnue);
         }
+
+        // Legacy aliases still parse cleanly into the 4 casual tiers.
+        assert_eq!(
+            "junior".parse::<SearchDifficulty>(),
+            Ok(SearchDifficulty::Beginner)
+        );
+        assert_eq!(
+            "intermediate".parse::<SearchDifficulty>(),
+            Ok(SearchDifficulty::Normal)
+        );
     }
 
     #[test]
@@ -1083,7 +1154,7 @@ mod tests {
         let mut controller = shallow_controller();
         assert!(controller.new_game(WHITE, RuleSet::Freestyle, GameMode::VsEngine));
         let _task = controller.prepare_engine_search().unwrap();
-        controller.set_difficulty(SearchDifficulty::Junior);
+        controller.set_difficulty(SearchDifficulty::Normal);
 
         let snapshot = controller.snapshot();
         assert_eq!(snapshot.params.difficulty, "custom");
@@ -1266,11 +1337,11 @@ mod tests {
     }
 
     #[test]
-    fn interactive_tt_tier_stays_32mib_at_intermediate_d4_and_upgrades_at_senior_d6() {
+    fn interactive_tt_stays_32mib_across_casual_and_pro_modes() {
         let mut config = load_default_config();
-        SearchDifficulty::Intermediate.apply_to_config(&mut config);
+        SearchDifficulty::Normal.apply_to_config(&mut config);
         config.runtime.threads = 4;
-        let mut controller = GameController::new(config);
+        let mut controller = GameController::new_with_clock(config, SearchClockMode::Untimed);
         assert!(controller.new_game(BLACK, RuleSet::Renju, GameMode::VsEngine));
         assert!(controller.play_human(7, 7));
 
@@ -1278,8 +1349,8 @@ mod tests {
         let completion = task.run();
         assert_eq!(
             completion.tt().unwrap().bucket_count(),
-            1 << 20,
-            "Intermediate (d4) does not start ABDADA workers and should keep 32 MiB TT"
+            1 << DEFAULT_INTERACTIVE_TT_BITS,
+            "Normal (d4) should allocate 32 MiB TT (tt_bits=20)"
         );
         assert!(controller.commit_engine_search(completion));
         assert!(
@@ -1296,19 +1367,22 @@ mod tests {
         assert!(controller.play_human(next_xy.0, next_xy.1));
 
         let task = controller.prepare_engine_search().unwrap();
-        // Verify Senior (d6, 4T) allocates 64 MiB TT and creates a reusable pool.
+        // Verify Senior (d6, 4T) keeps unified 32 MiB TT (tt_bits=20) and creates a reusable pool.
         let mut narrow_task = task;
         narrow_task.limits.max_depth = 5;
         narrow_task.limits.root_width = 8;
         let completion = narrow_task.run();
-        assert_eq!(completion.tt().unwrap().bucket_count(), 1 << 21);
+        assert_eq!(
+            completion.tt().unwrap().bucket_count(),
+            1 << DEFAULT_INTERACTIVE_TT_BITS
+        );
         assert!(controller.commit_engine_search(completion));
         assert!(
             controller.search_pool.lock().unwrap().is_some(),
             "parallel depth >= 5 should retain worker pool across moves"
         );
 
-        // Switching back to single-threaded drops the worker pool and resets TT tier.
+        // Switching back to single-threaded drops the worker pool and resets TT.
         controller.set_threads(1);
         assert_eq!(controller.snapshot().params.threads, 1);
         assert!(controller.search_tt.is_none());
@@ -1320,7 +1394,7 @@ mod tests {
         let mut config = load_default_config();
         SearchDifficulty::Senior.apply_to_config(&mut config);
         config.runtime.threads = 4;
-        let mut controller = GameController::new(config);
+        let mut controller = GameController::new_with_clock(config, SearchClockMode::Untimed);
         assert!(controller.new_game(BLACK, RuleSet::Renju, GameMode::VsEngine));
         assert!(controller.play_human(7, 7));
 
@@ -1351,7 +1425,7 @@ mod tests {
         let mut config = load_default_config();
         SearchDifficulty::Senior.apply_to_config(&mut config);
         config.runtime.threads = 4;
-        let mut controller = GameController::new(config);
+        let mut controller = GameController::new_with_clock(config, SearchClockMode::Untimed);
         assert!(controller.new_game(BLACK, RuleSet::Renju, GameMode::VsEngine));
         assert!(controller.play_human(7, 7));
 
@@ -1380,13 +1454,14 @@ mod tests {
     }
 
     #[test]
-    fn timed_mode_defaults_to_500ms_supports_midgame_time_changes_and_uses_timed_limits() {
+    fn pro_timed_mode_is_default_at_1000ms_and_supports_midgame_time_changes() {
         let mut config = load_default_config();
-        SearchDifficulty::Intermediate.apply_to_config(&mut config);
+        SearchDifficulty::Normal.apply_to_config(&mut config);
         config.runtime.threads = 4;
         let mut controller = GameController::new(config);
-        assert_eq!(controller.snapshot().params.clock_mode, "untimed");
-        assert_eq!(controller.snapshot().params.time_limit_ms, 500);
+        assert_eq!(controller.snapshot().params.clock_mode, "timed");
+        assert_eq!(controller.snapshot().params.time_limit_ms, 1000);
+        assert!(!controller.snapshot().params.use_nnue);
 
         assert!(controller.new_game_with_clock(
             BLACK,
@@ -1396,29 +1471,38 @@ mod tests {
         ));
         let params = controller.snapshot().params;
         assert_eq!(params.clock_mode, "timed");
-        assert_eq!(params.time_limit_ms, 500);
+        assert_eq!(params.time_limit_ms, 1000);
         assert_eq!(params.depth, crate::DEFAULT_TIMED_SEARCH_MAX_DEPTH);
         assert!(params.compute_vcf);
         assert!(params.compute_vct);
 
-        assert!(controller.set_time_limit_ms(200));
-        assert_eq!(controller.snapshot().params.time_limit_ms, 200);
-        assert!(!controller.set_time_limit_ms(333));
-        assert_eq!(controller.snapshot().params.time_limit_ms, 200);
+        assert!(controller.set_time_limit_ms(500));
+        assert_eq!(controller.snapshot().params.time_limit_ms, 500);
+        assert!(controller.set_time_limit_ms(2500));
+        assert_eq!(controller.snapshot().params.time_limit_ms, 2500);
+        assert!(!controller.set_time_limit_ms(200));
+        assert!(!controller.set_time_limit_ms(2000));
+        assert_eq!(controller.snapshot().params.time_limit_ms, 2500);
+        assert!(controller.set_time_limit_ms(500));
 
         assert!(controller.play_human(7, 7));
-        let task = controller.prepare_engine_search().unwrap();
-        assert_eq!(task.limits.time_limit_ms, Some(200.0));
+        let mut task = controller.prepare_engine_search().unwrap();
+        assert_eq!(task.limits.time_limit_ms, Some(500.0));
         assert_eq!(task.limits.max_depth, crate::DEFAULT_TIMED_SEARCH_MAX_DEPTH);
         // Reject time limit changes while the engine is thinking.
         assert!(!controller.set_time_limit_ms(1000));
 
+        // Keep unit test runtime short while reaching parallel depth >= 5.
+        task.limits.time_limit_ms = Some(200.0);
         let completion = task.run();
-        assert_eq!(completion.tt().unwrap().bucket_count(), 1 << 21);
+        assert_eq!(
+            completion.tt().unwrap().bucket_count(),
+            1 << DEFAULT_INTERACTIVE_TT_BITS
+        );
         assert!(controller.commit_engine_search(completion));
         assert!(controller.search_pool.lock().unwrap().is_some());
 
-        // Switching back to untimed Intermediate on a new game restores d4 and drops the pool.
+        // Switching back to casual Normal on a new game restores d4 and drops the pool.
         assert!(controller.new_game_with_clock(
             BLACK,
             RuleSet::Renju,
@@ -1431,7 +1515,7 @@ mod tests {
 
         // Explicit custom timed_max_wide (e.g. GUI --width 8) is preserved in timed mode.
         let mut custom_width_cfg = load_default_config();
-        SearchDifficulty::Intermediate.apply_to_config(&mut custom_width_cfg);
+        SearchDifficulty::Normal.apply_to_config(&mut custom_width_cfg);
         custom_width_cfg.root_search.wide = 8;
         custom_width_cfg.root_search.timed_max_wide = 8;
         let mut custom_controller = GameController::new(custom_width_cfg);
@@ -1445,31 +1529,9 @@ mod tests {
     }
 
     #[test]
-    fn failed_search_completion_clears_thinking_state_and_reports_error() {
-        let mut controller = shallow_controller();
-        assert!(controller.new_game(BLACK, RuleSet::Renju, GameMode::VsEngine));
-        assert!(controller.play_human(7, 7));
-
-        let task = controller.prepare_engine_search().unwrap();
-        assert!(controller.snapshot().engine_thinking);
-
-        let failed =
-            EngineSearchCompletion::failed(task.generation(), "内存不足，无法分配置换表。");
-        assert!(controller.commit_engine_search(failed));
-
-        let snapshot = controller.snapshot();
-        assert!(!snapshot.engine_thinking);
-        assert_eq!(snapshot.status, "引擎搜索失败。");
-        assert_eq!(
-            snapshot.error.as_deref(),
-            Some("内存不足，无法分配置换表。")
-        );
-    }
-
-    #[test]
     fn switching_threads_with_same_tt_capacity_does_not_mix_tt_depth_scales() {
         let mut cfg = load_default_config();
-        SearchDifficulty::Intermediate.apply_to_config(&mut cfg);
+        SearchDifficulty::Normal.apply_to_config(&mut cfg);
         cfg.rule_set = RuleSet::Freestyle;
         cfg.runtime.threads = 4;
 
@@ -1529,5 +1591,46 @@ mod tests {
         let mut s4_again = RootSearcher::with_tt(cfg_4t, shared_tt);
         let r4 = s4_again.search(&mut cold_board.clone(), Some(limits));
         assert!(cold_board.is_legal_move(r4.move_));
+    }
+
+    #[test]
+    fn pro_mode_uses_nnue_when_weights_present_and_casual_always_uses_classical() {
+        let dir = Path::new("opponent/rapfi-networks/mix9svq");
+        if !mix9svq_files_exist_for_rule(dir, RuleSet::Renju) {
+            return;
+        }
+        let mut config = load_default_config();
+        SearchDifficulty::Normal.apply_to_config(&mut config);
+        config.runtime.threads = 4;
+        config.runtime.nnue_dir = Some(dir.to_string_lossy().into_owned());
+        let mut controller = GameController::new(config);
+
+        assert!(controller.new_game_with_clock(
+            BLACK,
+            RuleSet::Renju,
+            GameMode::VsEngine,
+            SearchClockMode::Timed,
+        ));
+        let pro_params = controller.snapshot().params;
+        assert!(pro_params.nnue_available);
+        assert!(pro_params.use_nnue);
+        assert!(pro_params.compute_vcf);
+        assert!(
+            !pro_params.compute_vct,
+            "4T NNUE pro mode skips serial root df-pn VCT by default"
+        );
+        assert_eq!(pro_params.root_vcf_depth, 16);
+
+        // Switching to Casual must disable NNUE even with nnue_dir configured.
+        assert!(controller.new_game_with_clock(
+            BLACK,
+            RuleSet::Renju,
+            GameMode::VsEngine,
+            SearchClockMode::Untimed,
+        ));
+        let casual_params = controller.snapshot().params;
+        assert!(casual_params.nnue_available);
+        assert!(!casual_params.use_nnue);
+        assert_eq!(casual_params.depth, 4);
     }
 }

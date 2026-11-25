@@ -19,6 +19,12 @@ object NativeBridge {
     external fun nativeCreate(): Long
 
     /**
+     * Allocate a native game controller configured to load NNUE weights from
+     * [nnueDir] (when non-null and non-empty), returning its handle (0 on failure).
+     */
+    external fun nativeCreateWithNnueDir(nnueDir: String?): Long
+
+    /**
      * Run a JSON command against the handle and return the JSON response.
      * Returns `null` only if the native side failed to allocate the response
      * string; callers treat that as an internal error.

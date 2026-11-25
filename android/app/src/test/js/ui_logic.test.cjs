@@ -55,13 +55,11 @@ function fakeDocument() {
     "btn-newgame": element(),
     "btn-start": element(),
     "sheet-newgame": element(),
-    "opt-difficulty": element(),
-    "opt-timelimit": element(),
     "more-difficulty": element(),
     "more-timelimit": element(),
     "opt-multithread": element(),
   };
-  const options = [element(), element(), element()];
+  const options = [element(), element(), element(), element()];
   const backdrop = element();
   return {
     elements,
@@ -75,7 +73,7 @@ function fakeDocument() {
     querySelectorAll: (selector) => {
       assert.equal(
         selector,
-        "#opt-gamemode button, #opt-side button, #opt-rule button, #opt-clockmode button",
+        "#opt-gamemode button, #opt-side button, #opt-rule button, #opt-clockmode button, #opt-difficulty button, #opt-timelimit button",
       );
       return options;
     },
@@ -112,8 +110,6 @@ test("busy and engine thinking disable every new-game control", () => {
   assert.equal(document_.elements["btn-undo"].disabled, true);
   assert.equal(document_.elements["btn-newgame"].disabled, true);
   assert.equal(document_.elements["btn-start"].disabled, true);
-  assert.equal(document_.elements["opt-difficulty"].disabled, true);
-  assert.equal(document_.elements["opt-timelimit"].disabled, true);
   assert.equal(document_.elements["more-difficulty"].disabled, true);
   assert.equal(document_.elements["more-timelimit"].disabled, true);
   assert.equal(document_.elements["opt-multithread"].disabled, true);
@@ -126,8 +122,6 @@ test("busy and engine thinking disable every new-game control", () => {
   assert.equal(document_.elements["btn-undo"].disabled, false);
   assert.equal(document_.elements["btn-newgame"].disabled, false);
   assert.equal(document_.elements["btn-start"].disabled, false);
-  assert.equal(document_.elements["opt-difficulty"].disabled, false);
-  assert.equal(document_.elements["opt-timelimit"].disabled, false);
   assert.equal(document_.elements["more-difficulty"].disabled, false);
   assert.equal(document_.elements["more-timelimit"].disabled, false);
   assert.equal(document_.elements["opt-multithread"].disabled, false);
@@ -223,7 +217,8 @@ test("the packaged page wires all tested UI helpers before app startup", () => {
   assert.match(appScript, /op: "set_difficulty", difficulty/);
   assert.match(appScript, /op: "set_time_limit", time_limit_ms/);
   assert.match(appScript, /op: "set_multithread", enabled/);
-  assert.match(appScript, /setDifficultyValue\(state\.params\.difficulty\)/);
+  assert.match(appScript, /setSegmentValue\("opt-difficulty", state\.params\.difficulty\)/);
+  assert.match(appScript, /setSegmentValue\("opt-timelimit", String\(timeLimitMs\)\)/);
   assert.match(page, /id="opt-difficulty"/);
   assert.match(page, /id="opt-clockmode"/);
   assert.match(page, /id="opt-timelimit"/);
@@ -233,13 +228,15 @@ test("the packaged page wires all tested UI helpers before app startup", () => {
   assert.match(page, /id="opt-gamemode"/);
   assert.match(page, /data-value="two_player"/);
   assert.match(page, /data-engine-only/);
+  assert.match(page, /data-adv="eval"/);
   assert.match(appScript, /op: "new_game", human_side, rule, mode, clock_mode/);
-  assert.match(page, /id="difficulty-dialog"/);
-  assert.match(page, /class="strength-icon level-5"/);
   assert.match(page, /id="meta-difficulty"/);
   assert.match(appScript, /getElementById\("meta-difficulty"\)/);
-  for (const difficulty of ["beginner", "junior", "intermediate", "senior", "master"]) {
+  for (const difficulty of ["beginner", "normal", "senior", "master"]) {
     assert.match(page, new RegExp(`data-value="${difficulty}"`));
+  }
+  for (const limit of ["500", "1000", "2500", "5000"]) {
+    assert.match(page, new RegExp(`data-value="${limit}"`));
   }
   assert.ok(page.indexOf('src="ui_logic.js"') < page.indexOf('src="app.js"'));
 });

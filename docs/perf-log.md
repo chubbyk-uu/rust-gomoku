@@ -1255,3 +1255,34 @@ Verification & A/B benchmarks (vs `P1b` `27ce460`, `center_50_prefixes.jsonl`):
 Decision:
 
 - Keep attacker deep Zobrist-TT VCF (`depth=16`, `20k` nodes, `3%` timed sub-budget), match-clock `timectl`, and verified 4T ABDADA+NNUE. Ready to commit on `exp/p2-tactics-timectl` and merge into `master` upon user approval.
+
+### 2026-11-25: `P3 / P4` NNUE Search Overhaul & Locked New Baseline (`f53a0f2`, `exp/p3-search-strength`)
+
+Hotspot evidence & target:
+
+- Fair head-to-head baseline (`p4_base`, `4065c80`, `opponent/baselines/gomocup_nnue_p4_base`) against same-weight Rapfi (`Mix9svq`, 32 MiB TT, Renju `1s/move`, `database=off`, `--reuse-engine-state`, 100 games on `center_50_prefixes.jsonl`) scored **`27.5%`** (`27-72-1`, `-168.4 Elo`, `LL=22`) on 1T and **`31.0%`** (`31-69-0`, `-139.0 Elo`) on 4T.
+- Primary bottleneck identified via EBF & search-trace audit: nominal depth lagged Rapfi (`EBF 2.81` vs `2.09` on `c4_ply20`), NNUE PVS+LMR ran an extra full-window re-search at reduced depth and did not force `cut_node=true` on reduced LMR scouts, multi-threaded NNUE stalled worker cores on serial root df-pn VCT, and mate-band TT/QVCF edge cases leaked non-exact bounds.
+
+Modification scope (`31a807e..f53a0f2`):
+
+- **Correctness & mate-band hardening (`31a807e`, `956163f`, `6f0eecf`)**: kept QVCF narrow-window mate cutoffs as lower bounds, kept NNUE 4-way TT mate bounds exact-only with 4T confirmation guard, and bypassed QVCF delta pruning in the mate band when TT holds a mate lower bound.
+- **`O(1)` tactical fast paths (`bb22ec3`, `25e8816`)**: added `O(1)` `has_double_four` / `has_four_three` / `has_double_three` bitmasks in `src/eval/caches.rs` (exhaustively verified on all 3,969 `shape_table.txt` entries with 0 false positives), non-root `quick_win_check_nnue` + Mate Distance Pruning, and O(1) `single_forcing` movegen bypass when `l5_count(-side) == 1`.
+- **Multi-threaded NNUE root VCT policy (`4e13c53`)**: added `effective_compute_vct(nnue_active)` in `src/config.rs` to skip serial root df-pn VCT when `nnue_active && threads > 1 && !overlap_vct_alphabeta` (`+31.35 Elo` in 4T self-play, `54.5%`, `WW=10, LL=4`, while keeping root VCT on 1T and classical).
+- **Rapfi-aligned pruning & PVS+LMR rewrite (`f1dea84`, `855bb36`, `f53a0f2`)**: aligned NNUE policy LMR with Rapfi `policyReduction`, aligned move-count pruning with Rapfi `futilityMoveCount`, rewrote NNUE PVS+LMR re-search flow to remove redundant reduced full-window re-searches and enforce `cut_node=true` on reduced LMR scouts, and raised `cut_node` LMR add to `1.80`.
+
+Stop-loss reverts (do not repeat):
+
+- Calling NNUE policy on `depth == 1` nodes dropped NPS `-9.7%` (`48.5%` 1T self-play) -> reverted.
+- Fusing `MainHistory` + `CounterMove` into NNUE policy (`d0869c2`) saturated at `d10..14` and overrode NNUE policy (`23.5%` vs Rapfi 1T, `-5.5%` NPS) -> cleanly reverted (`34ea674`).
+- `OPPO5_EXT = 1.1` on `single_forcing` reduced effective depth on `c4_ply20` and scored `27.0%–27.5%` vs Rapfi 1T -> reverted.
+
+Verification & fair A/B vs Rapfi (`f53a0f2`, archived at `opponent/baselines/gomocup_nnue_p4_v2`):
+
+- **Correctness**: `cargo test --locked` (379 tests), `android/rust_bridge` (6 tests), `git diff --check`, and classical `scripts/run_diff.py --profile all --check-baselines --jobs 8` (**13/13 passed** in `29.5s`).
+- **1s timed probe**: `c4_ply20 d12 -> d15` (`+3` plies over `p4_base`), `loss4t_c9_ply22 d14 -> d19` (`+5` plies, `307 KNPS`), `prior-10-white-11` solves `-19971` mate in `0.66s`.
+- **1T vs Rapfi 1T (100g, Renju `1s/move`, 32 MiB TT)**: **`35.5% [29.16%, 41.84%]`** (`34-63-3`, `-103.73 Elo`, **`+64.7 Elo`** over `p4_base`, `LL: 22 -> 13`), avg `506.2 ms` / med `556.7 ms` / max `1001 ms`, `0` errors / `0` timeouts.
+- **4T vs Rapfi 4T (100g, Renju `1s/move`, 32 MiB TT)**: **`34.0% [27.41%, 40.59%]`** (`33-65-2`, `-115.23 Elo`, **`+23.8 Elo`** over `p4_base`, `LL: 19 -> 15`), avg `500.5 ms` / med `401.7 ms` / p95 `1001.0 ms` / max `1001.9 ms` (faster than Rapfi avg `557.2 ms` / max `1065.4 ms`), `0` errors / `0` timeouts.
+
+Decision:
+
+- Lock `f53a0f2` (`opponent/baselines/gomocup_nnue_p4_v2`) as the new NNUE baseline (clear gains over `p4_base` on both 1T and 4T, zero classical diff regression) and integrate it into Desktop GUI and Android for the next release before resuming search-strength tuning.

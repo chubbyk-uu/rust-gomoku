@@ -280,6 +280,10 @@ button:disabled { opacity: 0.45; }
   background: transparent;
   font-size: 14px;
 }
+.segmented.compact.quad button {
+  padding: 0 4px;
+  font-size: 13px;
+}
 .segmented.compact button[aria-pressed="true"] {
   background: var(--card);
   color: var(--accent);

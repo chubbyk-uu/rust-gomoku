@@ -73,11 +73,15 @@ Implementation progress on `feature/android-app`:
   tap-to-preview then tap-the-same-point-to-confirm to cut mis-taps; taps snap to
   the nearest intersection and are rejected beyond ~0.6 cell; forbidden points
   are rejected with a toast and a light vibration (new `VIBRATE` permission).
-- The five-level difficulty
-  selector maps Beginner to `d1/w10` without VCF/VCT, Junior to `d2/w10`
-  without VCF/VCT, Intermediate to `d4/w20` without VCF/VCT, Senior to
-  `d6/w30` with VCF/VCT and `root_vct_depth=6`, and Master to `d8/w40` with
-  VCF/VCT and `root_vct_depth=6`. Intermediate is the default.
+- The app bundles the Rapfi CC0 `Mix9svq` NNUE weights (`assets/nnue/*.bin.lz4`,
+  stored uncompressed via `noCompress += "lz4"` and extracted once on the
+  background executor to `filesDir/nnue/` before calling
+  `nativeCreateWithNnueDir`). It defaults to **Pro mode** (NNUE timed search:
+  `500 ms` / `1000 ms` / `2500 ms` / `5000 ms`, default `1000 ms`, unified
+  `tt_bits = 20` / 32 MiB TT) and also provides **Casual mode** with four
+  classical fixed-depth levels: Beginner (`d2/w10`, VCF/VCT off), Normal
+  (`d4/w20`, VCF/VCT off, default casual), Senior (`d6/w30`, VCF on, VCT off),
+  and Master (`d8/w40`, VCF/VCT on, `root_vct_depth=6`).
 - Responsive verification at the target viewports and the touch/rotation/stale
   behaviors are confirmed on a real device.
 - Mobile UI state logic is isolated in `ui_logic.js` and covered by Node tests
@@ -308,7 +312,7 @@ and must not resize when status text or engine state changes.
 
 - Play black or white.
 - Freestyle or Renju.
-- Beginner, Junior, Intermediate, Senior, or Master difficulty.
+- Mode: Casual (classical Beginner / Normal / Senior / Master) or Pro (NNUE `500 ms` / `1000 ms` / `2500 ms` / `5000 ms`, default `1000 ms`).
 - Start game.
 
 Rule changes apply only to the new game, matching the desktop behavior.
@@ -573,7 +577,7 @@ and validate its playing strength separately.
 Status: complete. Release signing is configured through a repository-external
 properties file, signed release APK/AAB builds pass locally, and Android
 release artifacts are attached to GitHub Releases. The latest published Android
-package is `v0.1.16`.
+package is `v0.1.17`.
 
 1. Produce `app-debug.apk` for initial manual installation: complete.
 2. After the real-device gate, create a release signing key outside the
@@ -581,7 +585,7 @@ package is `v0.1.16`.
 3. Configure release signing through local/CI secrets: complete for local
    builds.
 4. Produce signed release APK and AAB: complete.
-5. Attach the APK to a GitHub Release: complete through `v0.1.16`.
+5. Attach the APK to a GitHub Release: complete through `v0.1.17`.
 6. Consider Play publication only after signing, privacy, screenshots, version
    upgrades, and device compatibility are stable.
 
@@ -610,7 +614,7 @@ Expected local outputs:
 
 The first signed Android distribution version was `versionName = "0.1.2"` and
 `versionCode = 3`. The current published Android version is
-`versionName = "0.1.16"` and `versionCode = 16`.
+`versionName = "0.1.17"` and `versionCode = 17`.
 
 GitHub Release:
 
@@ -626,6 +630,7 @@ GitHub Release:
 - <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.14>
 - <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.15>
 - <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.16>
+- <https://github.com/chubbyk-uu/rust-gomoku/releases/tag/v0.1.17>
 
 ## Stop Conditions
 
