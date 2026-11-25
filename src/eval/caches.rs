@@ -133,6 +133,12 @@ impl EvalCaches {
     pub const L5_BUCKET_WORD1_MASK: u64 = ((1_u64 << 13) - 1) << (79 - 64);
     /// Word-1 bitmask for `ShapeLabel::L4` buckets (`67..=78`, bits `3..=14`).
     pub const L4_BUCKET_WORD1_MASK: u64 = ((1_u64 << 12) - 1) << (67 - 64);
+    /// Word-1 bitmask for `L4S + L4S` double-four bucket (`66`, bit `2`).
+    pub const DOUBLE_FOUR_BUCKET_WORD1_MASK: u64 = 1_u64 << (66 - 64);
+    /// Word-1 bitmask for `L4S + L3B` / `L4S + L3` four-three buckets (`64..=65`, bits `0..=1`).
+    pub const FOUR_THREE_BUCKET_WORD1_MASK: u64 = (1_u64 << (64 - 64)) | (1_u64 << (65 - 64));
+    /// Word-0 bitmask for `L3B + L3B`, `L3 + L3B`, `L3 + L3` double-three buckets (`45, 54, 55`).
+    pub const DOUBLE_THREE_BUCKET_WORD0_MASK: u64 = (1_u64 << 45) | (1_u64 << 54) | (1_u64 << 55);
     /// Combined word-1 bitmask for `L4` and `L5` buckets (`67..=91`).
     pub const L4_L5_BUCKET_WORD1_MASK: u64 =
         Self::L4_BUCKET_WORD1_MASK | Self::L5_BUCKET_WORD1_MASK;
@@ -147,6 +153,24 @@ impl EvalCaches {
     pub fn has_l4(&self, side: i8) -> bool {
         let player = if side == BLACK { 0 } else { 1 };
         (self.nonzero_bucket_mask[player][1] & Self::L4_BUCKET_WORD1_MASK) != 0
+    }
+
+    #[inline(always)]
+    pub fn has_double_four(&self, side: i8) -> bool {
+        let player = if side == BLACK { 0 } else { 1 };
+        (self.nonzero_bucket_mask[player][1] & Self::DOUBLE_FOUR_BUCKET_WORD1_MASK) != 0
+    }
+
+    #[inline(always)]
+    pub fn has_four_three(&self, side: i8) -> bool {
+        let player = if side == BLACK { 0 } else { 1 };
+        (self.nonzero_bucket_mask[player][1] & Self::FOUR_THREE_BUCKET_WORD1_MASK) != 0
+    }
+
+    #[inline(always)]
+    pub fn has_double_three(&self, side: i8) -> bool {
+        let player = if side == BLACK { 0 } else { 1 };
+        (self.nonzero_bucket_mask[player][0] & Self::DOUBLE_THREE_BUCKET_WORD0_MASK) != 0
     }
 
     #[inline(always)]
@@ -530,8 +554,26 @@ mod tests {
                     top1 >= 11,
                     "L4/L5 mask mismatch at top1={top1}, top2={top2}, bucket={bucket}"
                 );
+                assert_eq!(
+                    caches.has_double_four(BLACK),
+                    top1 == 10 && top2 == 10,
+                    "4-4 mask mismatch at top1={top1}, top2={top2}, bucket={bucket}"
+                );
+                assert_eq!(
+                    caches.has_four_three(BLACK),
+                    top1 == 10 && (top2 == 8 || top2 == 9),
+                    "4-3 mask mismatch at top1={top1}, top2={top2}, bucket={bucket}"
+                );
+                assert_eq!(
+                    caches.has_double_three(BLACK),
+                    (top1 == 8 || top1 == 9) && (top2 == 8 || top2 == 9),
+                    "3-3 mask mismatch at top1={top1}, top2={top2}, bucket={bucket}"
+                );
                 assert!(!caches.has_l5(WHITE));
                 assert!(!caches.has_l4(WHITE));
+                assert!(!caches.has_double_four(WHITE));
+                assert!(!caches.has_four_three(WHITE));
+                assert!(!caches.has_double_three(WHITE));
             }
         }
     }

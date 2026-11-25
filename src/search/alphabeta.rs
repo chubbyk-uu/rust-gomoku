@@ -633,6 +633,18 @@ impl AlphaBetaSearcher {
             return (-INF + options.ply, None);
         }
 
+        let in_singular = options.skip_move.is_some();
+        // Mate Distance Pruning (non-root NNUE): narrow `[alpha, beta]` to the
+        // mathematically achievable mate band `[-INF + ply, INF - ply]` before
+        // probing TT or materializing deferred `EvalCaches`.
+        if self.nnue.is_some() && !options.root && !in_singular {
+            alpha = alpha.max(-INF + options.ply);
+            beta = beta.min(INF - options.ply);
+            if alpha >= beta {
+                return (alpha, None);
+            }
+        }
+
         // Stored depths round down. Round the requirement up so a leaf never
         // cuts off a positive-depth search, even after fractional reductions.
         let is_pv = beta - alpha > 1;
@@ -703,7 +715,6 @@ impl AlphaBetaSearcher {
                 stats.tt_bestmove_old_generation += 1;
             }
         }
-        let in_singular = options.skip_move.is_some();
         if !root_restricted && !in_singular && probe_hit && probe_value.is_some() {
             stats.tt_hits += 1;
             return (
@@ -801,6 +812,12 @@ impl AlphaBetaSearcher {
                 });
             }
             return (score, None);
+        }
+
+        if self.nnue.is_some() && !options.root && !in_singular {
+            if let Some(quick) = self.quick_win_check_nnue(board, caches, side, options.ply, beta) {
+                return quick;
+            }
         }
 
         let tt_best_move = if let Some(allowed) = root_allowed_moves {
@@ -2015,6 +2032,59 @@ impl AlphaBetaSearcher {
         }
     }
 
+    /// O(1) static forced-win / forced-loss detection for non-root NNUE main
+    /// search (`depth > 0.0`), aligned with Rapfi `wincheck.h:quickWinCheck`
+    /// (`A_FIVE`, double `A_FIVE`, Renju forbidden single `A_FIVE` block,
+    /// `B_FLEX4` / `4-4`, and non-Renju/White `4-3` & `3-3` when opponent has
+    /// no counter-four threat and mate-in-5 cuts off `beta`).
+    #[inline]
+    fn quick_win_check_nnue(
+        &self,
+        board: &Board,
+        caches: &EvalCaches,
+        side: Side,
+        ply: i32,
+        beta: i32,
+    ) -> Option<(i32, Option<Move>)> {
+        if !caches.initialized || caches.rule_set != self.config.rule_set {
+            return None;
+        }
+        if caches.has_l5(side) {
+            return Some((INF - ply, caches.first_l5_move(side)));
+        }
+        let opp_l5_count = caches.l5_count(-side);
+        if opp_l5_count >= 2 {
+            return Some((-INF + ply + 1, None));
+        }
+        if opp_l5_count == 1 {
+            if self.config.rule_set == RuleSet::Renju && side == BLACK {
+                if let Some(mv) = caches.first_l5_move(-side) {
+                    if !is_rule_legal_for_movegen(board, caches, mv, side, self.config.rule_set) {
+                        return Some((-INF + ply + 1, None));
+                    }
+                }
+            }
+            return None;
+        }
+        if (caches.has_l4(side) || caches.has_double_four(side))
+            && board.move_count() + 2 < BOARD_AREA
+        {
+            return Some((INF - (ply + 2), None));
+        }
+        // Unstoppable 4-3 (`C_BLOCK4_FLEX3`) or 3-3 (`F_FLEX3_2X`) for White
+        // or Freestyle when opponent has no L5/L4/B4 counter-threat. Gated by
+        // `mate_in_5 >= beta` so PV / mate-shortening searches keep exact ply.
+        if (self.config.rule_set != RuleSet::Renju || side != BLACK)
+            && INF - (ply + 4) >= beta
+            && !caches.has_attack4_plus(-side)
+            && board.move_count() + 4 < BOARD_AREA
+            && (caches.has_four_three(side) || caches.has_double_three(side))
+        {
+            return Some((INF - (ply + 4), None));
+        }
+        None
+    }
+
     /// Attack-side leaf quiescence VCF search (`vcfsearch`) for NNUE mode.
     /// Evaluates stand-pat NNUE value and extends forcing B4 sequences so leaf
     /// horizons do not miss tactical wins or counter-VCFs.
@@ -2072,8 +2142,18 @@ impl AlphaBetaSearcher {
                 tt_view4,
             );
         }
-        if caches.has_l4(side) && board.move_count() + 2 < BOARD_AREA {
+        if (caches.has_l4(side) || caches.has_double_four(side))
+            && board.move_count() + 2 < BOARD_AREA
+        {
             return INF - (ply + 2);
+        }
+        if (self.config.rule_set != RuleSet::Renju || side != BLACK)
+            && INF - (ply + 4) >= beta
+            && !caches.has_attack4_plus(-side)
+            && board.move_count() + 4 < BOARD_AREA
+            && (caches.has_four_three(side) || caches.has_double_three(side))
+        {
+            return INF - (ply + 4);
         }
 
         // Mate distance pruning.
@@ -3321,6 +3401,154 @@ mod tests {
             );
             assert_eq!(saved_fl.tt_flag, HASHF_ALPHA);
             assert_eq!(saved_fl.tt_depth, expected_d3_depth);
+        }
+    }
+
+    #[test]
+    fn nnue_main_quick_win_check_and_mdp_respect_renju_rules() {
+        let nnue_dir = std::path::Path::new("opponent/rapfi-networks/mix9svq");
+        if !nnue_dir.exists() {
+            return;
+        }
+        let mut cfg = load_default_config();
+        cfg.rule_set = RuleSet::Renju;
+        cfg.runtime.use_nnue = true;
+        cfg.runtime.nnue_dir = Some(nnue_dir.to_string_lossy().into_owned());
+        let mut searcher = AlphaBetaSearcher::new(cfg.clone());
+        assert!(searcher.has_nnue());
+        searcher.tt.set_subply(true);
+
+        // 1. Renju Black genuine open-four (`L4`): non-root d=4 solves in 1 node
+        //    with exact `INF - (ply + 2)`, while `skip_move` (singular exclusion)
+        //    must NOT short-circuit via `quick_win_check_nnue`.
+        {
+            let mut board = Board::new();
+            for &(x, y, s) in &[
+                (6, 7, BLACK),
+                (0, 0, WHITE),
+                (7, 7, BLACK),
+                (0, 1, WHITE),
+                (8, 7, BLACK),
+                (0, 2, WHITE),
+            ] {
+                board
+                    .play_for_rule(xy_to_move(x, y).unwrap(), Some(s), RuleSet::Renju)
+                    .unwrap();
+            }
+            let mut caches = EvalCaches::new();
+            recompute_all_for_rule(&mut board, &mut caches, RuleSet::Renju);
+            assert!(caches.has_l4(BLACK));
+            let mut stats = SearchStats::default();
+            let (score, _) = searcher.search(
+                &mut board,
+                &mut caches,
+                BLACK,
+                4.0,
+                -INF,
+                INF,
+                40,
+                &mut stats,
+                SearchOptions {
+                    opo: 1,
+                    ply: 3,
+                    root: false,
+                    ..SearchOptions::default()
+                },
+            );
+            assert_eq!(score, INF - 5);
+            assert_eq!(stats.nodes, 1, "quickWinCheck must solve L4 in 1 node");
+
+            // Mate Distance Pruning: window `[INF - 3, INF - 2]` at `ply = 3`
+            // has `beta` clamped to `INF - 3 <= alpha`, pruning in 1 node.
+            let mut mdp_stats = SearchStats::default();
+            let (mdp_score, _) = searcher.search(
+                &mut board,
+                &mut caches,
+                BLACK,
+                4.0,
+                INF - 3,
+                INF - 2,
+                40,
+                &mut mdp_stats,
+                SearchOptions {
+                    opo: 1,
+                    ply: 3,
+                    root: false,
+                    ..SearchOptions::default()
+                },
+            );
+            assert_eq!(mdp_score, INF - 3);
+            assert_eq!(mdp_stats.nodes, 1, "MDP must prune unreachable mate window");
+        }
+
+        // 2. Renju Black FAKE open-four with an overline endpoint:
+        //    `x=3: B, x=4: ., x=5: [cand], x=6: B, x=7: B, x=8: B, x=9: .`
+        //    Playing `x=5` leaves `x=4` as a 6-in-a-row overline (illegal for Black),
+        //    so White only needs to block `x=9`. `caches.has_l4(BLACK)` MUST be false!
+        {
+            let mut board = Board::new();
+            for &(x, y, s) in &[
+                (3, 7, BLACK),
+                (0, 0, WHITE),
+                (6, 7, BLACK),
+                (0, 1, WHITE),
+                (7, 7, BLACK),
+                (0, 2, WHITE),
+                (8, 7, BLACK),
+                (10, 7, WHITE), // block far right so (9, 7) is only single-sided
+            ] {
+                board
+                    .play_for_rule(xy_to_move(x, y).unwrap(), Some(s), RuleSet::Renju)
+                    .unwrap();
+            }
+            let mut caches = EvalCaches::new();
+            recompute_all_for_rule(&mut board, &mut caches, RuleSet::Renju);
+            assert!(
+                !caches.has_l4(BLACK),
+                "Renju fake open-four with overline endpoint must NOT be classified as L4"
+            );
+        }
+
+        // 3. Opponent double L5 (`opp_l5_count >= 2`): non-root returns
+        //    `-INF + ply + 1` in 1 node.
+        {
+            let mut board = Board::new();
+            for &(x, y, s) in &[
+                (0, 0, BLACK),
+                (5, 7, WHITE),
+                (0, 2, BLACK),
+                (6, 7, WHITE),
+                (0, 4, BLACK),
+                (7, 7, WHITE),
+                (0, 6, BLACK),
+                (8, 7, WHITE),
+            ] {
+                board
+                    .play_for_rule(xy_to_move(x, y).unwrap(), Some(s), RuleSet::Renju)
+                    .unwrap();
+            }
+            let mut caches = EvalCaches::new();
+            recompute_all_for_rule(&mut board, &mut caches, RuleSet::Renju);
+            assert_eq!(caches.l5_count(WHITE), 2);
+            let mut stats = SearchStats::default();
+            let (score, _) = searcher.search(
+                &mut board,
+                &mut caches,
+                BLACK,
+                4.0,
+                -INF,
+                INF,
+                40,
+                &mut stats,
+                SearchOptions {
+                    opo: 1,
+                    ply: 2,
+                    root: false,
+                    ..SearchOptions::default()
+                },
+            );
+            assert_eq!(score, -INF + 3);
+            assert_eq!(stats.nodes, 1);
         }
     }
 }
