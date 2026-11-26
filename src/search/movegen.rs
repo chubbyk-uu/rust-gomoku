@@ -206,7 +206,7 @@ impl CoveredMovesBuf {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CoverageTracker {
-    counts: [u16; BOARD_AREA],
+    counts: [u8; BOARD_AREA],
 }
 
 impl CoverageTracker {
@@ -220,6 +220,7 @@ impl CoverageTracker {
         tracker
     }
 
+    #[inline(always)]
     pub(crate) fn add_move(&mut self, move_: Move) {
         for &candidate in COVER_NEIGHBORS[move_ as usize].iter() {
             if candidate == COVER_SENTINEL {
@@ -229,6 +230,7 @@ impl CoverageTracker {
         }
     }
 
+    #[inline(always)]
     pub(crate) fn remove_move(&mut self, move_: Move) {
         for &candidate in COVER_NEIGHBORS[move_ as usize].iter() {
             if candidate == COVER_SENTINEL {
@@ -252,12 +254,13 @@ impl CoverageTracker {
             return;
         }
         let grid = board.grid_rows();
-        for move_index in 0..BOARD_AREA {
-            if self.counts[move_index] == 0 {
-                continue;
-            }
-            if grid[move_index / BOARD_SIZE][move_index % BOARD_SIZE] == EMPTY {
-                out.push(move_index as Move);
+        for (y, row) in grid.iter().enumerate() {
+            let row_base = y * BOARD_SIZE;
+            for (x, &cell) in row.iter().enumerate() {
+                let move_index = row_base + x;
+                if self.counts[move_index] != 0 && cell == EMPTY {
+                    out.push(move_index as Move);
+                }
             }
         }
     }

@@ -777,7 +777,6 @@ impl AlphaBetaSearcher {
                         0,
                         options.ply,
                         stats,
-                        coverage,
                         abdada,
                         tt_view4,
                     )
@@ -791,7 +790,6 @@ impl AlphaBetaSearcher {
                         0,
                         options.ply,
                         stats,
-                        coverage,
                         abdada,
                         tt_view4,
                         Some((
@@ -941,7 +939,6 @@ impl AlphaBetaSearcher {
                                     0,
                                     options.ply,
                                     stats,
-                                    coverage,
                                     abdada,
                                     tt_view4,
                                     Some((
@@ -2302,7 +2299,6 @@ impl AlphaBetaSearcher {
         qdepth: i32,
         ply: i32,
         stats: &mut SearchStats,
-        coverage: &mut CoverageTracker,
         abdada: Option<&AbdadaContext>,
         tt_view4: Option<TTTableView4<'_>>,
         pre_probe: Option<(bool, Option<i32>, u8, Option<Move>, Option<i32>)>,
@@ -2340,7 +2336,6 @@ impl AlphaBetaSearcher {
                 qdepth - 1,
                 ply,
                 stats,
-                coverage,
                 abdada,
                 tt_view4,
             );
@@ -2578,7 +2573,6 @@ impl AlphaBetaSearcher {
             if let Some(tt4) = tt_view4 {
                 tt4.prefetch(board.zobrist_key());
             }
-            coverage.add_move(mv);
             if let Some(nnue) = self.nnue.as_mut() {
                 nnue.before_move(side, mx, my);
             }
@@ -2593,7 +2587,6 @@ impl AlphaBetaSearcher {
                 qdepth - 1,
                 ply + 1,
                 stats,
-                coverage,
                 abdada,
                 tt_view4,
             );
@@ -2602,7 +2595,6 @@ impl AlphaBetaSearcher {
             if let Some(nnue) = self.nnue.as_mut() {
                 nnue.after_undo(side, mx, my);
             }
-            coverage.remove_move(mv);
             caches.restore_snapshot_nnue(&snapshot);
 
             if stats.stop {
@@ -2659,7 +2651,6 @@ impl AlphaBetaSearcher {
         qdepth: i32,
         ply: i32,
         stats: &mut SearchStats,
-        coverage: &mut CoverageTracker,
         abdada: Option<&AbdadaContext>,
         tt_view4: Option<TTTableView4<'_>>,
     ) -> i32 {
@@ -2713,7 +2704,6 @@ impl AlphaBetaSearcher {
         if let Some(tt4) = tt_view4 {
             tt4.prefetch(board.zobrist_key());
         }
-        coverage.add_move(mv);
         if let Some(nnue) = self.nnue.as_mut() {
             nnue.before_move(side, mx, my);
         }
@@ -2728,7 +2718,6 @@ impl AlphaBetaSearcher {
             qdepth,
             ply + 1,
             stats,
-            coverage,
             abdada,
             tt_view4,
             None,
@@ -2738,7 +2727,6 @@ impl AlphaBetaSearcher {
         if let Some(nnue) = self.nnue.as_mut() {
             nnue.after_undo(side, mx, my);
         }
-        coverage.remove_move(mv);
         caches.restore_snapshot_nnue(&snapshot);
 
         if stats.stop {
