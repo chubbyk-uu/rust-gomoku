@@ -160,9 +160,10 @@ pub struct GameController {
     status: String,
     error: Option<String>,
     last_mark: Option<(usize, usize)>,
-    last_result: Option<SearchResult>,
+    last_result: Option<(SearchResult, bool)>,
     last_trace: Option<RootTrace>,
     last_search_ms: Option<f64>,
+    nnue_history: Option<Vec<NnuePositionEstimate>>,
     difficulty: Option<SearchDifficulty>,
     clock_mode: SearchClockMode,
     time_limit_ms: u32,
@@ -179,6 +180,7 @@ pub struct EngineSearchTask {
     generation: u64,
     tt: Option<TranspositionTable>,
     worker_pool: Arc<Mutex<Option<SearchWorkerPool>>>,
+    record_nnue_history: bool,
 }
 
 enum EngineSearchOutcome {
@@ -186,6 +188,8 @@ enum EngineSearchOutcome {
         result: SearchResult,
         trace: Option<RootTrace>,
         elapsed_ms: f64,
+        used_nnue: bool,
+        estimate: Option<NnuePositionEstimate>,
         tt: TranspositionTable,
         worker_pool: Option<SearchWorkerPool>,
     },
@@ -247,6 +251,8 @@ pub struct GameStateSnapshot {
     pub last_mark: Option<[usize; 2]>,
     pub last_result: Option<SearchResultSnapshot>,
     pub last_trace: Option<SearchTraceSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nnue_history: Option<Vec<NnuePositionEstimate>>,
     pub params: GameParamsSnapshot,
 }
 
@@ -273,6 +279,36 @@ pub struct SearchResultSnapshot {
     pub depth: i32,
     pub nodes: usize,
     pub ms: Option<f64>,
+    pub used_nnue: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct NnuePositionEstimate {
+    pub ply: usize,
+    pub black_win: f32,
+    pub draw: f32,
+    pub white_win: f32,
+}
+
+impl NnuePositionEstimate {
+    fn from_logits(board: &Board, (win, loss, draw): (f32, f32, f32)) -> Self {
+        let max = win.max(loss).max(draw);
+        let win = (win - max).exp();
+        let loss = (loss - max).exp();
+        let draw = (draw - max).exp();
+        let total = win + loss + draw;
+        let (black, white) = if board.side_to_move() == BLACK {
+            (win, loss)
+        } else {
+            (loss, win)
+        };
+        Self {
+            ply: board.move_count(),
+            black_win: black / total,
+            draw: draw / total,
+            white_win: white / total,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -334,6 +370,7 @@ impl GameController {
             last_result: None,
             last_trace: None,
             last_search_ms: None,
+            nnue_history: None,
             difficulty,
             clock_mode,
             time_limit_ms: DEFAULT_TIME_LIMIT_MS,
@@ -341,6 +378,12 @@ impl GameController {
             search_tt: None,
             search_pool: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Record post-move NNUE estimates for frontends that display a game chart.
+    pub fn with_nnue_history(mut self) -> Self {
+        self.nnue_history.get_or_insert_with(Vec::new);
+        self
     }
 
     pub fn set_nnue_dir(&mut self, nnue_dir: Option<String>) {
@@ -351,6 +394,9 @@ impl GameController {
         if self.config.runtime.nnue_dir != normalized {
             self.config.runtime.nnue_dir = normalized;
             self.search_tt = None;
+            if let Some(history) = &mut self.nnue_history {
+                history.clear();
+            }
         }
     }
 
@@ -430,6 +476,9 @@ impl GameController {
         self.last_result = None;
         self.last_trace = None;
         self.last_search_ms = None;
+        if let Some(history) = &mut self.nnue_history {
+            history.clear();
+        }
         self.search_tt = None;
         if self.search_limits().max_depth < ABDADA_PARALLEL_START_DEPTH {
             if let Ok(mut guard) = self.search_pool.lock() {
@@ -547,6 +596,9 @@ impl GameController {
             if self.board.side_to_move() == self.human_side {
                 break;
             }
+        }
+        if let Some(history) = &mut self.nnue_history {
+            history.retain(|sample| sample.ply <= self.board.move_count());
         }
         self.last_mark = last_move_xy(&self.board);
         self.last_result = None;
@@ -669,6 +721,7 @@ impl GameController {
             generation: self.generation,
             tt: self.search_tt.clone(),
             worker_pool: Arc::new(Mutex::new(taken_pool)),
+            record_nnue_history: self.nnue_history.is_some(),
         })
     }
 
@@ -676,21 +729,32 @@ impl GameController {
         if self.generation != completion.generation {
             return false;
         }
-        let (result, trace, elapsed_ms, tt, worker_pool) = match completion.outcome {
-            EngineSearchOutcome::Completed {
-                result,
-                trace,
-                elapsed_ms,
-                tt,
-                worker_pool,
-            } => (result, trace, elapsed_ms, tt, worker_pool),
-            EngineSearchOutcome::Failed { error } => {
-                self.error = Some(error);
-                self.status = "引擎搜索失败。".to_string();
-                self.engine_thinking = false;
-                return true;
-            }
-        };
+        let (result, trace, elapsed_ms, used_nnue, estimate, tt, worker_pool) =
+            match completion.outcome {
+                EngineSearchOutcome::Completed {
+                    result,
+                    trace,
+                    elapsed_ms,
+                    used_nnue,
+                    estimate,
+                    tt,
+                    worker_pool,
+                } => (
+                    result,
+                    trace,
+                    elapsed_ms,
+                    used_nnue,
+                    estimate,
+                    tt,
+                    worker_pool,
+                ),
+                EngineSearchOutcome::Failed { error } => {
+                    self.error = Some(error);
+                    self.status = "引擎搜索失败。".to_string();
+                    self.engine_thinking = false;
+                    return true;
+                }
+            };
         self.search_tt = Some(tt);
         if self.config.runtime.threads > 1
             && self.search_limits().max_depth >= ABDADA_PARALLEL_START_DEPTH
@@ -718,9 +782,12 @@ impl GameController {
                 {
                     Ok(_) => {
                         self.last_mark = move_to_xy(result.move_).ok();
-                        self.last_result = Some(result);
+                        self.last_result = Some((result, used_nnue));
                         self.last_trace = trace;
                         self.last_search_ms = Some((elapsed_ms * 1000.0).round() / 1000.0);
+                        if let (Some(history), Some(sample)) = (&mut self.nnue_history, estimate) {
+                            history.push(sample);
+                        }
                         self.status = if self.board.winner() != EMPTY {
                             "引擎获胜。".to_string()
                         } else if self.board.is_draw() {
@@ -741,7 +808,7 @@ impl GameController {
     }
 
     pub fn snapshot(&self) -> GameStateSnapshot {
-        let last_result = self.last_result.map(|result| {
+        let last_result = self.last_result.map(|(result, used_nnue)| {
             let (x, y) = move_to_xy(result.move_).expect("engine move stays valid");
             SearchResultSnapshot {
                 move_xy: [x, y],
@@ -749,6 +816,7 @@ impl GameController {
                 depth: result.depth,
                 nodes: result.nodes,
                 ms: self.last_search_ms,
+                used_nnue,
             }
         });
         let last_trace = self.last_trace.as_ref().map(|trace| SearchTraceSnapshot {
@@ -802,6 +870,7 @@ impl GameController {
             last_mark: self.last_mark.map(|(x, y)| [x, y]),
             last_result,
             last_trace,
+            nnue_history: self.nnue_history.clone(),
             params: GameParamsSnapshot {
                 mode: self.mode.as_str(),
                 clock_mode: self.clock_mode.as_str(),
@@ -952,13 +1021,33 @@ impl EngineSearchTask {
                 );
             }
         };
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let used_nnue = searcher.has_nnue();
+        // Sample the position after the chosen move on the task's private board.
+        // The live board and its history are updated only on a successful commit.
+        let estimate = if self.record_nnue_history
+            && used_nnue
+            && self
+                .board
+                .play_for_rule(result.move_, None, searcher.config.rule_set)
+                .is_ok()
+            && !self.board.is_terminal()
+        {
+            searcher
+                .nnue_position_logits(&self.board)
+                .map(|logits| NnuePositionEstimate::from_logits(&self.board, logits))
+        } else {
+            None
+        };
         let worker_pool = searcher.take_worker_pool();
         EngineSearchCompletion {
             generation: self.generation,
             outcome: EngineSearchOutcome::Completed {
                 result,
                 trace: searcher.last_trace,
-                elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+                elapsed_ms,
+                used_nnue,
+                estimate,
                 tt: searcher.tt,
                 worker_pool,
             },
@@ -1632,5 +1721,21 @@ mod tests {
         assert!(casual_params.nnue_available);
         assert!(!casual_params.use_nnue);
         assert_eq!(casual_params.depth, 4);
+    }
+
+    #[test]
+    fn position_estimate_maps_current_turn_to_black_and_white() {
+        let mut board = Board::new();
+        let logits = (1000.0, 999.0, 998.0);
+        let black_to_move = NnuePositionEstimate::from_logits(&board, logits);
+        assert!(black_to_move.black_win > black_to_move.white_win);
+        board.play(xy_to_move(7, 7).unwrap(), None).unwrap();
+        let white_to_move = NnuePositionEstimate::from_logits(&board, logits);
+        assert_eq!(white_to_move.ply, 1);
+        assert_eq!(white_to_move.black_win, black_to_move.white_win);
+        assert_eq!(white_to_move.white_win, black_to_move.black_win);
+        assert_eq!(white_to_move.draw, black_to_move.draw);
+        let sum = white_to_move.black_win + white_to_move.white_win + white_to_move.draw;
+        assert!((sum - 1.0).abs() < 1e-6);
     }
 }

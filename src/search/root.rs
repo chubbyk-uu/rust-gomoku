@@ -460,6 +460,10 @@ impl RootSearcher {
         self.alphabeta.has_nnue()
     }
 
+    pub(crate) fn nnue_position_logits(&mut self, board: &Board) -> Option<(f32, f32, f32)> {
+        self.alphabeta.nnue_position_logits(board)
+    }
+
     pub(crate) fn take_worker_pool(&mut self) -> Option<SearchWorkerPool> {
         self.worker_pool.take()
     }

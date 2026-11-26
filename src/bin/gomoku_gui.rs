@@ -62,10 +62,9 @@ fn main() {
         config.root_search.wide = width;
         config.root_search.timed_max_wide = width;
     }
-    let state = Arc::new(Mutex::new(GameController::new_with_clock(
-        config,
-        initial_clock,
-    )));
+    let state = Arc::new(Mutex::new(
+        GameController::new_with_clock(config, initial_clock).with_nnue_history(),
+    ));
     let browser_activity = Arc::new(Mutex::new(BrowserActivity::default()));
     start_browser_watchdog(Arc::clone(&browser_activity));
     let addr = args.addr;
@@ -646,7 +645,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       display: flex;
       flex-direction: column;
     }
-    canvas {
+    #board {
       display: block;
       width: 100%;
       aspect-ratio: 1;
@@ -791,6 +790,21 @@ const INDEX_HTML: &str = r#"<!doctype html>
       color: #1f1a14;
       word-break: break-word;
     }
+    .position-estimate {
+      margin-top: 16px;
+      padding: 12px;
+      border: 1px solid rgba(70, 44, 18, .16);
+      border-radius: 12px;
+      background: #fffdf5;
+    }
+    .position-estimate h2 { margin: 0 0 6px; font-size: 16px; }
+    .position-caption { margin: 0; color: #6b5235; font-size: 13px; line-height: 1.4; }
+    #position-chart { display: block; width: 100%; height: auto; margin: 6px 0; }
+    #position-chart:focus-visible { outline: 2px solid var(--accent); border-radius: 4px; }
+    .engine-details { margin-top: 14px; font-size: 14px; }
+    .engine-details summary { color: #6b5235; cursor: pointer; font-weight: 700; }
+    .engine-details .kv { border-top: 0; padding-top: 10px; gap: 6px 10px; }
+    .engine-details .kv, .engine-details .kv div:nth-child(even) { font-size: 14px; }
     .check-toggle {
       display: inline-flex;
       align-items: center;
@@ -935,9 +949,21 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="actions">
           <button id="undo-btn" class="warn" onclick="undo()">悔棋</button>
         </div>
-        <div class="hint">棋盘会自动刷新；规则与「休闲 / 专业」模式仅在新局生效。对局中途可在引擎空闲时调整当前模式的休闲难度或专业限时（下一次引擎思考生效，限时仅限 AI）。快捷键：U 悔棋，R 按当前执棋方重新开局。</div>
+        <div class="hint">U 悔棋 · R 重新开局</div>
       </div>
       <div class="kv" id="info"></div>
+      <section class="position-estimate" id="position-estimate" aria-labelledby="position-title" hidden>
+        <h2 id="position-title">NNUE 局势估计</h2>
+        <p class="position-caption" id="position-current"></p>
+        <canvas id="position-chart" width="640" height="180" tabindex="0" hidden
+          aria-label="黑方预计得分曲线，使用左右方向键查看历史估计"
+          aria-describedby="position-point"></canvas>
+        <p class="position-caption" id="position-point"></p>
+      </section>
+      <details class="engine-details" id="engine-details" hidden>
+        <summary>引擎详情</summary>
+        <div class="kv" id="search-info"></div>
+      </details>
     </aside>
   </main>
   <div id="result-backdrop" class="result-backdrop" aria-hidden="true">
@@ -953,6 +979,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
   <script>
     const canvas = document.getElementById('board');
     const ctx = canvas.getContext('2d');
+    const positionChart = document.getElementById('position-chart');
+    const positionCtx = positionChart.getContext('2d');
+    const chartBounds = { left: 58, right: 622, top: 14, bottom: 146 };
+    let selectedEstimatePly = null;
     let state = null;
     let selectedRule = 'freestyle';
     let selectedMode = 'vs_engine';
@@ -1278,8 +1308,155 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function sideName(v) {
       return v === 1 ? '黑' : (v === -1 ? '白' : '无');
     }
-    function yesNo(v) {
-      return v ? '是' : '否';
+    function formatMs(ms) {
+      return `${ms.toFixed(1)} ms`;
+    }
+    function renderRows(id, rows) {
+      document.getElementById(id).replaceChildren(...rows.flatMap(row => row.map(value => {
+        const cell = document.createElement('div');
+        cell.textContent = value;
+        return cell;
+      })));
+    }
+    function blackExpectedScore(point) { return point.black_win + point.draw * 0.5; }
+    function percent(value) { return `${(value * 100).toFixed(1)}%`; }
+    function chartMaxPly(points) { return Math.max(4, points.at(-1).ply); }
+    function renderNnueEstimate() {
+      const panel = document.getElementById('position-estimate');
+      const current = document.getElementById('position-current');
+      const caption = document.getElementById('position-point');
+      const points = state.nnue_history || [];
+      const p = state.params;
+      panel.hidden = p.mode !== 'vs_engine' || p.clock_mode !== 'timed' ||
+        !p.nnue_available || state.last_result?.used_nnue === false;
+      positionChart.hidden = points.length === 0;
+      if (panel.hidden || points.length === 0) {
+        selectedEstimatePly = null;
+        current.textContent = '引擎落子后更新';
+        caption.textContent = '';
+        return;
+      }
+
+      const latest = points.at(-1);
+      const selected = points.find(point => point.ply === selectedEstimatePly) || latest;
+      const latestScore = blackExpectedScore(latest);
+      const scorePerMille = Math.round(latestScore * 1000);
+      const advantage = scorePerMille > 500 ? '黑方占优' : scorePerMille < 500 ? '白方占优' : '均势';
+      current.textContent = `第 ${latest.ply} 手后 · ${advantage} · 黑方预计得分 ${percent(latestScore)}`;
+      caption.textContent = `第 ${selected.ply} 手：黑胜 ${percent(selected.black_win)} · 和棋 ${percent(selected.draw)} · 白胜 ${percent(selected.white_win)}`;
+
+      const { left, right, top, bottom } = chartBounds;
+      const maxPly = chartMaxPly(points);
+      const x = ply => left + (right - left) * ply / maxPly;
+      const y = score => bottom - (bottom - top) * score;
+      const c = positionCtx;
+      c.clearRect(0, 0, positionChart.width, positionChart.height);
+      c.font = '19px "Segoe UI", "Microsoft YaHei", sans-serif';
+      c.fillStyle = '#6b5235';
+      c.textAlign = 'right';
+      c.textBaseline = 'middle';
+      for (const score of [1, 0.5, 0]) {
+        c.beginPath();
+        c.strokeStyle = score === 0.5 ? '#a68a60' : '#e5d8bd';
+        c.lineWidth = 1.5;
+        c.setLineDash(score === 0.5 ? [6, 5] : []);
+        c.moveTo(left, y(score));
+        c.lineTo(right, y(score));
+        c.stroke();
+        c.fillText(`${score * 100}%`, left - 7, y(score));
+      }
+      c.setLineDash([]);
+      c.fillText(`${maxPly} 手`, right, bottom + 21);
+      c.textAlign = 'left';
+      c.fillText('0', left, bottom + 21);
+      c.beginPath();
+      c.strokeStyle = '#0f6b54';
+      c.lineWidth = 3;
+      points.forEach((point, index) => {
+        const px = x(point.ply);
+        const py = y(blackExpectedScore(point));
+        if (index === 0) c.moveTo(px, py);
+        else c.lineTo(px, py);
+      });
+      c.stroke();
+      c.beginPath();
+      c.fillStyle = '#0f6b54';
+      c.arc(x(selected.ply), y(blackExpectedScore(selected)), 5, 0, Math.PI * 2);
+      c.fill();
+    }
+    positionChart.addEventListener('pointermove', event => {
+      const points = state?.nnue_history;
+      if (!points?.length) return;
+      const rect = positionChart.getBoundingClientRect();
+      const x = (event.clientX - rect.left) * positionChart.width / rect.width;
+      const ply = (x - chartBounds.left) * chartMaxPly(points) / (chartBounds.right - chartBounds.left);
+      selectedEstimatePly = points.reduce((best, point) =>
+        Math.abs(point.ply - ply) < Math.abs(best.ply - ply) ? point : best).ply;
+      renderNnueEstimate();
+    });
+    positionChart.addEventListener('pointerleave', () => {
+      selectedEstimatePly = null;
+      renderNnueEstimate();
+    });
+    positionChart.addEventListener('keydown', event => {
+      const offset = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : 0;
+      const points = state?.nnue_history;
+      if (!offset || !points?.length) return;
+      event.preventDefault();
+      const selected = points.findIndex(point => point.ply === selectedEstimatePly);
+      const next = (selected < 0 ? points.length - 1 : selected) + offset;
+      selectedEstimatePly = points[Math.max(0, Math.min(next, points.length - 1))].ply;
+      renderNnueEstimate();
+    });
+    function renderSearchInfo(r, t, p) {
+      const details = document.getElementById('engine-details');
+      const twoPlayer = p.mode === 'two_player';
+      details.hidden = twoPlayer;
+      const rows = [['手数', state.move_count]];
+      if (!twoPlayer) {
+        rows.unshift(['你执', sideName(state.human_side)]);
+        if (r?.ms != null) rows.push(['上次搜索', formatMs(r.ms)]);
+        if (t?.vcf_found || t?.vct_accepted) rows.push(['战术', '找到强制胜着']);
+        if (p.clock_mode === 'timed' && r?.used_nnue === false) {
+          rows.push(['评估器', '已回落到经典评估']);
+        }
+      }
+      renderRows('info', rows);
+      renderNnueEstimate();
+      if (twoPlayer) return;
+
+      let evaluator = '经典评估';
+      if (r?.used_nnue) evaluator = 'NNUE (Mix9svq)';
+      else if (p.clock_mode === 'timed') {
+        if (!p.nnue_available) evaluator += '（未找到 NNUE 权重）';
+        else evaluator = r ? '经典评估（NNUE 加载失败）' : 'NNUE（等待验证）';
+      }
+      const config = p.clock_mode === 'timed' ? `${p.time_limit_ms} ms` : `深度 ${p.depth}`;
+      const searchRows = [
+        ['评估器', evaluator],
+        ['搜索配置', `${config} · 宽度 ${p.width} · ${p.threads} 线程`],
+        ['战术配置', [p.compute_vcf ? `VCF ${p.root_vcf_depth}` : 'VCF 关闭',
+          p.compute_vct ? `VCT ${p.root_vct_depth}` : 'VCT 关闭'].join(' · ')],
+      ];
+      if (r) {
+        searchRows.push(['搜索结果', `深度 ${r.depth} · ${r.nodes.toLocaleString('zh-CN')} 节点 · 引擎侧分数 ${r.score}`]);
+      }
+      if (t?.used_vcf) searchRows.push(['VCF', t.vcf_found ? '找到胜着' : '未找到胜着']);
+      if (t?.vct_triggered) {
+        const outcome = t.vct_accepted ? '通过验证' : t.vct_found ? '未通过验证' : '未找到胜着';
+        const vctDetails = [outcome];
+        if (t.vct_ms != null) vctDetails.push(formatMs(t.vct_ms));
+        if (t.vct_reject_reason) vctDetails.push(t.vct_reject_reason);
+        searchRows.push(['VCT', vctDetails.join(' · ')]);
+      }
+      if (t?.alphabeta_ms != null) searchRows.push(['主搜索', formatMs(t.alphabeta_ms)]);
+      if (t?.overlap_used) {
+        const times = [
+          ['主搜索', t.overlap_ab_ms], ['等待', t.overlap_wait_ms], ['TT 快照', t.tt_snapshot_ms],
+        ].filter(([, ms]) => ms != null).map(([label, ms]) => `${label} ${formatMs(ms)}`);
+        searchRows.push(['战术并行', times.join(' · ')]);
+      }
+      renderRows('search-info', searchRows);
     }
     function renderRuleButtons() {
       const freestyleButton = document.getElementById('rule-freestyle');
@@ -1334,52 +1511,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       renderClockButtons();
       renderModeButtons();
       renderPendingNotice();
-      if (p.mode === 'two_player') {
-        const rows = [
-          ['对战', '双人对弈'],
-          ['轮到', sideName(state.side_to_move)],
-          ['胜者', sideName(state.winner)],
-          ['手数', state.move_count],
-          ['规则', p.rule === 'renju' ? '有禁手' : '无禁手'],
-        ];
-        document.getElementById('info').innerHTML = rows.map(([k,v]) => `<div>${k}</div><div>${v}</div>`).join('');
-        renderResult();
-        return;
-      }
-      const diffLabel = {
-        beginner: '入门',
-        normal: '普通',
-        senior: '高级',
-        master: '大师',
-        custom: '自定义',
-      }[p.difficulty] || p.difficulty;
-      const limitLabel = p.time_limit_ms % 1000 === 0
-        ? `${p.time_limit_ms / 1000}s`
-        : `${p.time_limit_ms / 1000}s`;
-      const evalLabel = p.clock_mode === 'timed'
-        ? (p.use_nnue ? 'NNUE (Mix9svq)' : '经典评估（未找到 NNUE 权重）')
-        : '经典评估（休闲）';
-      const rows = [
-        ['你执', sideName(state.human_side)],
-        ['轮到', sideName(state.side_to_move)],
-        ['胜者', sideName(state.winner)],
-        ['手数', state.move_count],
-        ['规则', p.rule === 'renju' ? '有禁手' : '无禁手'],
-        ['模式', p.clock_mode === 'timed' ? `专业（每步 ${limitLabel}）` : `休闲（${diffLabel}）`],
-        ['评估', evalLabel],
-        ['搜索参数', p.clock_mode === 'timed' ? `限时 ${p.time_limit_ms}ms / w${p.width} / ${p.threads}T` : `d${p.depth} / w${p.width} / ${p.threads}T`],
-        ['VCF/VCT', `${p.compute_vcf ? 'VCF' + p.root_vcf_depth : 'VCF off'} / ${p.compute_vct ? 'VCT' + p.root_vct_depth : 'VCT off'}`],
-        ['Overlap VCT/AB', yesNo(p.overlap_vct_alphabeta)],
-        ['窗口', p.static_board ? 'static board' : `dynamic margin ${p.dynamic_board_margin}`],
-        ['上次搜索', r ? `${r.ms?.toFixed(3)} ms, depth ${r.depth}, nodes ${r.nodes}, score ${r.score}` : '-'],
-        ['VCF 使用/命中', t ? `${yesNo(t.used_vcf)} / ${yesNo(t.vcf_found)}` : '-'],
-        ['VCT 使用/触发', t ? `${yesNo(t.used_vct)} / ${yesNo(t.vct_triggered)}` : '-'],
-        ['VCT 结果/耗时', t ? `${yesNo(t.vct_found)} / ${t.vct_ms == null ? '-' : t.vct_ms.toFixed(3) + ' ms'}` : '-'],
-        ['AB 耗时', t && t.alphabeta_ms != null ? `${t.alphabeta_ms.toFixed(3)} ms` : '-'],
-        ['Overlap', t ? `${yesNo(t.overlap_used)} / AB ${t.overlap_ab_ms == null ? '-' : t.overlap_ab_ms.toFixed(3) + ' ms'}` : '-'],
-        ['Overlap 等待/TT', t ? `${t.overlap_wait_ms == null ? '-' : t.overlap_wait_ms.toFixed(3) + ' ms'} / ${t.tt_snapshot_ms == null ? '-' : t.tt_snapshot_ms.toFixed(3) + ' ms'}` : '-'],
-      ];
-      document.getElementById('info').innerHTML = rows.map(([k,v]) => `<div>${k}</div><div>${v}</div>`).join('');
+      renderSearchInfo(r, t, p);
       renderResult();
     }
     renderModeButtons();

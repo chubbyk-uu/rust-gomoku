@@ -414,6 +414,12 @@ impl AlphaBetaSearcher {
         self.nnue.is_some()
     }
 
+    pub(crate) fn nnue_position_logits(&mut self, board: &Board) -> Option<(f32, f32, f32)> {
+        let evaluator = self.nnue.as_mut()?;
+        evaluator.sync_with_board(board);
+        Some(evaluator.evaluate_value_detailed(board.side_to_move()).1)
+    }
+
     /// Deterministic 64-bit TT key salt isolating rule set (Freestyle vs Renju)
     /// and active evaluator / NNUE weight identity on shared transposition tables.
     /// Classical Freestyle keeps `0` so legacy baseline keys remain bit-identical.
