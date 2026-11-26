@@ -60,7 +60,7 @@ The main defaults live in `src/config.rs`.
 |---|---:|
 | Fixed search depth | `8` |
 | Fixed root width | `40` |
-| Time-control max depth | `25` |
+| Time-control max depth | `48` |
 | Time-control max width | `40` |
 | `root_vcf_depth` | `8` (classical); automatically deepens to `16` with 64K Zobrist VCF TT in NNUE mode unless explicitly overridden |
 | `opponent_vcf_depth` | `7` |
@@ -80,7 +80,7 @@ The main defaults live in `src/config.rs`.
 
 The desktop GUI and Android app support two modes (both using unified `tt_bits = 20` / 32 MiB TT):
 
-1. **Pro mode (default)** — NNUE (`Mix9svq`) timed search with four per-move time limit presets (`500 ms`, `1000 ms`, `2500 ms`, `5000 ms`; default `1000 ms`), running iterative deepening up to `d25 / w40` with VCF enabled (and 1T root VCT; multi-threaded NNUE skips serial root df-pn VCT by default). If NNUE weights are unavailable on desktop, Pro mode falls back cleanly to classical evaluation.
+1. **Pro mode (default)** — NNUE (`Mix9svq`) timed search with four per-move time limit presets (`500 ms`, `1000 ms`, `2500 ms`, `5000 ms`; default `1000 ms`), running iterative deepening up to `d48 / w40` with VCF enabled (and 1T root VCT; multi-threaded NNUE skips serial root df-pn VCT by default). If NNUE weights are unavailable on desktop, Pro mode falls back cleanly to classical evaluation.
 
 2. **Casual mode** — four shared classical fixed-depth difficulty presets:
 

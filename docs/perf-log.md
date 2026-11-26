@@ -1328,3 +1328,27 @@ Verification & benchmarks:
 Decision:
 
 - Keep all 6 commits (`7cf575d..98406c0`) on `exp/neon-and-nnue-speed`: 100% search-tree equivalent in both classical and NNUE, `+15.97%` x86_64 KNPS, `+24.36 Elo` (`53.5%`, `0 LL`) in 1T self-play vs `p4_v2`, and full ARM64 NEON+DOTPROD SIMD ready for Android. Ready to merge into `master` upon user approval.
+
+
+### 2026-11-26: Timed Search Max Depth `25 -> 48` & 1T Mate-Confirmation Ablation (`exp/timed-depth48-and-mate-confirm`)
+
+Hotspot evidence & target:
+
+- Midgame move-time audit on `dir2_4t_vs_rapfi_4t_center50.json` (`1s/move`, `--reuse-engine-state`) found that `20/20` sampled non-forced-4 midgame `<20ms` moves were warm-TT `win_mate`/`loss_mate` continuations where `+10` `SUBPLY_TT_WIN_BONUS` pushed entries past `DEFAULT_TIMED_SEARCH_MAX_DEPTH = 25`, and `5/20` already hit `d25` even on cold probes.
+- Verified NNUE subply TT depth encoding (`SUBPLY_TT_SCALE_F64 = 64.0`, `NNUE_MAIN_TT_DEPTH_OFFSET = 3`, `SUBPLY_TT_DEPTH_CAP = 3200`, `SUBPLY_TT_WIN_BONUS = 640`, `DEPTH_MAX = 4095`) safely supports up to `d49` without TT format changes or cutoff saturation (`48 * 64 + 3 = 3075 <= 3200`, `+640 = 3715 <= 4095`).
+
+Modification scope & stop-loss:
+
+- **Item 1 (kept)**: Raised `DEFAULT_TIMED_SEARCH_MAX_DEPTH` from `25` to `48` in `src/config.rs` and synced `README.md`. Zero TT encoding change; classical fixed-depth `base` untouched.
+- **Item 2 (reverted — stop-loss)**: Tested adding 4T-style NNUE mate confirmation (`WIN_MATE_CONFIRM_ITERS = 2`, `LOSS_MATE_CONFIRM_ITERS = 6`, `tt_only_iter` filter) to the 1T iterative-deepening loop in `src/search/root.rs`. Incremental 1T result was neutral (`48-47-5`, `50.5% ± 4.48%`, `+3.47 Elo`, `WW=2, WD=2, WL/DD=42, LD=3, LL=1`) while adding `+33.9 ms` avg move time (`477.1 ms -> 511.0 ms`, median `57.9 ms -> 678.9 ms`) and ~35 lines of state-machine duplication -> cleanly reverted.
+
+Verification & 100-game matches (Renju `1s/move`, 32 MiB TT, `center_50_prefixes.jsonl`, `--reuse-engine-state`):
+
+- **Correctness**: `cargo fmt --check`, `git diff --check`, full `cargo test --locked`, and classical `scripts/run_diff.py --profile all --check-baselines --jobs 8` (**13/13 passed** in `29.2s`).
+- **`exp_d48_1t` vs `v0118_1t` (`j=8`)**: **`51-41-8` (`55.0% ± 5.98%`, `+34.86 Elo`, `WW=7, WD=1, WL/DD=38, LD=3, LL=1`)**, `0` errors / `0` timeouts; avg `492.5 ms` / med `112.6 ms` / p95 `1000.4 ms` / max `1000.8 ms` vs `v0118_1t` `482.5 ms`.
+- **`exp_d48_4t` vs `v0118_4t` (`j=4`)**: `45-47-8` (`49.0% ± 5.14%`, `-6.95 Elo`, `WW=2, WD=3, WL/DD=38, LD=5, LL=2`, 200-game 1T+4T combined `96-88-16` / `52.0%`), `0` errors / `0` timeouts; avg `539.2 ms` / med `1000.4 ms` / p95 `1000.9 ms` / max `1007.3 ms` vs `v0118_4t` `466.0 ms`.
+- **`exp_d48_1t` vs Rapfi 1T (`j=10`, fair `Mix9svq`, 32 MiB TT)**: **`32-63-5` (`34.5% ± 6.32%`, `-111.37 Elo`, `WW=0, WD=0, WL/DD=32, LD=5, LL=13`)**, `+1.0%` (`+7.74 Elo`, `LL: 15 -> 13`) over `v0.1.18 1T` (`33.5%`, `32-65-3`, `LL=15`); 1 ply-224 Renju black-no-legal-move loss, `0` real errors / `0` timeouts; avg `537.1 ms` / med `1000.2 ms` / p95 `1000.5 ms` / max `1000.9 ms` vs Rapfi `657.2 ms` / max `1052.6 ms`.
+
+Decision:
+
+- Keep `DEFAULT_TIMED_SEARCH_MAX_DEPTH = 48` only; revert 1T mate confirmation; merge into `master`.
