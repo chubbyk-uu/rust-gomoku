@@ -15,8 +15,24 @@ use crate::constants::{
 };
 use crate::eval::{
     attack_level, evaluate_board, value_wide_compute_for_rule, value_wide_compute_for_rule_no_dgn,
-    EvalCaches, EvalSnapshot,
+    EvalCaches, EvalSnapshot, EvalSnapshotNnue,
 };
+
+#[derive(Clone, Debug)]
+enum PendingEvalSnapshot {
+    Full(EvalSnapshot),
+    Nnue(EvalSnapshotNnue),
+}
+
+impl PendingEvalSnapshot {
+    #[inline(always)]
+    fn restore(&self, caches: &mut EvalCaches) {
+        match self {
+            Self::Full(snap) => caches.restore_snapshot(snap),
+            Self::Nnue(snap) => caches.restore_snapshot_nnue(snap),
+        }
+    }
+}
 use crate::nnue::{load_mix9svq_evaluator_for_rule, Mix9svqEvaluator};
 use crate::rules::RuleSet;
 use crate::search::abdada::{AbdadaContext, ABDADA_MIN_DEPTH};
@@ -516,7 +532,7 @@ impl AlphaBetaSearcher {
         stats: &mut SearchStats,
         options: SearchOptions<'_>,
         coverage: &mut CoverageTracker,
-        pending_cache: Option<((usize, usize), &mut Option<EvalSnapshot>)>,
+        pending_cache: Option<((usize, usize), &mut Option<PendingEvalSnapshot>)>,
         abdada: Option<&AbdadaContext>,
         tt_view: Option<TTTableView<'_>>,
         tt_view4: Option<TTTableView4<'_>>,
@@ -730,8 +746,8 @@ impl AlphaBetaSearcher {
 
         if let Some(((mx, my), snapshot_slot)) = pending_cache {
             if snapshot_slot.is_none() {
-                *snapshot_slot = Some(caches.snapshot());
                 if self.nnue.is_some() {
+                    *snapshot_slot = Some(PendingEvalSnapshot::Nnue(caches.snapshot_nnue()));
                     value_wide_compute_for_rule_no_dgn(
                         board,
                         caches,
@@ -739,6 +755,7 @@ impl AlphaBetaSearcher {
                         self.config.rule_set,
                     );
                 } else {
+                    *snapshot_slot = Some(PendingEvalSnapshot::Full(caches.snapshot()));
                     value_wide_compute_for_rule(board, caches, (mx, my), self.config.rule_set);
                 }
             }
@@ -1120,7 +1137,7 @@ impl AlphaBetaSearcher {
                     if likely_fail_high && tt_self_attack < 4 {
                         tt_depthdown += 1.0;
                     }
-                    let mut candidate_snapshot: Option<EvalSnapshot> = None;
+                    let mut candidate_snapshot: Option<PendingEvalSnapshot> = None;
                     board
                         .play_assuming_rule_legal(tt_mv, Some(side), self.config.rule_set)
                         .expect("legal TT move stays legal");
@@ -1165,7 +1182,7 @@ impl AlphaBetaSearcher {
                     }
                     coverage.remove_move(tt_mv);
                     if let Some(snapshot) = candidate_snapshot.as_ref() {
-                        caches.restore_snapshot(snapshot);
+                        snapshot.restore(caches);
                     }
                     if stats.stop {
                         return (current, best_move);
@@ -1665,7 +1682,7 @@ impl AlphaBetaSearcher {
                     }
                 }
 
-                let mut candidate_snapshot: Option<EvalSnapshot> = None;
+                let mut candidate_snapshot: Option<PendingEvalSnapshot> = None;
                 let (mx, my) = move_to_xy(candidate.move_).expect("candidate move is valid");
                 let profile_root_candidate = options.root && stats.root_profile;
                 let profile_start = profile_root_candidate.then(Instant::now);
@@ -1991,7 +2008,7 @@ impl AlphaBetaSearcher {
                 }
                 coverage.remove_move(candidate.move_);
                 if let Some(snapshot) = candidate_snapshot {
-                    caches.restore_snapshot(&snapshot);
+                    snapshot.restore(caches);
                 }
                 if stats.stop {
                     if profile_root_candidate {
@@ -2554,7 +2571,7 @@ impl AlphaBetaSearcher {
         let mut best_move: Option<Move> = None;
         for &(mv, _) in &b4_moves[..b4_len] {
             let (mx, my) = move_to_xy(mv).expect("B4 move valid");
-            let snapshot = caches.snapshot();
+            let snapshot = caches.snapshot_nnue();
             board
                 .play_assuming_rule_legal(mv, Some(side), self.config.rule_set)
                 .expect("B4 move stays legal");
@@ -2586,7 +2603,7 @@ impl AlphaBetaSearcher {
                 nnue.after_undo(side, mx, my);
             }
             coverage.remove_move(mv);
-            caches.restore_snapshot(&snapshot);
+            caches.restore_snapshot_nnue(&snapshot);
 
             if stats.stop {
                 return 0;
@@ -2689,7 +2706,7 @@ impl AlphaBetaSearcher {
         }
 
         let (mx, my) = move_to_xy(mv).expect("forced block valid");
-        let snapshot = caches.snapshot();
+        let snapshot = caches.snapshot_nnue();
         board
             .play_assuming_rule_legal(mv, Some(side), self.config.rule_set)
             .expect("forced block stays legal");
@@ -2722,7 +2739,7 @@ impl AlphaBetaSearcher {
             nnue.after_undo(side, mx, my);
         }
         coverage.remove_move(mv);
-        caches.restore_snapshot(&snapshot);
+        caches.restore_snapshot_nnue(&snapshot);
 
         if stats.stop {
             return 0;

@@ -4,7 +4,7 @@ pub mod caches;
 pub mod global_eval;
 pub mod local;
 
-pub use caches::{caches_backend_name, EvalCaches, EvalSnapshot};
+pub use caches::{caches_backend_name, EvalCaches, EvalSnapshot, EvalSnapshotNnue};
 pub use global_eval::{
     evaluate_board, evaluate_board_main, evaluate_board_main_cached, evaluate_board_main_scan,
     evaluate_last5_branch, evaluate_next43_branch, find_last5_target, global_eval_backend_name,

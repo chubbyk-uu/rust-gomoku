@@ -74,17 +74,59 @@ pub(crate) fn dgn_contribution(cc: u8) -> i32 {
     }
 }
 
+/// Compact threat category per bucket (`0..92`):
+/// `0 = none`, `1 = L5 (79..=91)`, `2 = L4 (67..=78)`, `3 = double-four (66)`,
+/// `4 = four-three (64..=65)`, `5 = double-three (45, 54, 55)`.
+pub(crate) const THREAT_CLASS: [u8; DSHAPE_SIZE] = {
+    let mut table = [0_u8; DSHAPE_SIZE];
+    table[45] = 5;
+    table[54] = 5;
+    table[55] = 5;
+    table[64] = 4;
+    table[65] = 4;
+    table[66] = 3;
+    let mut b = 67;
+    while b <= 78 {
+        table[b] = 2;
+        b += 1;
+    }
+    let mut b = 79;
+    while b <= 91 {
+        table[b] = 1;
+        b += 1;
+    }
+    table
+};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvalSnapshot {
     pub initialized: bool,
     pub rule_set: RuleSet,
     pub empty_bucket_counts: EmptyBucketCounts,
     pub nonzero_bucket_mask: NonZeroBucketMask,
+    pub threat_counts: [[u8; 6]; 2],
     pub attack4_mask: [[u64; 4]; 2],
     pub l5_mask: [[u64; 4]; 2],
     pub dgn_sum: [i32; 2],
     pub shadow_log_len: usize,
     pub dgn_cc_log_len: usize,
+    pub shape_log_len: usize,
+    pub value_log_len: usize,
+    pub dt3_present_log_len: usize,
+    pub dt3_members_len: usize,
+}
+
+/// Lightweight snapshot for NNUE search: skips `empty_bucket_counts` (368B),
+/// `nonzero_bucket_mask` (48B), and classical `dgn` state since NNUE reads only
+/// `threat_counts`, `attack4_mask`, `l5_mask`, and per-point shape/bucket/attack caches.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvalSnapshotNnue {
+    pub initialized: bool,
+    pub rule_set: RuleSet,
+    pub threat_counts: [[u8; 6]; 2],
+    pub attack4_mask: [[u64; 4]; 2],
+    pub l5_mask: [[u64; 4]; 2],
+    pub shadow_log_len: usize,
     pub shape_log_len: usize,
     pub value_log_len: usize,
     pub dt3_present_log_len: usize,
@@ -101,6 +143,7 @@ pub struct EvalCaches {
     pub attack_cache: ValueCache,
     pub empty_bucket_counts: EmptyBucketCounts,
     pub(crate) nonzero_bucket_mask: NonZeroBucketMask,
+    pub(crate) threat_counts: [[u8; 6]; 2],
     pub(crate) attack4_mask: [[u64; 4]; 2],
     pub(crate) l5_mask: [[u64; 4]; 2],
     pub(crate) packed_lines: PackedLineStones,
@@ -146,37 +189,39 @@ impl EvalCaches {
     #[inline(always)]
     pub fn has_l5(&self, side: i8) -> bool {
         let player = if side == BLACK { 0 } else { 1 };
-        (self.nonzero_bucket_mask[player][1] & Self::L5_BUCKET_WORD1_MASK) != 0
+        self.threat_counts[player][1] != 0
     }
 
     #[inline(always)]
     pub fn has_l4(&self, side: i8) -> bool {
         let player = if side == BLACK { 0 } else { 1 };
-        (self.nonzero_bucket_mask[player][1] & Self::L4_BUCKET_WORD1_MASK) != 0
+        self.threat_counts[player][2] != 0
     }
 
     #[inline(always)]
     pub fn has_double_four(&self, side: i8) -> bool {
         let player = if side == BLACK { 0 } else { 1 };
-        (self.nonzero_bucket_mask[player][1] & Self::DOUBLE_FOUR_BUCKET_WORD1_MASK) != 0
+        self.threat_counts[player][3] != 0
     }
 
     #[inline(always)]
     pub fn has_four_three(&self, side: i8) -> bool {
         let player = if side == BLACK { 0 } else { 1 };
-        (self.nonzero_bucket_mask[player][1] & Self::FOUR_THREE_BUCKET_WORD1_MASK) != 0
+        self.threat_counts[player][4] != 0
     }
 
     #[inline(always)]
     pub fn has_double_three(&self, side: i8) -> bool {
         let player = if side == BLACK { 0 } else { 1 };
-        (self.nonzero_bucket_mask[player][0] & Self::DOUBLE_THREE_BUCKET_WORD0_MASK) != 0
+        self.threat_counts[player][5] != 0
     }
 
     #[inline(always)]
     pub fn has_any_l4_or_l5(&self) -> bool {
-        ((self.nonzero_bucket_mask[0][1] | self.nonzero_bucket_mask[1][1])
-            & Self::L4_L5_BUCKET_WORD1_MASK)
+        (self.threat_counts[0][1]
+            | self.threat_counts[0][2]
+            | self.threat_counts[1][1]
+            | self.threat_counts[1][2])
             != 0
     }
 
@@ -238,6 +283,7 @@ impl EvalCaches {
             attack_cache: new_value_cache(),
             empty_bucket_counts: new_empty_bucket_counts(),
             nonzero_bucket_mask: [[0; 3]; 2],
+            threat_counts: [[0; 6]; 2],
             attack4_mask: [[0; 4]; 2],
             l5_mask: [[0; 4]; 2],
             packed_lines: [[0; 2]; PACKED_LINE_COUNT],
@@ -320,6 +366,8 @@ impl EvalCaches {
             self.nonzero_bucket_mask[player][bucket >> 6] |= 1_u64 << (bucket & 63);
         }
         *count += 1;
+        let cls = THREAT_CLASS[bucket] as usize;
+        self.threat_counts[player][cls] = self.threat_counts[player][cls].wrapping_add(1);
     }
 
     #[inline(always)]
@@ -330,6 +378,40 @@ impl EvalCaches {
         *count -= 1;
         if *count == 0 {
             self.nonzero_bucket_mask[player][bucket >> 6] &= !(1_u64 << (bucket & 63));
+        }
+        let cls = THREAT_CLASS[bucket] as usize;
+        self.threat_counts[player][cls] = self.threat_counts[player][cls].wrapping_sub(1);
+    }
+
+    #[inline(always)]
+    pub(crate) fn inc_threat_bucket(&mut self, player: usize, bucket: usize) {
+        debug_assert!(bucket < DSHAPE_SIZE);
+        let cls = THREAT_CLASS[bucket] as usize;
+        self.threat_counts[player][cls] = self.threat_counts[player][cls].wrapping_add(1);
+    }
+
+    #[inline(always)]
+    pub(crate) fn dec_threat_bucket(&mut self, player: usize, bucket: usize) {
+        debug_assert!(bucket < DSHAPE_SIZE);
+        let cls = THREAT_CLASS[bucket] as usize;
+        self.threat_counts[player][cls] = self.threat_counts[player][cls].wrapping_sub(1);
+    }
+
+    #[inline(always)]
+    pub(crate) fn swap_threat_bucket(
+        &mut self,
+        player: usize,
+        old_bucket: usize,
+        new_bucket: usize,
+    ) {
+        debug_assert!(old_bucket < DSHAPE_SIZE && new_bucket < DSHAPE_SIZE);
+        let old_cls = THREAT_CLASS[old_bucket] as usize;
+        let new_cls = THREAT_CLASS[new_bucket] as usize;
+        if old_cls != new_cls {
+            self.threat_counts[player][old_cls] =
+                self.threat_counts[player][old_cls].wrapping_sub(1);
+            self.threat_counts[player][new_cls] =
+                self.threat_counts[player][new_cls].wrapping_add(1);
         }
     }
 
@@ -399,6 +481,7 @@ impl EvalCaches {
             rule_set: self.rule_set,
             empty_bucket_counts: self.empty_bucket_counts,
             nonzero_bucket_mask: self.nonzero_bucket_mask,
+            threat_counts: self.threat_counts,
             attack4_mask: self.attack4_mask,
             l5_mask: self.l5_mask,
             dgn_sum: self.dgn_sum,
@@ -416,6 +499,7 @@ impl EvalCaches {
         self.rule_set = snapshot.rule_set;
         self.empty_bucket_counts = snapshot.empty_bucket_counts;
         self.nonzero_bucket_mask = snapshot.nonzero_bucket_mask;
+        self.threat_counts = snapshot.threat_counts;
         self.attack4_mask = snapshot.attack4_mask;
         self.l5_mask = snapshot.l5_mask;
         self.dgn_sum = snapshot.dgn_sum;
@@ -430,6 +514,61 @@ impl EvalCaches {
         while self.dgn_cc_log.len() > snapshot.dgn_cc_log_len {
             let (x, y, old_cc) = self.dgn_cc_log.pop().expect("dgn cc log length tracked");
             self.dgn_cc[x as usize][y as usize] = old_cc;
+        }
+        while self.shape_log.len() > snapshot.shape_log_len {
+            let (player, x, y, direction, old_value) =
+                self.shape_log.pop().expect("shape log length tracked");
+            self.shape_cache[player as usize][x as usize][y as usize][direction as usize] =
+                old_value;
+        }
+        while self.value_log.len() > snapshot.value_log_len {
+            let (player, x, y, old_bucket, old_attack) =
+                self.value_log.pop().expect("value log length tracked");
+            self.value_cache[player as usize][x as usize][y as usize] = i32::from(old_bucket);
+            self.attack_cache[player as usize][x as usize][y as usize] = i32::from(old_attack);
+        }
+        while self.dt3_present_log.len() > snapshot.dt3_present_log_len {
+            let (x, y, old_value) = self
+                .dt3_present_log
+                .pop()
+                .expect("dt3 present log length tracked");
+            self.dt3_present[x as usize][y as usize] = old_value;
+        }
+        self.dt3_members.truncate(snapshot.dt3_members_len);
+        if self.active_snapshot_count > 0 {
+            self.active_snapshot_count -= 1;
+        }
+    }
+
+    pub fn snapshot_nnue(&mut self) -> EvalSnapshotNnue {
+        self.active_snapshot_count += 1;
+        EvalSnapshotNnue {
+            initialized: self.initialized,
+            rule_set: self.rule_set,
+            threat_counts: self.threat_counts,
+            attack4_mask: self.attack4_mask,
+            l5_mask: self.l5_mask,
+            shadow_log_len: self.shadow_log.len(),
+            shape_log_len: self.shape_log.len(),
+            value_log_len: self.value_log.len(),
+            dt3_present_log_len: self.dt3_present_log.len(),
+            dt3_members_len: self.dt3_members.len(),
+        }
+    }
+
+    pub fn restore_snapshot_nnue(&mut self, snapshot: &EvalSnapshotNnue) {
+        self.initialized = snapshot.initialized;
+        self.rule_set = snapshot.rule_set;
+        self.threat_counts = snapshot.threat_counts;
+        self.attack4_mask = snapshot.attack4_mask;
+        self.l5_mask = snapshot.l5_mask;
+
+        while self.shadow_log.len() > snapshot.shadow_log_len {
+            let (x, y, old_cell) = self.shadow_log.pop().expect("shadow log length tracked");
+            let ux = x as usize;
+            let uy = y as usize;
+            self.board_shadow[ux][uy] = old_cell;
+            update_packed_lines_cell(&mut self.packed_lines, ux, uy, old_cell);
         }
         while self.shape_log.len() > snapshot.shape_log_len {
             let (player, x, y, direction, old_value) =
@@ -477,6 +616,7 @@ impl EvalCaches {
         self.attack_cache = other.attack_cache;
         self.empty_bucket_counts = other.empty_bucket_counts;
         self.nonzero_bucket_mask = other.nonzero_bucket_mask;
+        self.threat_counts = other.threat_counts;
         self.attack4_mask = other.attack4_mask;
         self.l5_mask = other.l5_mask;
         self.packed_lines = other.packed_lines;

@@ -353,7 +353,7 @@ fn value_wide_compute_inner<const TRACK_DGN: bool>(
         None
     };
     // Process center cell (cx, cy) directly (the sole intersection of all 4 lines).
-    remove_empty_bucket_contribution(caches, cx, cy);
+    remove_empty_bucket_contribution::<TRACK_DGN>(caches, cx, cy);
     if new_cell == EMPTY {
         let notify_center_dgn = TRACK_DGN && !center_changed;
         let mut changed_player = [false; 2];
@@ -427,7 +427,7 @@ fn value_wide_compute_inner<const TRACK_DGN: bool>(
     if TRACK_DGN && center_changed {
         update_center_neighbor_dgn(board, caches, cx, cy, old_cell, new_cell, &old_center_zero);
     }
-    add_empty_bucket_contribution(board, caches, cx, cy);
+    add_empty_bucket_contribution::<TRACK_DGN>(board, caches, cx, cy);
     caches.set_board_shadow(cx, cy, new_cell);
 
     // Non-center dirty points lie on strictly one of the 4 lines through (cx, cy).
@@ -524,7 +524,7 @@ fn value_wide_compute_inner<const TRACK_DGN: bool>(
     }
 
     if renju {
-        refresh_renju_apparent_double_three_points(board, caches, &black_refreshed);
+        refresh_renju_apparent_double_three_points::<TRACK_DGN>(board, caches, &black_refreshed);
     }
 }
 
@@ -558,7 +558,7 @@ fn update_line_neighbor_point<const TRACK_DGN: bool>(
     if cell == EMPTY {
         let was_empty = caches.board_shadow[x][y] == EMPTY;
         if !was_empty {
-            remove_empty_bucket_contribution(caches, x, y);
+            remove_empty_bucket_contribution::<TRACK_DGN>(caches, x, y);
         }
         let shapes = line.hypothetical_shapes(line_pos, renju);
         let changed_player = update_direction_cache::<TRACK_DGN>(
@@ -572,8 +572,12 @@ fn update_line_neighbor_point<const TRACK_DGN: bool>(
                 if was_empty {
                     let new_bucket = caches.value_cache[player][x][y] as usize;
                     if old_bucket != new_bucket {
-                        caches.dec_empty_bucket(player, old_bucket);
-                        caches.inc_empty_bucket(player, new_bucket);
+                        if TRACK_DGN {
+                            caches.dec_empty_bucket(player, old_bucket);
+                            caches.inc_empty_bucket(player, new_bucket);
+                        } else {
+                            caches.swap_threat_bucket(player, old_bucket, new_bucket);
+                        }
                     }
                     let new_attack = caches.attack_cache[player][x][y];
                     if old_attack != new_attack && (old_attack >= 4 || new_attack >= 4) {
@@ -587,11 +591,11 @@ fn update_line_neighbor_point<const TRACK_DGN: bool>(
             }
         }
         if !was_empty {
-            add_empty_bucket_contribution(board, caches, x, y);
+            add_empty_bucket_contribution::<TRACK_DGN>(board, caches, x, y);
             caches.set_board_shadow(x, y, EMPTY);
         }
     } else if caches.board_shadow[x][y] != cell {
-        remove_empty_bucket_contribution(caches, x, y);
+        remove_empty_bucket_contribution::<TRACK_DGN>(caches, x, y);
         clear_occupied_point(caches, x, y);
         if renju {
             caches.set_dt3_present(x, y, false);
@@ -644,6 +648,7 @@ fn side_index(side: i8) -> usize {
 fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
     caches.empty_bucket_counts = [[0; DSHAPE_SIZE]; 2];
     caches.nonzero_bucket_mask = [[0; 3]; 2];
+    caches.threat_counts = [[0; 6]; 2];
     caches.attack4_mask = [[0; 4]; 2];
     caches.l5_mask = [[0; 4]; 2];
     caches.dgn_sum = [0; 2];
@@ -697,28 +702,45 @@ fn rebuild_global_eval_state(board: &Board, caches: &mut EvalCaches) {
     }
 }
 
-fn remove_empty_bucket_contribution(caches: &mut EvalCaches, x: usize, y: usize) {
+fn remove_empty_bucket_contribution<const FULL_EVAL: bool>(
+    caches: &mut EvalCaches,
+    x: usize,
+    y: usize,
+) {
     if caches.board_shadow[x][y] != EMPTY {
         return;
     }
     let move_idx = y * BOARD_SIZE + x;
     for player in 0..2 {
         let bucket = caches.value_cache[player][x][y] as usize;
-        caches.dec_empty_bucket(player, bucket);
+        if FULL_EVAL {
+            caches.dec_empty_bucket(player, bucket);
+        } else {
+            caches.dec_threat_bucket(player, bucket);
+        }
         if caches.attack_cache[player][x][y] >= 4 {
             caches.clear_attack_masks(player, move_idx);
         }
     }
 }
 
-fn add_empty_bucket_contribution(board: &Board, caches: &mut EvalCaches, x: usize, y: usize) {
+fn add_empty_bucket_contribution<const FULL_EVAL: bool>(
+    board: &Board,
+    caches: &mut EvalCaches,
+    x: usize,
+    y: usize,
+) {
     if board.grid_rows()[y][x] != EMPTY {
         return;
     }
     let move_idx = y * BOARD_SIZE + x;
     for player in 0..2 {
         let bucket = caches.value_cache[player][x][y] as usize;
-        caches.inc_empty_bucket(player, bucket);
+        if FULL_EVAL {
+            caches.inc_empty_bucket(player, bucket);
+        } else {
+            caches.inc_threat_bucket(player, bucket);
+        }
         let attack = caches.attack_cache[player][x][y];
         if attack >= 4 {
             caches.set_attack_masks(player, move_idx, attack);
@@ -885,7 +907,7 @@ fn refresh_dt3_membership(caches: &mut EvalCaches, board: &Board, x: usize, y: u
     caches.set_dt3_present(x, y, member);
 }
 
-fn refresh_renju_apparent_double_three_points(
+fn refresh_renju_apparent_double_three_points<const FULL_EVAL: bool>(
     board: &Board,
     caches: &mut EvalCaches,
     black_refreshed: &[u64; 4],
@@ -924,8 +946,12 @@ fn refresh_renju_apparent_double_three_points(
 
         let old_bucket_index = old_bucket as usize;
         let new_bucket_index = bucket as usize;
-        caches.dec_empty_bucket(player, old_bucket_index);
-        caches.inc_empty_bucket(player, new_bucket_index);
+        if FULL_EVAL {
+            caches.dec_empty_bucket(player, old_bucket_index);
+            caches.inc_empty_bucket(player, new_bucket_index);
+        } else {
+            caches.swap_threat_bucket(player, old_bucket_index, new_bucket_index);
+        }
         if old_attack >= 4 || attack >= 4 {
             caches.set_attack_masks(player, move_, attack);
         }
@@ -1379,13 +1405,30 @@ mod tests {
             assert_eq!(a.shape_cache, b.shape_cache, "{label}: shape_cache");
             assert_eq!(a.value_cache, b.value_cache, "{label}: value_cache");
             assert_eq!(a.attack_cache, b.attack_cache, "{label}: attack_cache");
+            assert_eq!(a.threat_counts, b.threat_counts, "{label}: threat_counts");
+            for side in [BLACK, WHITE] {
+                assert_eq!(a.has_l5(side), b.has_l5(side), "{label}: has_l5({side})");
+                assert_eq!(a.has_l4(side), b.has_l4(side), "{label}: has_l4({side})");
+                assert_eq!(
+                    a.has_double_four(side),
+                    b.has_double_four(side),
+                    "{label}: has_double_four({side})"
+                );
+                assert_eq!(
+                    a.has_four_three(side),
+                    b.has_four_three(side),
+                    "{label}: has_four_three({side})"
+                );
+                assert_eq!(
+                    a.has_double_three(side),
+                    b.has_double_three(side),
+                    "{label}: has_double_three({side})"
+                );
+            }
             assert_eq!(
-                a.empty_bucket_counts, b.empty_bucket_counts,
-                "{label}: empty_bucket_counts"
-            );
-            assert_eq!(
-                a.nonzero_bucket_mask, b.nonzero_bucket_mask,
-                "{label}: nonzero_bucket_mask"
+                a.has_any_l4_or_l5(),
+                b.has_any_l4_or_l5(),
+                "{label}: has_any_l4_or_l5"
             );
             assert_eq!(a.attack4_mask, b.attack4_mask, "{label}: attack4_mask");
             assert_eq!(a.l5_mask, b.l5_mask, "{label}: l5_mask");
@@ -1415,7 +1458,7 @@ mod tests {
             let mut fast_snaps = Vec::new();
             for (step, &(x, y, side)) in moves.iter().enumerate() {
                 full_snaps.push(full.snapshot());
-                fast_snaps.push(fast.snapshot());
+                fast_snaps.push(fast.snapshot_nnue());
                 board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
                 value_wide_compute_for_rule(&mut board, &mut full, (x, y), rule);
                 value_wide_compute_for_rule_no_dgn(&mut board, &mut fast, (x, y), rule);
@@ -1428,7 +1471,7 @@ mod tests {
             for step in (0..moves.len()).rev() {
                 board.undo().unwrap();
                 full.restore_snapshot(&full_snaps[step]);
-                fast.restore_snapshot(&fast_snaps[step]);
+                fast.restore_snapshot_nnue(&fast_snaps[step]);
                 assert_non_dgn_eq(&full, &fast, &format!("{rule:?} undo step {step}"));
             }
         }
