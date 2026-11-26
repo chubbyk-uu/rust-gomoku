@@ -468,8 +468,15 @@ pub fn diagnose_candidates(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CandidateGenerationFlags {
+    pub single_forcing: bool,
+    pub hostile_threat: bool,
+    pub win_priority: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn generate_candidates_with_coverage_scratch(
+pub(crate) fn generate_candidates_into_with_coverage_scratch(
     board: &Board,
     caches: &EvalCaches,
     side: i8,
@@ -480,7 +487,26 @@ pub(crate) fn generate_candidates_with_coverage_scratch(
     preserve_scan_order: bool,
     coverage: &CoverageTracker,
     analysis: &mut MoveAnalysis,
-) -> CandidateGenerationResult {
+    out: &mut Vec<Candidate>,
+) -> CandidateGenerationFlags {
+    out.clear();
+    if caches.initialized
+        && caches.rule_set == config.rule_set
+        && !caches.has_any_l4_or_l5()
+        && board.move_count() > 0
+    {
+        return generate_candidates_no_l4_l5_into(
+            board,
+            caches,
+            side,
+            config,
+            root_allowed_moves,
+            preferred_move,
+            coverage,
+            out,
+        );
+    }
+
     let mut moves_buf = CoveredMovesBuf::default();
     coverage.collect_moves(board, &mut moves_buf);
     let moves = moves_buf.as_slice();
@@ -494,7 +520,7 @@ pub(crate) fn generate_candidates_with_coverage_scratch(
         moves,
         analysis,
     );
-    select_candidates(
+    select_candidates_into(
         board,
         caches,
         side,
@@ -506,7 +532,92 @@ pub(crate) fn generate_candidates_with_coverage_scratch(
         false,
         moves,
         analysis,
+        out,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_candidates_no_l4_l5_into(
+    board: &Board,
+    caches: &EvalCaches,
+    side: i8,
+    config: &EngineConfig,
+    root_allowed_moves: Option<&HashSet<Move>>,
+    preferred_move: Option<Move>,
+    coverage: &CoverageTracker,
+    out: &mut Vec<Candidate>,
+) -> CandidateGenerationFlags {
+    let player = if side == crate::constants::BLACK {
+        0
+    } else {
+        1
+    };
+    let opponent = 1 - player;
+    let attack_table = &config.eval_tables.attack_value;
+    let defend_table = &config.eval_tables.defend_value;
+    let self_buckets = &caches.value_cache[player];
+    let opp_buckets = &caches.value_cache[opponent];
+    let self_attacks = &caches.attack_cache[player];
+    let opp_attacks = &caches.attack_cache[opponent];
+    let renju_black = config.rule_set == RuleSet::Renju && side == crate::constants::BLACK;
+    let grid = board.grid_rows();
+
+    'rows: for (y, row) in grid.iter().enumerate() {
+        let row_base = y * BOARD_SIZE;
+        for (x, &cell) in row.iter().enumerate() {
+            let move_index = row_base + x;
+            if coverage.counts[move_index] == 0 || cell != EMPTY {
+                continue;
+            }
+            let move_ = move_index as Move;
+            if let Some(allowed) = root_allowed_moves {
+                if !allowed.contains(&move_) {
+                    continue;
+                }
+            }
+            let b_self = self_buckets[x][y] as usize;
+            if renju_black && b_self == 0 {
+                debug_assert!(!board.is_legal_move_for_rule(move_, side, config.rule_set));
+                continue;
+            }
+            let vbw = fast_trunc(attack_table[b_self] + defend_table[opp_buckets[x][y] as usize]);
+            if vbw <= 0.0 {
+                continue;
+            }
+            debug_assert!(
+                !renju_black || board.is_legal_move_for_rule(move_, side, config.rule_set)
+            );
+
+            let mut score = vbw - 300_000_000.0;
+            if preferred_move == Some(move_) {
+                score = 100.0;
+            }
+            let self_attack = self_attacks[x][y];
+            let opp_attack = opp_attacks[x][y];
+            debug_assert!(self_attack < 5 && opp_attack < 5);
+            let candidate = Candidate {
+                move_,
+                order_score: score,
+                self_attack,
+                opp_attack,
+            };
+            if score >= f64::from(WIN) {
+                out.clear();
+                out.push(candidate);
+                break 'rows;
+            }
+            if score <= -f64::from(WIN) && score >= -200_000_000.0 {
+                continue;
+            }
+            out.push(candidate);
+        }
+    }
+
+    CandidateGenerationFlags {
+        single_forcing: false,
+        hostile_threat: false,
+        win_priority: false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -608,9 +719,47 @@ fn select_candidates(
     moves: &[Move],
     analysis: &mut MoveAnalysis,
 ) -> CandidateGenerationResult {
+    let mut candidates = Vec::with_capacity(moves.len());
+    let flags = select_candidates_into(
+        board,
+        caches,
+        side,
+        config,
+        wide,
+        root_allowed_moves,
+        preferred_move,
+        preserve_scan_order,
+        presort_for_forcing,
+        moves,
+        analysis,
+        &mut candidates,
+    );
+    CandidateGenerationResult {
+        candidates,
+        single_forcing: flags.single_forcing,
+        hostile_threat: flags.hostile_threat,
+        win_priority: flags.win_priority,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_candidates_into(
+    board: &Board,
+    caches: &EvalCaches,
+    side: i8,
+    config: &EngineConfig,
+    wide: Option<usize>,
+    root_allowed_moves: Option<&HashSet<Move>>,
+    preferred_move: Option<Move>,
+    preserve_scan_order: bool,
+    presort_for_forcing: bool,
+    moves: &[Move],
+    analysis: &mut MoveAnalysis,
+    candidates: &mut Vec<Candidate>,
+) -> CandidateGenerationFlags {
     let _wide = wide.unwrap_or(config.root_search.wide as usize);
     let forcing_collapse = analysis.winpri || analysis.sglflag > 0;
-    let mut candidates = Vec::with_capacity(moves.len());
+    candidates.clear();
     for &move_ in moves {
         if let Some(allowed) = root_allowed_moves {
             if !allowed.contains(&move_) {
@@ -638,7 +787,8 @@ fn select_candidates(
             opp_attack: i32::from(analysis.opp_attack_map[move_index]),
         };
         if score >= f64::from(WIN) {
-            candidates = vec![candidate];
+            candidates.clear();
+            candidates.push(candidate);
             break;
         }
         if score <= -f64::from(WIN) && score >= -200_000_000.0 {
@@ -657,26 +807,27 @@ fn select_candidates(
     }
 
     if analysis.winpri && !candidates.is_empty() {
-        let candidate = best_win_priority_candidate(&candidates);
-        return CandidateGenerationResult {
-            candidates: vec![candidate],
+        let candidate = best_win_priority_candidate(candidates);
+        candidates.clear();
+        candidates.push(candidate);
+        return CandidateGenerationFlags {
             single_forcing: false,
             hostile_threat: analysis.hsflag.is_some(),
             win_priority: true,
         };
     }
     if analysis.sglflag > 0 && !candidates.is_empty() {
-        let candidate = best_forcing_candidate(&candidates);
-        return CandidateGenerationResult {
-            candidates: vec![candidate],
+        let candidate = best_forcing_candidate(candidates);
+        candidates.clear();
+        candidates.push(candidate);
+        return CandidateGenerationFlags {
             single_forcing: true,
             hostile_threat: analysis.hsflag.is_some(),
             win_priority: analysis.winpri,
         };
     }
 
-    CandidateGenerationResult {
-        candidates,
+    CandidateGenerationFlags {
         single_forcing: false,
         hostile_threat: analysis.hsflag.is_some(),
         win_priority: analysis.winpri,
@@ -728,10 +879,16 @@ pub(crate) fn is_rule_legal_for_movegen(
         return false;
     }
     let (x, y) = move_to_xy(move_).expect("candidate move is valid");
-    if rule_detector_required(caches, x, y, side, rule) {
-        return board.is_legal_move_for_rule(move_, side, rule);
+    if caches.initialized && caches.rule_set == rule {
+        let legal = caches.value_cache[0][x][y] != 0;
+        debug_assert_eq!(
+            legal,
+            board.is_legal_move_for_rule(move_, side, rule),
+            "Renju black value_cache[0][{x}][{y}] must match rule legality"
+        );
+        return legal;
     }
-    true
+    board.is_legal_move_for_rule(move_, side, rule)
 }
 
 fn renju_black_candidate_needs_full_detector(caches: &EvalCaches, x: usize, y: usize) -> bool {

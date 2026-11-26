@@ -37,7 +37,7 @@ use crate::nnue::{load_mix9svq_evaluator_for_rule, Mix9svqEvaluator};
 use crate::rules::RuleSet;
 use crate::search::abdada::{AbdadaContext, ABDADA_MIN_DEPTH};
 use crate::search::movegen::{
-    generate_candidates_with_coverage_scratch, is_rule_legal_for_movegen, Candidate,
+    generate_candidates_into_with_coverage_scratch, is_rule_legal_for_movegen, Candidate,
     CoverageTracker, MoveAnalysis,
 };
 use crate::search::ordering::{
@@ -315,6 +315,7 @@ pub struct AlphaBetaSearcher {
     pub vcf: VCFSearcher,
     tt_generation: u16,
     movegen_scratch: MoveAnalysis,
+    candidate_pool: Vec<Vec<Candidate>>,
     nnue: Option<Mix9svqEvaluator>,
     static_eval_stack: [i32; 128],
     quiet_history: [[i32; BOARD_AREA]; 2],
@@ -354,6 +355,7 @@ impl AlphaBetaSearcher {
             vcf: VCFSearcher::default(),
             tt_generation: 0,
             movegen_scratch: MoveAnalysis::new(),
+            candidate_pool: Vec::new(),
             nnue,
             static_eval_stack: [TT_VALUE_NONE; 128],
             quiet_history: [[0; BOARD_AREA]; 2],
@@ -377,6 +379,7 @@ impl AlphaBetaSearcher {
             vcf: VCFSearcher::default(),
             tt_generation: 0,
             movegen_scratch: MoveAnalysis::new(),
+            candidate_pool: Vec::new(),
             nnue,
             static_eval_stack: [TT_VALUE_NONE; 128],
             quiet_history: [[0; BOARD_AREA]; 2],
@@ -1222,49 +1225,49 @@ impl AlphaBetaSearcher {
         // O(1) NNUE forced-defense fast path: when `quick_win_check_nnue`
         // confirmed we have no L5 and opponent has exactly one legal-to-block
         // L5, skip full board movegen and emit that unique forced reply directly.
-        let (mut generated_candidates, win_priority, single_forcing, hostile_threat) =
-            if self.nnue.is_some()
-                && !options.root
-                && !in_singular
-                && !self.config.runtime.nonroot_vcf
-                && caches.initialized
-                && caches.rule_set == self.config.rule_set
-                && !no_l4_l5
-                && caches.l5_count(-side) == 1
-            {
-                let mv = caches.first_l5_move(-side).expect("opp_l5_count == 1");
-                let (mx, my) = move_to_xy(mv).expect("forced L5 block valid");
-                (
-                    vec![Candidate {
-                        move_: mv,
-                        order_score: 0.0,
-                        self_attack: attack_level(caches, mx, my, side),
-                        opp_attack: 6,
-                    }],
-                    false,
-                    true,
-                    false,
-                )
-            } else {
-                let generated = generate_candidates_with_coverage_scratch(
-                    board,
-                    caches,
-                    side,
-                    &self.config,
-                    Some(wide),
-                    root_allowed_moves,
-                    tt_best_move,
-                    options.root,
-                    coverage,
-                    &mut self.movegen_scratch,
-                );
-                (
-                    generated.candidates,
-                    generated.win_priority,
-                    generated.single_forcing,
-                    generated.hostile_threat,
-                )
-            };
+        let mut generated_candidates = self
+            .candidate_pool
+            .pop()
+            .unwrap_or_else(|| Vec::with_capacity(64));
+        let (win_priority, single_forcing, hostile_threat) = if self.nnue.is_some()
+            && !options.root
+            && !in_singular
+            && !self.config.runtime.nonroot_vcf
+            && caches.initialized
+            && caches.rule_set == self.config.rule_set
+            && !no_l4_l5
+            && caches.l5_count(-side) == 1
+        {
+            let mv = caches.first_l5_move(-side).expect("opp_l5_count == 1");
+            let (mx, my) = move_to_xy(mv).expect("forced L5 block valid");
+            generated_candidates.clear();
+            generated_candidates.push(Candidate {
+                move_: mv,
+                order_score: 0.0,
+                self_attack: attack_level(caches, mx, my, side),
+                opp_attack: 6,
+            });
+            (false, true, false)
+        } else {
+            let flags = generate_candidates_into_with_coverage_scratch(
+                board,
+                caches,
+                side,
+                &self.config,
+                Some(wide),
+                root_allowed_moves,
+                tt_best_move,
+                options.root,
+                coverage,
+                &mut self.movegen_scratch,
+                &mut generated_candidates,
+            );
+            (
+                flags.win_priority,
+                flags.single_forcing,
+                flags.hostile_threat,
+            )
+        };
         if no_l4_l5 {
             debug_assert!(!win_priority && !single_forcing && !hostile_threat);
         }
@@ -1351,527 +1354,392 @@ impl AlphaBetaSearcher {
         } else {
             0
         };
-        if win_priority && !ordered.is_empty() {
-            if lazy_tie_ordering && tie_sorted_until == 0 {
-                let _ = resolve_candidate_tie_group(board, &mut ordered, 0, side, tt_best_move);
+        let result = 'move_loop: {
+            if win_priority && !ordered.is_empty() {
+                if lazy_tie_ordering && tie_sorted_until == 0 {
+                    let _ = resolve_candidate_tie_group(board, &mut ordered, 0, side, tt_best_move);
+                }
+                break 'move_loop (INF - options.ply, Some(ordered[0].move_));
             }
-            return (INF - options.ply, Some(ordered[0].move_));
-        }
 
-        if self.config.runtime.compute_vcf && self.config.runtime.nonroot_vcf && !options.root {
-            let nonroot_vcf_depth = Self::nonroot_vcf_depth(depth, root_depth);
-            if nonroot_vcf_depth > 0
-                && self
-                    .vcf
-                    .search_with_multi_reply_for_rule(
-                        board,
-                        -side,
-                        nonroot_vcf_depth,
-                        self.config.runtime.vcf_multi_reply,
-                        self.config.rule_set,
-                    )
-                    .found
-            {
-                let mut filtered = Vec::new();
-                for candidate in ordered {
-                    if self.vcf.budget.stopped() {
-                        stats.stop = true;
-                        return (0, None);
-                    }
-                    let mut trial = board.clone();
-                    trial
-                        .play_assuming_rule_legal(candidate.move_, Some(side), self.config.rule_set)
-                        .expect("ordered move stays legal on trial board");
-                    if !self
+            if self.config.runtime.compute_vcf && self.config.runtime.nonroot_vcf && !options.root {
+                let nonroot_vcf_depth = Self::nonroot_vcf_depth(depth, root_depth);
+                if nonroot_vcf_depth > 0
+                    && self
                         .vcf
                         .search_with_multi_reply_for_rule(
-                            &trial,
+                            board,
                             -side,
                             nonroot_vcf_depth,
                             self.config.runtime.vcf_multi_reply,
                             self.config.rule_set,
                         )
                         .found
-                    {
-                        filtered.push(candidate);
-                    }
-                }
-                ordered = filtered;
-            }
-        }
-
-        if self.config.runtime.nonroot_vcf && self.vcf.budget.stopped() {
-            stats.stop = true;
-            return (0, None);
-        }
-        let tt_offset = usize::from(pre_searched_tt_move.is_some());
-        if !lazy_tie_ordering && !use_nnue_policy && !win_priority && !single_forcing {
-            ordered.truncate(wide.saturating_sub(tt_offset));
-        }
-        let search_limit = if !win_priority && !single_forcing {
-            (ordered.len() + tt_offset)
-                .min(wide)
-                .saturating_sub(tt_offset)
-        } else {
-            ordered.len()
-        };
-        if search_limit == 0 && !has_score {
-            return (-INF - 1, None);
-        }
-
-        let case_count = search_limit + tt_offset;
-        let (pre_corner, pre_half) = if options.root {
-            compute_corner_state(board)
-        } else {
-            (false, 0)
-        };
-        let mut running_downf = options.downf;
-        let raw_depthdown = if self.nnue.is_some() {
-            if single_forcing {
-                (1.0 - self.config.search.extend_ratio).max(0.0)
-            } else {
-                1.0
-            }
-        } else {
-            0.0_f64.max(
-                1.0 - self.config.search.extend_ratio
-                    + self.config.search.extend_ratio * (case_count.max(1) as f64).ln()
-                        / (wide.max(2) as f64).ln(),
-            )
-        };
-        // Floor-quantize fractional depth reductions to exact 1/64-ply dyadic
-        // steps in multi-threaded mode so internal nodes hit exact same-depth
-        // TT entries (floor == ceil) without ever rounding near-full-width
-        // reductions up to 1.0 (preserving fractional extension plies) while
-        // store=floor / probe=ceil remains strictly sound for all f64 depths.
-        let base_depthdown = if subply_tt {
-            (raw_depthdown * SUBPLY_TT_SCALE_F64).floor() / SUBPLY_TT_SCALE_F64
-        } else {
-            raw_depthdown
-        };
-        let mut policy_top_logit = f64::NEG_INFINITY;
-        if use_nnue_policy && policy_rest_sorted && !ordered.is_empty() {
-            policy_top_logit = ordered[0].order_score;
-        }
-        let nnue_lmp_limit = if self.nnue.is_some()
-            && !options.root
-            && !win_priority
-            && !single_forcing
-            && !hostile_threat
-        {
-            let d_int = depth.floor().max(0.0);
-            let fmc = 3 + (d_int.powf(1.30) as usize);
-            (fmc / (2 - usize::from(improving))).max(2)
-        } else {
-            usize::MAX
-        };
-        let use_abdada = abdada.is_some() && depth >= ABDADA_MIN_DEPTH && case_count > 1;
-
-        #[derive(Clone, Copy)]
-        struct DeferredCandidate {
-            index: usize,
-            candidate: Candidate,
-            local_downf: i32,
-            depthdown: f64,
-            lmr_reduction: f64,
-        }
-        let default_candidate = ordered.first().copied().unwrap_or(Candidate {
-            move_: 0,
-            order_score: 0.0,
-            self_attack: 0,
-            opp_attack: 0,
-        });
-        let mut deferred = [DeferredCandidate {
-            index: 0,
-            candidate: default_candidate,
-            local_downf: 0,
-            depthdown: 0.0,
-            lmr_reduction: 0.0,
-        }; 64];
-        let mut deferred_len = 0_usize;
-        let mut searched_quiets = [0_u16; 64];
-        let mut searched_quiets_len = 0_usize;
-        let mut early_exit = false;
-
-        for pass in 0..2 {
-            let pass_len = if pass == 0 {
-                search_limit
-            } else {
-                if early_exit || deferred_len == 0 {
-                    break;
-                }
-                deferred_len
-            };
-
-            for step in 0..pass_len {
-                let (index, candidate, local_downf, depthdown, mut lmr_reduction) = if pass == 0 {
-                    let index = step + tt_offset;
-                    if !policy_rest_sorted && index == 1 {
-                        let rest = &mut ordered[1..];
-                        let n = rest.len();
-                        let mut move_buf = [0_u16; BOARD_AREA];
-                        let mut score_buf = [0.0_f32; BOARD_AREA];
-                        for (i, c) in rest.iter().enumerate() {
-                            move_buf[i] = c.move_;
+                {
+                    let mut filtered = Vec::new();
+                    for &candidate in &ordered {
+                        if self.vcf.budget.stopped() {
+                            stats.stop = true;
+                            break 'move_loop (0, None);
                         }
-                        if let Some(nnue) = self.nnue.as_mut() {
-                            nnue.evaluate_policy_moves(side, &move_buf[..n], &mut score_buf[..n]);
-                        }
-                        for (i, c) in rest.iter_mut().enumerate() {
-                            c.order_score = f64::from(score_buf[i]);
-                        }
-                        rest.sort_by(|a, b| b.order_score.total_cmp(&a.order_score));
-                        if let Some(first) = rest.first() {
-                            policy_top_logit = first.order_score;
-                        }
-                        policy_rest_sorted = true;
-                    }
-                    if !rest_primary_sorted && index == 1 {
-                        order_candidates_primary_slice(&mut ordered[1..]);
-                        rest_primary_sorted = true;
-                    }
-                    if lazy_tie_ordering && step >= tie_sorted_until {
-                        tie_sorted_until = resolve_candidate_tie_group(
-                            board,
-                            &mut ordered,
-                            step,
-                            side,
-                            tt_best_move,
-                        );
-                    }
-                    let candidate = ordered[step];
-                    if options.skip_move == Some(candidate.move_) {
-                        continue;
-                    }
-                    // Move Count Pruning (Rapfi `futilityMoveCount`, ~107 Elo):
-                    // once we already have a non-losing move, prune moves beyond
-                    // the depth-scaled move count threshold.
-                    if (index + 1) >= nnue_lmp_limit && has_score && current > -WIN {
-                        continue;
-                    }
-                    let mut depthdown = base_depthdown;
-                    if likely_fail_high && candidate.self_attack < 4 {
-                        depthdown += 1.0;
-                    }
-                    let (local_downf, lmr_reduction) = if self.nnue.is_some() {
-                        let mut red = 0.0_f64;
-                        if depth >= 2.0
-                            && index >= 1 + usize::from(options.root)
-                            && !win_priority
-                            && !single_forcing
+                        let mut trial = board.clone();
+                        trial
+                            .play_assuming_rule_legal(
+                                candidate.move_,
+                                Some(side),
+                                self.config.rule_set,
+                            )
+                            .expect("ordered move stays legal on trial board");
+                        if !self
+                            .vcf
+                            .search_with_multi_reply_for_rule(
+                                &trial,
+                                -side,
+                                nonroot_vcf_depth,
+                                self.config.runtime.vcf_multi_reply,
+                                self.config.rule_set,
+                            )
+                            .found
                         {
-                            let rule_idx = usize::from(self.config.rule_set == RuleSet::Renju);
-                            let d_idx = (depth as usize).clamp(1, 63);
-                            let mc_idx = (index + 1).clamp(1, 63);
-                            let mut r = LMR_LUT[rule_idx][d_idx] * LMR_LUT[rule_idx][mc_idx];
-                            if let Some(ctx) = abdada {
-                                if ctx.worker_id > 0 && (ctx.worker_id & 1) == 1 {
-                                    r += 0.25;
-                                }
-                            }
-                            if !is_pv && !improving && r > 1.0 {
-                                r += 1.0;
-                            }
-                            if use_nnue_policy && policy_top_logit.is_finite() {
-                                // Rapfi exact `policyReduction` (`parameter.h:270-278`, ~59 Elo):
-                                // `scaledMoveScore = curMoveScore * (0.1 / ScoreScale) = policy * 0.1`.
-                                let scaled = candidate.order_score * 0.1;
-                                let (bias, scale, max_red) = match self.config.rule_set {
-                                    RuleSet::Renju => (3.39_f64, 3.15_f64, 4.90_f64),
-                                    RuleSet::Freestyle => (2.53_f64, 3.60_f64, 5.18_f64),
-                                };
-                                r += (bias - scale * scaled).clamp(0.0, max_red);
-                            }
-                            if is_pv || tt_was_pv {
-                                r -= 0.71;
-                            }
-                            if options.cut_node {
-                                r += 1.80;
-                            }
-                            let player = if side == BLACK { 0 } else { 1 };
-                            let h = self.quiet_history[player][candidate.move_ as usize];
-                            r -= (f64::from(h) / 2048.0).clamp(-1.5, 1.5);
-                            let full_child_depth = depth - depthdown;
-                            if r > 0.0 && full_child_depth > 1.0 {
-                                let r_quant =
-                                    (r * SUBPLY_TT_SCALE_F64).floor() / SUBPLY_TT_SCALE_F64;
-                                let reduced_depth = (full_child_depth - r_quant).max(1.0);
-                                let actual_red = (full_child_depth - reduced_depth).max(0.0);
-                                if actual_red > 0.0 {
-                                    depthdown += actual_red;
-                                    red = actual_red;
-                                }
-                            }
+                            filtered.push(candidate);
                         }
-                        (0, red)
-                    } else {
-                        running_downf += index as i32;
-                        let mut local_downf = running_downf;
-                        let mut net = 0_i32;
-                        if local_downf >= 15 {
-                            net = local_downf / 15;
-                            depthdown += f64::from(net);
-                            local_downf %= 15;
-                        }
-                        running_downf = local_downf;
-                        (local_downf, f64::from(net))
-                    };
-                    (index, candidate, local_downf, depthdown, lmr_reduction)
+                    }
+                    ordered = filtered;
+                }
+            }
+
+            if self.config.runtime.nonroot_vcf && self.vcf.budget.stopped() {
+                stats.stop = true;
+                break 'move_loop (0, None);
+            }
+            let tt_offset = usize::from(pre_searched_tt_move.is_some());
+            if !lazy_tie_ordering && !use_nnue_policy && !win_priority && !single_forcing {
+                ordered.truncate(wide.saturating_sub(tt_offset));
+            }
+            let search_limit = if !win_priority && !single_forcing {
+                (ordered.len() + tt_offset)
+                    .min(wide)
+                    .saturating_sub(tt_offset)
+            } else {
+                ordered.len()
+            };
+            if search_limit == 0 && !has_score {
+                break 'move_loop (-INF - 1, None);
+            }
+
+            let case_count = search_limit + tt_offset;
+            let (pre_corner, pre_half) = if options.root {
+                compute_corner_state(board)
+            } else {
+                (false, 0)
+            };
+            let mut running_downf = options.downf;
+            let raw_depthdown = if self.nnue.is_some() {
+                if single_forcing {
+                    (1.0 - self.config.search.extend_ratio).max(0.0)
                 } else {
-                    let wid = abdada.map_or(0, |ctx| ctx.worker_id);
-                    let d_idx = if wid == 0 || deferred_len <= 1 {
-                        step
-                    } else if wid % 2 == 1 {
-                        (deferred_len - 1 - step + wid) % deferred_len
-                    } else {
-                        (step + wid) % deferred_len
-                    };
-                    let item = deferred[d_idx];
-                    (
-                        item.index,
-                        item.candidate,
-                        item.local_downf,
-                        item.depthdown,
-                        item.lmr_reduction,
-                    )
+                    1.0
+                }
+            } else {
+                0.0_f64.max(
+                    1.0 - self.config.search.extend_ratio
+                        + self.config.search.extend_ratio * (case_count.max(1) as f64).ln()
+                            / (wide.max(2) as f64).ln(),
+                )
+            };
+            // Floor-quantize fractional depth reductions to exact 1/64-ply dyadic
+            // steps in multi-threaded mode so internal nodes hit exact same-depth
+            // TT entries (floor == ceil) without ever rounding near-full-width
+            // reductions up to 1.0 (preserving fractional extension plies) while
+            // store=floor / probe=ceil remains strictly sound for all f64 depths.
+            let base_depthdown = if subply_tt {
+                (raw_depthdown * SUBPLY_TT_SCALE_F64).floor() / SUBPLY_TT_SCALE_F64
+            } else {
+                raw_depthdown
+            };
+            let mut policy_top_logit = f64::NEG_INFINITY;
+            if use_nnue_policy && policy_rest_sorted && !ordered.is_empty() {
+                policy_top_logit = ordered[0].order_score;
+            }
+            let nnue_lmp_limit = if self.nnue.is_some()
+                && !options.root
+                && !win_priority
+                && !single_forcing
+                && !hostile_threat
+            {
+                let d_int = depth.floor().max(0.0);
+                let fmc = 3 + (d_int.powf(1.30) as usize);
+                (fmc / (2 - usize::from(improving))).max(2)
+            } else {
+                usize::MAX
+            };
+            let use_abdada = abdada.is_some() && depth >= ABDADA_MIN_DEPTH && case_count > 1;
+
+            #[derive(Clone, Copy)]
+            struct DeferredCandidate {
+                index: usize,
+                candidate: Candidate,
+                local_downf: i32,
+                depthdown: f64,
+                lmr_reduction: f64,
+            }
+            let default_candidate = ordered.first().copied().unwrap_or(Candidate {
+                move_: 0,
+                order_score: 0.0,
+                self_attack: 0,
+                opp_attack: 0,
+            });
+            let mut deferred = [DeferredCandidate {
+                index: 0,
+                candidate: default_candidate,
+                local_downf: 0,
+                depthdown: 0.0,
+                lmr_reduction: 0.0,
+            }; 64];
+            let mut deferred_len = 0_usize;
+            let mut searched_quiets = [0_u16; 64];
+            let mut searched_quiets_len = 0_usize;
+            let mut early_exit = false;
+
+            for pass in 0..2 {
+                let pass_len = if pass == 0 {
+                    search_limit
+                } else {
+                    if early_exit || deferred_len == 0 {
+                        break;
+                    }
+                    deferred_len
                 };
 
-                if options.root {
-                    if let Some(ctx) = abdada {
-                        if let Some((shared_alpha, shared_move)) =
-                            ctx.root_best.load_if_better(alpha)
-                        {
-                            alpha = shared_alpha;
-                            if shared_alpha > current {
-                                current = shared_alpha;
-                                has_score = true;
+                for step in 0..pass_len {
+                    let (index, candidate, local_downf, depthdown, mut lmr_reduction) = if pass == 0
+                    {
+                        let index = step + tt_offset;
+                        if !policy_rest_sorted && index == 1 {
+                            let rest = &mut ordered[1..];
+                            let n = rest.len();
+                            let mut move_buf = [0_u16; BOARD_AREA];
+                            let mut score_buf = [0.0_f32; BOARD_AREA];
+                            for (i, c) in rest.iter().enumerate() {
+                                move_buf[i] = c.move_;
                             }
-                            best_move = Some(shared_move);
-                            hash_flag = HASHF_EXACT;
-                            found_pv = true;
+                            if let Some(nnue) = self.nnue.as_mut() {
+                                nnue.evaluate_policy_moves(
+                                    side,
+                                    &move_buf[..n],
+                                    &mut score_buf[..n],
+                                );
+                            }
+                            for (i, c) in rest.iter_mut().enumerate() {
+                                c.order_score = f64::from(score_buf[i]);
+                            }
+                            rest.sort_by(|a, b| b.order_score.total_cmp(&a.order_score));
+                            if let Some(first) = rest.first() {
+                                policy_top_logit = first.order_score;
+                            }
+                            policy_rest_sorted = true;
                         }
-                    }
-                }
-
-                let mut marked_busy_key: Option<u64> = None;
-                if use_abdada && pass == 0 && index > 0 {
-                    if let Some(ctx) = abdada {
-                        let depth_tag =
-                            ((depth - depthdown).max(0.0) * SUBPLY_TT_SCALE_F64).floor() as u64;
-                        let child_key = board.zobrist_key_after(candidate.move_, side)
-                            ^ depth_tag.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                        if found_pv
-                            && deferred_len < deferred.len()
-                            && ctx.table.is_busy(child_key, ctx.salt)
-                        {
-                            deferred[deferred_len] = DeferredCandidate {
-                                index,
-                                candidate,
-                                local_downf,
-                                depthdown,
-                                lmr_reduction,
-                            };
-                            deferred_len += 1;
+                        if !rest_primary_sorted && index == 1 {
+                            order_candidates_primary_slice(&mut ordered[1..]);
+                            rest_primary_sorted = true;
+                        }
+                        if lazy_tie_ordering && step >= tie_sorted_until {
+                            tie_sorted_until = resolve_candidate_tie_group(
+                                board,
+                                &mut ordered,
+                                step,
+                                side,
+                                tt_best_move,
+                            );
+                        }
+                        let candidate = ordered[step];
+                        if options.skip_move == Some(candidate.move_) {
                             continue;
                         }
-                        ctx.table.mark_busy(child_key, ctx.salt);
-                        marked_busy_key = Some(child_key);
-                    }
-                }
-
-                let mut candidate_snapshot: Option<PendingEvalSnapshot> = None;
-                let (mx, my) = move_to_xy(candidate.move_).expect("candidate move is valid");
-                let profile_root_candidate = options.root && stats.root_profile;
-                let profile_start = profile_root_candidate.then(Instant::now);
-                let profile_nodes_before = stats.nodes;
-                let profile_alpha_before = alpha;
-                let mut profile_zero_window_nodes = 0_usize;
-                let mut profile_zero_window_elapsed_us = 0_u128;
-                let mut profile_full_window_nodes = 0_usize;
-                let mut profile_full_window_elapsed_us = 0_u128;
-                let mut profile_pvs_research = false;
-                board
-                    .play_assuming_rule_legal(candidate.move_, Some(side), self.config.rule_set)
-                    .expect("ordered candidate stays legal");
-                if let Some(tt4) = tt_view4 {
-                    tt4.prefetch(board.zobrist_key());
-                } else if let Some(tt2) = tt_view {
-                    tt2.prefetch(board.zobrist_key());
-                }
-                coverage.add_move(candidate.move_);
-                if let Some(nnue) = self.nnue.as_mut() {
-                    nnue.before_move(side, mx, my);
-                }
-
-                let mut atdown = 0_i32;
-                if self.nnue.is_none() {
-                    if candidate.self_attack == 4 {
-                        atdown = self.config.search.atdown4 as i32;
-                    } else if candidate.self_attack == 3 {
-                        atdown = self.config.search.atdown3 as i32;
-                    }
-                    if options.root {
-                        let (x, y) =
-                            move_to_xy(candidate.move_).expect("ordered candidate stays in range");
-                        let h = x.min(y).min(board.size() - 1 - x).min(board.size() - 1 - y);
-                        let is_corner = pre_corner || h <= 1 || (h == 2 && pre_half >= 1);
-                        atdown += rootbonus(board, x, y, is_corner);
-                    }
-                }
-
-                let mut attempt_depth = depth - depthdown;
-                let score = if self.nnue.is_some() {
-                    // Rapfi/Stockfish PVS + LMR flow: never run a full-window
-                    // search at reduced depth; reduced scout always uses zero
-                    // window with `cut_node = true`, re-searches at full depth
-                    // with zero window (`cut_node = !options.cut_node`) on fail
-                    // high, and only opens `[alpha, beta]` on PV nodes at full
-                    // depth when needed.
-                    let base_child_options = SearchOptions {
-                        opo: 1 - options.opo,
-                        ply: options.ply + 1,
-                        root: false,
-                        root_allowed_moves: None,
-                        root_preferred_move: None,
-                        downf: local_downf,
-                        root_depth: Some(root_depth),
-                        priority_base: Some(priority_base),
-                        cut_node: false,
-                        skip_move: None,
-                    };
-                    let full_depth = attempt_depth + lmr_reduction;
-                    let mut val = 0_i32;
-                    let mut need_full_window = false;
-                    if lmr_reduction > 0.0 {
-                        let narrow_start = profile_root_candidate.then(Instant::now);
-                        let narrow_nodes_before = stats.nodes;
-                        let (s, _) = self.search_with_coverage(
-                            board,
-                            caches,
-                            -side,
-                            attempt_depth,
-                            -alpha - 1,
-                            -alpha,
-                            child_wide,
-                            stats,
-                            SearchOptions {
-                                cut_node: true,
-                                ..base_child_options
-                            },
-                            coverage,
-                            Some(((mx, my), &mut candidate_snapshot)),
-                            abdada,
-                            tt_view,
-                            tt_view4,
-                        );
-                        if let Some(start) = narrow_start {
-                            profile_zero_window_nodes +=
-                                stats.nodes.saturating_sub(narrow_nodes_before);
-                            profile_zero_window_elapsed_us += start.elapsed().as_micros();
+                        // Move Count Pruning (Rapfi `futilityMoveCount`, ~107 Elo):
+                        // once we already have a non-losing move, prune moves beyond
+                        // the depth-scaled move count threshold.
+                        if (index + 1) >= nnue_lmp_limit && has_score && current > -WIN {
+                            continue;
                         }
-                        val = -s;
-                        if !stats.stop && val > alpha && val < WIN {
-                            attempt_depth = full_depth;
-                            let narrow_start2 = profile_root_candidate.then(Instant::now);
-                            let narrow_nodes_before2 = stats.nodes;
-                            let (s2, _) = self.search_with_coverage(
-                                board,
-                                caches,
-                                -side,
-                                full_depth,
-                                -alpha - 1,
-                                -alpha,
-                                child_wide,
-                                stats,
-                                SearchOptions {
-                                    cut_node: !options.cut_node,
-                                    ..base_child_options
-                                },
-                                coverage,
-                                Some(((mx, my), &mut candidate_snapshot)),
-                                abdada,
-                                tt_view,
-                                tt_view4,
-                            );
-                            if let Some(start) = narrow_start2 {
-                                profile_zero_window_nodes +=
-                                    stats.nodes.saturating_sub(narrow_nodes_before2);
-                                profile_zero_window_elapsed_us += start.elapsed().as_micros();
+                        let mut depthdown = base_depthdown;
+                        if likely_fail_high && candidate.self_attack < 4 {
+                            depthdown += 1.0;
+                        }
+                        let (local_downf, lmr_reduction) = if self.nnue.is_some() {
+                            let mut red = 0.0_f64;
+                            if depth >= 2.0
+                                && index >= 1 + usize::from(options.root)
+                                && !win_priority
+                                && !single_forcing
+                            {
+                                let rule_idx = usize::from(self.config.rule_set == RuleSet::Renju);
+                                let d_idx = (depth as usize).clamp(1, 63);
+                                let mc_idx = (index + 1).clamp(1, 63);
+                                let mut r = LMR_LUT[rule_idx][d_idx] * LMR_LUT[rule_idx][mc_idx];
+                                if let Some(ctx) = abdada {
+                                    if ctx.worker_id > 0 && (ctx.worker_id & 1) == 1 {
+                                        r += 0.25;
+                                    }
+                                }
+                                if !is_pv && !improving && r > 1.0 {
+                                    r += 1.0;
+                                }
+                                if use_nnue_policy && policy_top_logit.is_finite() {
+                                    // Rapfi exact `policyReduction` (`parameter.h:270-278`, ~59 Elo):
+                                    // `scaledMoveScore = curMoveScore * (0.1 / ScoreScale) = policy * 0.1`.
+                                    let scaled = candidate.order_score * 0.1;
+                                    let (bias, scale, max_red) = match self.config.rule_set {
+                                        RuleSet::Renju => (3.39_f64, 3.15_f64, 4.90_f64),
+                                        RuleSet::Freestyle => (2.53_f64, 3.60_f64, 5.18_f64),
+                                    };
+                                    r += (bias - scale * scaled).clamp(0.0, max_red);
+                                }
+                                if is_pv || tt_was_pv {
+                                    r -= 0.71;
+                                }
+                                if options.cut_node {
+                                    r += 1.80;
+                                }
+                                let player = if side == BLACK { 0 } else { 1 };
+                                let h = self.quiet_history[player][candidate.move_ as usize];
+                                r -= (f64::from(h) / 2048.0).clamp(-1.5, 1.5);
+                                let full_child_depth = depth - depthdown;
+                                if r > 0.0 && full_child_depth > 1.0 {
+                                    let r_quant =
+                                        (r * SUBPLY_TT_SCALE_F64).floor() / SUBPLY_TT_SCALE_F64;
+                                    let reduced_depth = (full_child_depth - r_quant).max(1.0);
+                                    let actual_red = (full_child_depth - reduced_depth).max(0.0);
+                                    if actual_red > 0.0 {
+                                        depthdown += actual_red;
+                                        red = actual_red;
+                                    }
+                                }
                             }
-                            val = -s2;
-                            if !stats.stop && is_pv && val > alpha && val < beta {
-                                need_full_window = true;
+                            (0, red)
+                        } else {
+                            running_downf += index as i32;
+                            let mut local_downf = running_downf;
+                            let mut net = 0_i32;
+                            if local_downf >= 15 {
+                                net = local_downf / 15;
+                                depthdown += f64::from(net);
+                                local_downf %= 15;
                             }
-                        }
-                    } else if !is_pv || found_pv {
-                        let narrow_start = profile_root_candidate.then(Instant::now);
-                        let narrow_nodes_before = stats.nodes;
-                        let (s, _) = self.search_with_coverage(
-                            board,
-                            caches,
-                            -side,
-                            full_depth,
-                            -alpha - 1,
-                            -alpha,
-                            child_wide,
-                            stats,
-                            SearchOptions {
-                                cut_node: if is_pv { true } else { !options.cut_node },
-                                ..base_child_options
-                            },
-                            coverage,
-                            Some(((mx, my), &mut candidate_snapshot)),
-                            abdada,
-                            tt_view,
-                            tt_view4,
-                        );
-                        if let Some(start) = narrow_start {
-                            profile_zero_window_nodes +=
-                                stats.nodes.saturating_sub(narrow_nodes_before);
-                            profile_zero_window_elapsed_us += start.elapsed().as_micros();
-                        }
-                        val = -s;
-                        if !stats.stop && is_pv && val > alpha && val < beta {
-                            need_full_window = true;
-                        }
+                            running_downf = local_downf;
+                            (local_downf, f64::from(net))
+                        };
+                        (index, candidate, local_downf, depthdown, lmr_reduction)
                     } else {
-                        need_full_window = true;
-                    }
-                    if !stats.stop && need_full_window {
-                        if found_pv {
-                            profile_pvs_research = true;
+                        let wid = abdada.map_or(0, |ctx| ctx.worker_id);
+                        let d_idx = if wid == 0 || deferred_len <= 1 {
+                            step
+                        } else if wid % 2 == 1 {
+                            (deferred_len - 1 - step + wid) % deferred_len
+                        } else {
+                            (step + wid) % deferred_len
+                        };
+                        let item = deferred[d_idx];
+                        (
+                            item.index,
+                            item.candidate,
+                            item.local_downf,
+                            item.depthdown,
+                            item.lmr_reduction,
+                        )
+                    };
+
+                    if options.root {
+                        if let Some(ctx) = abdada {
+                            if let Some((shared_alpha, shared_move)) =
+                                ctx.root_best.load_if_better(alpha)
+                            {
+                                alpha = shared_alpha;
+                                if shared_alpha > current {
+                                    current = shared_alpha;
+                                    has_score = true;
+                                }
+                                best_move = Some(shared_move);
+                                hash_flag = HASHF_EXACT;
+                                found_pv = true;
+                            }
                         }
-                        let full_start = profile_root_candidate.then(Instant::now);
-                        let full_nodes_before = stats.nodes;
-                        let (full_score, _) = self.search_with_coverage(
-                            board,
-                            caches,
-                            -side,
-                            full_depth,
-                            -beta,
-                            -alpha,
-                            child_wide,
-                            stats,
-                            SearchOptions {
-                                cut_node: false,
-                                ..base_child_options
-                            },
-                            coverage,
-                            Some(((mx, my), &mut candidate_snapshot)),
-                            abdada,
-                            tt_view,
-                            tt_view4,
-                        );
-                        if let Some(start) = full_start {
-                            profile_full_window_nodes +=
-                                stats.nodes.saturating_sub(full_nodes_before);
-                            profile_full_window_elapsed_us += start.elapsed().as_micros();
-                        }
-                        val = -full_score;
                     }
-                    val
-                } else {
-                    loop {
+
+                    let mut marked_busy_key: Option<u64> = None;
+                    if use_abdada && pass == 0 && index > 0 {
+                        if let Some(ctx) = abdada {
+                            let depth_tag =
+                                ((depth - depthdown).max(0.0) * SUBPLY_TT_SCALE_F64).floor() as u64;
+                            let child_key = board.zobrist_key_after(candidate.move_, side)
+                                ^ depth_tag.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                            if found_pv
+                                && deferred_len < deferred.len()
+                                && ctx.table.is_busy(child_key, ctx.salt)
+                            {
+                                deferred[deferred_len] = DeferredCandidate {
+                                    index,
+                                    candidate,
+                                    local_downf,
+                                    depthdown,
+                                    lmr_reduction,
+                                };
+                                deferred_len += 1;
+                                continue;
+                            }
+                            ctx.table.mark_busy(child_key, ctx.salt);
+                            marked_busy_key = Some(child_key);
+                        }
+                    }
+
+                    let mut candidate_snapshot: Option<PendingEvalSnapshot> = None;
+                    let (mx, my) = move_to_xy(candidate.move_).expect("candidate move is valid");
+                    let profile_root_candidate = options.root && stats.root_profile;
+                    let profile_start = profile_root_candidate.then(Instant::now);
+                    let profile_nodes_before = stats.nodes;
+                    let profile_alpha_before = alpha;
+                    let mut profile_zero_window_nodes = 0_usize;
+                    let mut profile_zero_window_elapsed_us = 0_u128;
+                    let mut profile_full_window_nodes = 0_usize;
+                    let mut profile_full_window_elapsed_us = 0_u128;
+                    let mut profile_pvs_research = false;
+                    board
+                        .play_assuming_rule_legal(candidate.move_, Some(side), self.config.rule_set)
+                        .expect("ordered candidate stays legal");
+                    if let Some(tt4) = tt_view4 {
+                        tt4.prefetch(board.zobrist_key());
+                    } else if let Some(tt2) = tt_view {
+                        tt2.prefetch(board.zobrist_key());
+                    }
+                    coverage.add_move(candidate.move_);
+                    if let Some(nnue) = self.nnue.as_mut() {
+                        nnue.before_move(side, mx, my);
+                    }
+
+                    let mut atdown = 0_i32;
+                    if self.nnue.is_none() {
+                        if candidate.self_attack == 4 {
+                            atdown = self.config.search.atdown4 as i32;
+                        } else if candidate.self_attack == 3 {
+                            atdown = self.config.search.atdown3 as i32;
+                        }
+                        if options.root {
+                            let (x, y) = move_to_xy(candidate.move_)
+                                .expect("ordered candidate stays in range");
+                            let h = x.min(y).min(board.size() - 1 - x).min(board.size() - 1 - y);
+                            let is_corner = pre_corner || h <= 1 || (h == 2 && pre_half >= 1);
+                            atdown += rootbonus(board, x, y, is_corner);
+                        }
+                    }
+
+                    let mut attempt_depth = depth - depthdown;
+                    let score = if self.nnue.is_some() {
+                        // Rapfi/Stockfish PVS + LMR flow: never run a full-window
+                        // search at reduced depth; reduced scout always uses zero
+                        // window with `cut_node = true`, re-searches at full depth
+                        // with zero window (`cut_node = !options.cut_node`) on fail
+                        // high, and only opens `[alpha, beta]` on PV nodes at full
+                        // depth when needed.
                         let base_child_options = SearchOptions {
                             opo: 1 - options.opo,
                             ply: options.ply + 1,
@@ -1884,17 +1752,19 @@ impl AlphaBetaSearcher {
                             cut_node: false,
                             skip_move: None,
                         };
-                        let score = if found_pv {
+                        let full_depth = attempt_depth + lmr_reduction;
+                        let mut val = 0_i32;
+                        let mut need_full_window = false;
+                        if lmr_reduction > 0.0 {
                             let narrow_start = profile_root_candidate.then(Instant::now);
                             let narrow_nodes_before = stats.nodes;
-                            let shifted_alpha = shift_bound_with_atdown(alpha, atdown);
-                            let (narrow_score, _) = self.search_with_coverage(
+                            let (s, _) = self.search_with_coverage(
                                 board,
                                 caches,
                                 -side,
                                 attempt_depth,
-                                -shifted_alpha - 1,
-                                -shifted_alpha,
+                                -alpha - 1,
+                                -alpha,
                                 child_wide,
                                 stats,
                                 SearchOptions {
@@ -1912,12 +1782,190 @@ impl AlphaBetaSearcher {
                                     stats.nodes.saturating_sub(narrow_nodes_before);
                                 profile_zero_window_elapsed_us += start.elapsed().as_micros();
                             }
-                            if stats.stop {
-                                break narrow_score;
+                            val = -s;
+                            if !stats.stop && val > alpha && val < WIN {
+                                attempt_depth = full_depth;
+                                let narrow_start2 = profile_root_candidate.then(Instant::now);
+                                let narrow_nodes_before2 = stats.nodes;
+                                let (s2, _) = self.search_with_coverage(
+                                    board,
+                                    caches,
+                                    -side,
+                                    full_depth,
+                                    -alpha - 1,
+                                    -alpha,
+                                    child_wide,
+                                    stats,
+                                    SearchOptions {
+                                        cut_node: !options.cut_node,
+                                        ..base_child_options
+                                    },
+                                    coverage,
+                                    Some(((mx, my), &mut candidate_snapshot)),
+                                    abdada,
+                                    tt_view,
+                                    tt_view4,
+                                );
+                                if let Some(start) = narrow_start2 {
+                                    profile_zero_window_nodes +=
+                                        stats.nodes.saturating_sub(narrow_nodes_before2);
+                                    profile_zero_window_elapsed_us += start.elapsed().as_micros();
+                                }
+                                val = -s2;
+                                if !stats.stop && is_pv && val > alpha && val < beta {
+                                    need_full_window = true;
+                                }
                             }
-                            let narrowed = score_from_child(narrow_score, atdown);
-                            if alpha < narrowed && narrowed < beta {
+                        } else if !is_pv || found_pv {
+                            let narrow_start = profile_root_candidate.then(Instant::now);
+                            let narrow_nodes_before = stats.nodes;
+                            let (s, _) = self.search_with_coverage(
+                                board,
+                                caches,
+                                -side,
+                                full_depth,
+                                -alpha - 1,
+                                -alpha,
+                                child_wide,
+                                stats,
+                                SearchOptions {
+                                    cut_node: if is_pv { true } else { !options.cut_node },
+                                    ..base_child_options
+                                },
+                                coverage,
+                                Some(((mx, my), &mut candidate_snapshot)),
+                                abdada,
+                                tt_view,
+                                tt_view4,
+                            );
+                            if let Some(start) = narrow_start {
+                                profile_zero_window_nodes +=
+                                    stats.nodes.saturating_sub(narrow_nodes_before);
+                                profile_zero_window_elapsed_us += start.elapsed().as_micros();
+                            }
+                            val = -s;
+                            if !stats.stop && is_pv && val > alpha && val < beta {
+                                need_full_window = true;
+                            }
+                        } else {
+                            need_full_window = true;
+                        }
+                        if !stats.stop && need_full_window {
+                            if found_pv {
                                 profile_pvs_research = true;
+                            }
+                            let full_start = profile_root_candidate.then(Instant::now);
+                            let full_nodes_before = stats.nodes;
+                            let (full_score, _) = self.search_with_coverage(
+                                board,
+                                caches,
+                                -side,
+                                full_depth,
+                                -beta,
+                                -alpha,
+                                child_wide,
+                                stats,
+                                SearchOptions {
+                                    cut_node: false,
+                                    ..base_child_options
+                                },
+                                coverage,
+                                Some(((mx, my), &mut candidate_snapshot)),
+                                abdada,
+                                tt_view,
+                                tt_view4,
+                            );
+                            if let Some(start) = full_start {
+                                profile_full_window_nodes +=
+                                    stats.nodes.saturating_sub(full_nodes_before);
+                                profile_full_window_elapsed_us += start.elapsed().as_micros();
+                            }
+                            val = -full_score;
+                        }
+                        val
+                    } else {
+                        loop {
+                            let base_child_options = SearchOptions {
+                                opo: 1 - options.opo,
+                                ply: options.ply + 1,
+                                root: false,
+                                root_allowed_moves: None,
+                                root_preferred_move: None,
+                                downf: local_downf,
+                                root_depth: Some(root_depth),
+                                priority_base: Some(priority_base),
+                                cut_node: false,
+                                skip_move: None,
+                            };
+                            let score = if found_pv {
+                                let narrow_start = profile_root_candidate.then(Instant::now);
+                                let narrow_nodes_before = stats.nodes;
+                                let shifted_alpha = shift_bound_with_atdown(alpha, atdown);
+                                let (narrow_score, _) = self.search_with_coverage(
+                                    board,
+                                    caches,
+                                    -side,
+                                    attempt_depth,
+                                    -shifted_alpha - 1,
+                                    -shifted_alpha,
+                                    child_wide,
+                                    stats,
+                                    SearchOptions {
+                                        cut_node: true,
+                                        ..base_child_options
+                                    },
+                                    coverage,
+                                    Some(((mx, my), &mut candidate_snapshot)),
+                                    abdada,
+                                    tt_view,
+                                    tt_view4,
+                                );
+                                if let Some(start) = narrow_start {
+                                    profile_zero_window_nodes +=
+                                        stats.nodes.saturating_sub(narrow_nodes_before);
+                                    profile_zero_window_elapsed_us += start.elapsed().as_micros();
+                                }
+                                if stats.stop {
+                                    break narrow_score;
+                                }
+                                let narrowed = score_from_child(narrow_score, atdown);
+                                if alpha < narrowed && narrowed < beta {
+                                    profile_pvs_research = true;
+                                    let full_start = profile_root_candidate.then(Instant::now);
+                                    let full_nodes_before = stats.nodes;
+                                    let (full_score, _) = self.search_with_coverage(
+                                        board,
+                                        caches,
+                                        -side,
+                                        attempt_depth,
+                                        -shift_bound_with_atdown(beta, atdown),
+                                        -shift_bound_with_atdown(alpha, atdown),
+                                        child_wide,
+                                        stats,
+                                        SearchOptions {
+                                            cut_node: false,
+                                            ..base_child_options
+                                        },
+                                        coverage,
+                                        Some(((mx, my), &mut candidate_snapshot)),
+                                        abdada,
+                                        tt_view,
+                                        tt_view4,
+                                    );
+                                    if let Some(start) = full_start {
+                                        profile_full_window_nodes +=
+                                            stats.nodes.saturating_sub(full_nodes_before);
+                                        profile_full_window_elapsed_us +=
+                                            start.elapsed().as_micros();
+                                    }
+                                    if stats.stop {
+                                        break full_score;
+                                    }
+                                    score_from_child(full_score, atdown)
+                                } else {
+                                    narrowed
+                                }
+                            } else {
                                 let full_start = profile_root_candidate.then(Instant::now);
                                 let full_nodes_before = stats.nodes;
                                 let (full_score, _) = self.search_with_coverage(
@@ -1930,7 +1978,7 @@ impl AlphaBetaSearcher {
                                     child_wide,
                                     stats,
                                     SearchOptions {
-                                        cut_node: false,
+                                        cut_node: if is_pv { false } else { !options.cut_node },
                                         ..base_child_options
                                     },
                                     coverage,
@@ -1948,67 +1996,96 @@ impl AlphaBetaSearcher {
                                     break full_score;
                                 }
                                 score_from_child(full_score, atdown)
-                            } else {
-                                narrowed
+                            };
+                            if score >= WIN {
+                                break score;
                             }
-                        } else {
-                            let full_start = profile_root_candidate.then(Instant::now);
-                            let full_nodes_before = stats.nodes;
-                            let (full_score, _) = self.search_with_coverage(
-                                board,
-                                caches,
-                                -side,
-                                attempt_depth,
-                                -shift_bound_with_atdown(beta, atdown),
-                                -shift_bound_with_atdown(alpha, atdown),
-                                child_wide,
-                                stats,
-                                SearchOptions {
-                                    cut_node: if is_pv { false } else { !options.cut_node },
-                                    ..base_child_options
-                                },
-                                coverage,
-                                Some(((mx, my), &mut candidate_snapshot)),
-                                abdada,
-                                tt_view,
-                                tt_view4,
-                            );
-                            if let Some(start) = full_start {
-                                profile_full_window_nodes +=
-                                    stats.nodes.saturating_sub(full_nodes_before);
-                                profile_full_window_elapsed_us += start.elapsed().as_micros();
+                            if score > alpha && score > current && lmr_reduction > 0.0 {
+                                attempt_depth += lmr_reduction;
+                                lmr_reduction = 0.0;
+                                continue;
                             }
-                            if stats.stop {
-                                break full_score;
-                            }
-                            score_from_child(full_score, atdown)
-                        };
-                        if score >= WIN {
                             break score;
                         }
-                        if score > alpha && score > current && lmr_reduction > 0.0 {
-                            attempt_depth += lmr_reduction;
-                            lmr_reduction = 0.0;
-                            continue;
-                        }
-                        break score;
+                    };
+
+                    if let (Some(child_key), Some(ctx)) = (marked_busy_key, abdada) {
+                        ctx.table.clear_busy(child_key, ctx.salt);
                     }
-                };
 
-                if let (Some(child_key), Some(ctx)) = (marked_busy_key, abdada) {
-                    ctx.table.clear_busy(child_key, ctx.salt);
-                }
+                    board.undo().expect("ordered candidate was just played");
+                    if let Some(nnue) = self.nnue.as_mut() {
+                        nnue.after_undo(side, mx, my);
+                    }
+                    coverage.remove_move(candidate.move_);
+                    if let Some(snapshot) = candidate_snapshot {
+                        snapshot.restore(caches);
+                    }
+                    if stats.stop {
+                        if profile_root_candidate {
+                            stats.root_candidates.push(RootCandidateProfile {
+                                index,
+                                move_: candidate.move_,
+                                order_score: candidate.order_score as i32,
+                                self_attack: candidate.self_attack,
+                                opp_attack: candidate.opp_attack,
+                                depthdown_milli: (depthdown * 1000.0).round() as i32,
+                                atdown,
+                                attempt_depth_milli: (attempt_depth * 1000.0).round() as i32,
+                                score,
+                                nodes: stats.nodes.saturating_sub(profile_nodes_before),
+                                elapsed_us: profile_start
+                                    .map(|start| start.elapsed().as_micros())
+                                    .unwrap_or_default(),
+                                alpha_before: profile_alpha_before,
+                                alpha_after: alpha,
+                                beta,
+                                reason: "stop",
+                                zero_window_nodes: profile_zero_window_nodes,
+                                zero_window_elapsed_us: profile_zero_window_elapsed_us,
+                                full_window_nodes: profile_full_window_nodes,
+                                full_window_elapsed_us: profile_full_window_elapsed_us,
+                                pvs_research: profile_pvs_research,
+                            });
+                        }
+                        early_exit = true;
+                        break;
+                    }
 
-                board.undo().expect("ordered candidate was just played");
-                if let Some(nnue) = self.nnue.as_mut() {
-                    nnue.after_undo(side, mx, my);
-                }
-                coverage.remove_move(candidate.move_);
-                if let Some(snapshot) = candidate_snapshot {
-                    snapshot.restore(caches);
-                }
-                if stats.stop {
+                    if score > current {
+                        current = score;
+                        has_score = true;
+                        if options.root && !found_pv {
+                            best_move = Some(candidate.move_);
+                        }
+                    }
+                    let improved = score > alpha;
+                    if score > alpha {
+                        alpha = score;
+                        best_move = Some(candidate.move_);
+                        hash_flag = HASHF_EXACT;
+                        found_pv = true;
+                        if options.root {
+                            if let Some(ctx) = abdada {
+                                ctx.root_best.publish(score, candidate.move_);
+                            }
+                        }
+                    }
+                    let root_win = options.root && score >= WIN;
+                    let beta_cutoff = alpha >= beta;
+                    let profile_elapsed_us = profile_start
+                        .map(|start| start.elapsed().as_micros())
+                        .unwrap_or_default();
                     if profile_root_candidate {
+                        let reason = if root_win {
+                            "root_win"
+                        } else if beta_cutoff {
+                            "beta_cutoff"
+                        } else if improved {
+                            "improved"
+                        } else {
+                            "fail_low"
+                        };
                         stats.root_candidates.push(RootCandidateProfile {
                             index,
                             move_: candidate.move_,
@@ -2020,13 +2097,11 @@ impl AlphaBetaSearcher {
                             attempt_depth_milli: (attempt_depth * 1000.0).round() as i32,
                             score,
                             nodes: stats.nodes.saturating_sub(profile_nodes_before),
-                            elapsed_us: profile_start
-                                .map(|start| start.elapsed().as_micros())
-                                .unwrap_or_default(),
+                            elapsed_us: profile_elapsed_us,
                             alpha_before: profile_alpha_before,
                             alpha_after: alpha,
                             beta,
-                            reason: "stop",
+                            reason,
                             zero_window_nodes: profile_zero_window_nodes,
                             zero_window_elapsed_us: profile_zero_window_elapsed_us,
                             full_window_nodes: profile_full_window_nodes,
@@ -2034,160 +2109,103 @@ impl AlphaBetaSearcher {
                             pvs_research: profile_pvs_research,
                         });
                     }
-                    early_exit = true;
-                    break;
-                }
-
-                if score > current {
-                    current = score;
-                    has_score = true;
-                    if options.root && !found_pv {
-                        best_move = Some(candidate.move_);
+                    if root_win {
+                        early_exit = true;
+                        break;
                     }
-                }
-                let improved = score > alpha;
-                if score > alpha {
-                    alpha = score;
-                    best_move = Some(candidate.move_);
-                    hash_flag = HASHF_EXACT;
-                    found_pv = true;
-                    if options.root {
-                        if let Some(ctx) = abdada {
-                            ctx.root_best.publish(score, candidate.move_);
+                    if beta_cutoff {
+                        if self.nnue.is_some() && candidate.self_attack < 4 {
+                            let player = if side == BLACK { 0 } else { 1 };
+                            let bonus = ((depth * depth * 4.0) as i32).clamp(1, 400);
+                            update_quiet_history(
+                                &mut self.quiet_history[player][candidate.move_ as usize],
+                                bonus,
+                            );
+                            for &prev_mv in &searched_quiets[..searched_quiets_len] {
+                                update_quiet_history(
+                                    &mut self.quiet_history[player][prev_mv as usize],
+                                    -bonus,
+                                );
+                            }
                         }
+                        hash_flag = HASHF_BETA;
+                        stats.cutoffs += 1;
+                        early_exit = true;
+                        break;
+                    }
+                    if self.nnue.is_some()
+                        && candidate.self_attack < 4
+                        && searched_quiets_len < searched_quiets.len()
+                    {
+                        searched_quiets[searched_quiets_len] = candidate.move_;
+                        searched_quiets_len += 1;
                     }
                 }
-                let root_win = options.root && score >= WIN;
-                let beta_cutoff = alpha >= beta;
-                let profile_elapsed_us = profile_start
-                    .map(|start| start.elapsed().as_micros())
-                    .unwrap_or_default();
-                if profile_root_candidate {
-                    let reason = if root_win {
-                        "root_win"
-                    } else if beta_cutoff {
-                        "beta_cutoff"
-                    } else if improved {
-                        "improved"
-                    } else {
-                        "fail_low"
-                    };
-                    stats.root_candidates.push(RootCandidateProfile {
-                        index,
-                        move_: candidate.move_,
-                        order_score: candidate.order_score as i32,
-                        self_attack: candidate.self_attack,
-                        opp_attack: candidate.opp_attack,
-                        depthdown_milli: (depthdown * 1000.0).round() as i32,
-                        atdown,
-                        attempt_depth_milli: (attempt_depth * 1000.0).round() as i32,
-                        score,
-                        nodes: stats.nodes.saturating_sub(profile_nodes_before),
-                        elapsed_us: profile_elapsed_us,
-                        alpha_before: profile_alpha_before,
-                        alpha_after: alpha,
-                        beta,
-                        reason,
-                        zero_window_nodes: profile_zero_window_nodes,
-                        zero_window_elapsed_us: profile_zero_window_elapsed_us,
-                        full_window_nodes: profile_full_window_nodes,
-                        full_window_elapsed_us: profile_full_window_elapsed_us,
-                        pvs_research: profile_pvs_research,
+            }
+
+            if !has_score {
+                current = -INF - 1;
+            }
+            if current <= original_alpha && hash_flag != HASHF_BETA {
+                hash_flag = HASHF_ALPHA;
+            }
+            if stats.stop {
+                break 'move_loop (current, best_move);
+            }
+
+            if !root_restricted && !in_singular {
+                if let Some(tt4) = tt_view4 {
+                    // Keep true alpha-beta bound (`HASHF_BETA` / `HASHF_EXACT` /
+                    // `HASHF_ALPHA`), never promoting narrow-window mate bounds to
+                    // `HASHF_EXACT`. Never inflate root or root-child (`ply <= 1`)
+                    // depths so 4T mate confirmation cannot loop on cached hits;
+                    // retain `+10` bonus plies only for genuine deep internal
+                    // (`ply >= 2`) `HASHF_EXACT` mates so Lazy SMP threads can
+                    // share proven mate subtrees across depths.
+                    let store_depth =
+                        if options.ply >= 2 && hash_flag == HASHF_EXACT && current.abs() >= WIN {
+                            hash_depth + if subply_tt { SUBPLY_TT_WIN_BONUS } else { 10 }
+                        } else {
+                            hash_depth
+                        };
+                    tt4.store(TTEntry4 {
+                        key: board.zobrist_key(),
+                        value: score_to_tt(current, options.ply),
+                        static_eval: tt_static_eval.unwrap_or(TT_VALUE_NONE),
+                        flag: hash_flag,
+                        depth: store_depth,
+                        best_move,
+                        tt_pv: is_pv || tt_was_pv,
+                        generation: self.tt_generation,
+                    });
+                } else if let Some(tt2) = tt_view {
+                    let mut store_depth = hash_depth;
+                    if (current >= WIN && current > original_alpha)
+                        || (current <= -WIN && current < original_beta)
+                    {
+                        hash_flag = HASHF_EXACT;
+                        store_depth += if subply_tt { SUBPLY_TT_WIN_BONUS } else { 10 };
+                    }
+                    tt2.store(TTEntry {
+                        key: board.zobrist_key(),
+                        value: score_to_tt(current, options.ply),
+                        flag: hash_flag,
+                        depth: store_depth,
+                        priority: if subply_tt {
+                            priority_base * 256 + hash_depth
+                        } else {
+                            priority_base * 10 + hash_depth
+                        },
+                        best_move,
+                        generation: self.tt_generation,
                     });
                 }
-                if root_win {
-                    early_exit = true;
-                    break;
-                }
-                if beta_cutoff {
-                    if self.nnue.is_some() && candidate.self_attack < 4 {
-                        let player = if side == BLACK { 0 } else { 1 };
-                        let bonus = ((depth * depth * 4.0) as i32).clamp(1, 400);
-                        update_quiet_history(
-                            &mut self.quiet_history[player][candidate.move_ as usize],
-                            bonus,
-                        );
-                        for &prev_mv in &searched_quiets[..searched_quiets_len] {
-                            update_quiet_history(
-                                &mut self.quiet_history[player][prev_mv as usize],
-                                -bonus,
-                            );
-                        }
-                    }
-                    hash_flag = HASHF_BETA;
-                    stats.cutoffs += 1;
-                    early_exit = true;
-                    break;
-                }
-                if self.nnue.is_some()
-                    && candidate.self_attack < 4
-                    && searched_quiets_len < searched_quiets.len()
-                {
-                    searched_quiets[searched_quiets_len] = candidate.move_;
-                    searched_quiets_len += 1;
-                }
             }
-        }
-
-        if !has_score {
-            current = -INF - 1;
-        }
-        if current <= original_alpha && hash_flag != HASHF_BETA {
-            hash_flag = HASHF_ALPHA;
-        }
-        if stats.stop {
-            return (current, best_move);
-        }
-
-        if !root_restricted && !in_singular {
-            if let Some(tt4) = tt_view4 {
-                // Keep true alpha-beta bound (`HASHF_BETA` / `HASHF_EXACT` /
-                // `HASHF_ALPHA`), never promoting narrow-window mate bounds to
-                // `HASHF_EXACT`. Never inflate root or root-child (`ply <= 1`)
-                // depths so 4T mate confirmation cannot loop on cached hits;
-                // retain `+10` bonus plies only for genuine deep internal
-                // (`ply >= 2`) `HASHF_EXACT` mates so Lazy SMP threads can
-                // share proven mate subtrees across depths.
-                let store_depth =
-                    if options.ply >= 2 && hash_flag == HASHF_EXACT && current.abs() >= WIN {
-                        hash_depth + if subply_tt { SUBPLY_TT_WIN_BONUS } else { 10 }
-                    } else {
-                        hash_depth
-                    };
-                tt4.store(TTEntry4 {
-                    key: board.zobrist_key(),
-                    value: score_to_tt(current, options.ply),
-                    static_eval: tt_static_eval.unwrap_or(TT_VALUE_NONE),
-                    flag: hash_flag,
-                    depth: store_depth,
-                    best_move,
-                    tt_pv: is_pv || tt_was_pv,
-                    generation: self.tt_generation,
-                });
-            } else if let Some(tt2) = tt_view {
-                let mut store_depth = hash_depth;
-                if (current >= WIN && current > original_alpha)
-                    || (current <= -WIN && current < original_beta)
-                {
-                    hash_flag = HASHF_EXACT;
-                    store_depth += if subply_tt { SUBPLY_TT_WIN_BONUS } else { 10 };
-                }
-                tt2.store(TTEntry {
-                    key: board.zobrist_key(),
-                    value: score_to_tt(current, options.ply),
-                    flag: hash_flag,
-                    depth: store_depth,
-                    priority: if subply_tt {
-                        priority_base * 256 + hash_depth
-                    } else {
-                        priority_base * 10 + hash_depth
-                    },
-                    best_move,
-                    generation: self.tt_generation,
-                });
-            }
-        }
-        (current, best_move)
+            (current, best_move)
+        };
+        ordered.clear();
+        self.candidate_pool.push(ordered);
+        result
     }
 
     #[inline(always)]
