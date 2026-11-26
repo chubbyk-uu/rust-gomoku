@@ -460,6 +460,7 @@ impl RootSearcher {
         self.alphabeta.has_nnue()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn nnue_position_logits(&mut self, board: &Board) -> Option<(f32, f32, f32)> {
         self.alphabeta.nnue_position_logits(board)
     }

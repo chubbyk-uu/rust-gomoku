@@ -414,6 +414,7 @@ impl AlphaBetaSearcher {
         self.nnue.is_some()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn nnue_position_logits(&mut self, board: &Board) -> Option<(f32, f32, f32)> {
         let evaluator = self.nnue.as_mut()?;
         evaluator.sync_with_board(board);

@@ -1356,3 +1356,45 @@ Verification & 100-game matches (Renju `1s/move`, 32 MiB TT, `center_50_prefixes
 Decision:
 
 - Keep `DEFAULT_TIMED_SEARCH_MAX_DEPTH = 48` only; revert 1T mate confirmation; merge into `master`.
+
+
+### 2026-11-26: Native Rapfi-Aligned NNUE Engine Core (`src/fast_engine/`, `exp/fastboard-nnue-core`)
+
+Hotspot evidence & target:
+
+- Forensic autopsy of `master_d48` vs fair same-weight `pbrain-rapfi` (`Mix9svq`, 32 MiB TT, `1s/move`, `center_50_prefixes.jsonl`) traced the ~115 Elo deficit (`34.5%` 1T / `32.5%` 4T) to two structural limits of the legacy classical-hosted NNUE path:
+  1. Legacy `Board + EvalCaches` (`value_wide_compute_for_rule_no_dgn` + 176B `EvalSnapshotNnue` + `CoverageTracker`) capped tactical midgame throughput at `250K–425K NPS` vs Rapfi's `350K–808K NPS`.
+  2. Legacy 7-tier `attack_level` could not represent 14-level `Pattern4` (`B_FLEX4`, `C_BLOCK4_FLEX3`, `D_BLOCK4_PLUS`, `F_FLEX3_2X`, `J_FLEX2_2X`, `FORBID`), blocking exact `DEFENDFOUR`/`DEFENDB4F3`, `OPPO5_EXT = 1.1`, `extraExtension`, `lmrExtension`, and false-forbidden LMR adjustments.
+- Target: build an isolated native Rust NNUE engine core (`src/fast_engine/`) matching Rapfi ~50/50 under strictly equal conditions (both 1T & 4T, Renju & Freestyle) while leaving classical `pygomoku` `base` (`use_nnue = false`) 100% untouched.
+
+Modification scope:
+
+- **`src/fast_engine/pattern.rs` & `src/fast_engine/board.rs` (M1)**: Zero-allocation 15×15 `FastBoard` with 4-direction 64-bit rotated bit keys, dense-key `Pattern` / 14-level `Pattern4` tables (`14,641` Freestyle / `132,496` Renju), exact Renju forbidden point detector (verified 100% against all hand fixtures + 1,000 dense random boards / ~180k empty cells, including perpendicular exact-five overriding double-three), incremental `Bitboard225` candidate set (`SQUARE3_LINE4`), flat `u32` `MoveRestore`, and `quick_win_check`.
+- **`src/fast_engine/{movegen,movepick,history,tt,search}.rs` (M2–M3)**:
+  - Exact `Pattern4` move generators (`ALL`, `WINNING`, `DEFEND_FIVE`, `DEFEND_FOUR`, `DEFEND_B4F3`, `VCF`, `RANGE_SQUARE2_LINE4` neighbor `QVCF`, `validate_opponent_c_move`).
+  - 5-stage `MovePicker` with `MaybeUninit` `MoveList` & `HistoryTracker` (eliminating ~3.2 KiB per-node stack zeroing), `MainHistory(ATTACK/QUIET)` + `CounterMove` + `Killers`.
+  - Native AB + QVCF search (`Aspiration Window`, `Razoring`, `RFP`, `NMP` via `Mix9svq` dual-accumulator zero-cost pass, `IIR/IID`, `FHR`, `LMP/Trivial/Policy/Distract` pruning, `OPPO5_EXT = 1.1`, `Singular/Double SE`, `lmrExtension`, full `compute_lmr_reduction`).
+  - Lockless 12B/entry 5-tier 64B-aligned XOR `FastTT` (`mulhi64` range mapping, integer ply depth `-20..235`, +25% entries in 32 MiB) + pure Lazy SMP multi-threading (`threadBias`, `pick_next_depth`, `pick_best_thread`).
+- **`src/app.rs`, `src/protocol/gomocup.rs`, `src/bin/gomocup_engine.rs` (M4)**:
+  - Routed NNUE mode (`use_nnue = true`) to `fast_engine` by default in `GomocupProtocol` (with `--legacy-nnue` / `INFO fast_nnue 0` fallback) and `GameController` (shared by Desktop GUI and Android JNI bridge, preserving `NnuePositionEstimate` win/draw/loss curve sampling). Classical `base` (`use_nnue = false`, Casual mode, and diff suites) remains 100% untouched.
+
+Micro-benchmarks & probes:
+
+- Release `play + undo` bench (200k iters, Renju): `FastBoard` **`179.2 ns/op`** vs legacy `Board + EvalCaches` `658.2 ns/op` (**`3.67x` faster**).
+- Fixed `d15` on `OPEN_5`: **`55.7 ms / 18,680 nodes`** (vs `pbrain-rapfi` `63 ms / 28K nodes`); 1s 4T `OPEN_5`: **`d22-37 / 1.39M NPS`** (vs Rapfi `d20-40 / 1.63M NPS`).
+
+300-game fair head-to-head vs `pbrain-rapfi` (`Mix9svq`, 32 MiB TT, `1s/move`, `database=off`, `center_50_prefixes.jsonl`, `--reuse-engine-state`):
+
+- **Renju 1T (`j=10`, 100g)**: **`43-44-13` (`49.5% ± 3.82%`, `-3.47 Elo`, CI `[-30.1, +23.1]`, `WW=0, WD=5, WL/DD=39, LD=6, LL=0`)**, `0` errors / `0` timeouts; avg `732.4 ms` / med `970.4 ms` / p95 `978.5 ms` / max `985.7 ms` (vs Rapfi `727.2 / 970.5 / 975.7 / 1054.2 ms`). Gain over `master_d48_1t` (`34.5%`, `LL=13`): **`+107.9 Elo`**.
+- **Renju 4T (`j=4`, 100g)**: **`42-41-17` (`50.5% ± 3.58%`, `+3.47 Elo`, CI `[-21.4, +28.4]`, `WW=1, WD=2, WL/DD=44, LD=3, LL=0`)**, `0` errors / `0` timeouts (1 Rapfi ply-224 overline loss); avg `707.2 ms` / med `970.2 ms` / p95 `980.5 ms` / max `989.3 ms` (vs Rapfi `705.3 / 970.8 / 977.4 / 1065.7 ms`). Gain over `master_d48_4t` (`32.5%`): **`+130.4 Elo`**.
+- **Freestyle 1T (`j=10`, 100g)**: **`44-45-11` (`49.5% ± 3.02%`, `-3.47 Elo`, CI `[-24.5, +17.5]`, `WW=0, WD=2, WL/DD=45, LD=3, LL=0`)**, `0` errors / `0` timeouts; avg `716.4 ms` / med `970.2 ms` / p95 `978.4 ms` / max `987.1 ms` (vs Rapfi `706.4 / 970.3 / 975.5 / 1015.3 ms`).
+- **Tactical prefixes (`strength_100_prefixes.jsonl`, Renju 1T, 100g)**: **`49-49-2` (`50.0% ± 2.53%`, `0.0 Elo`, `LL=0`, `0` errors / `0` timeouts)**.
+- **300-game `center_50` combined**: **`129-130-41` (`49.83%`, `-1.16 Elo`)**, **`0 / 150` lost pairs (`LL = 0`)**, `0` engine errors, `0` timeouts across `9,766` moves.
+
+Correctness gates:
+
+- `cargo fmt --check`, `git diff --check`, full `cargo test --locked` (0 warnings), `android/rust_bridge` (7/7), `cargo ndk -t arm64-v8a build --release --locked` (0 warnings), `android/ ./gradlew test lint assembleDebug`, and classical `scripts/run_diff.py --profile all --check-baselines --jobs 8` (**13/13 passed** in `30.0s`).
+
+Decision:
+
+- Ready to merge `exp/fastboard-nnue-core` into `master` upon user approval.

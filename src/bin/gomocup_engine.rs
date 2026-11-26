@@ -74,7 +74,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut tt_bits = None;
     let mut threads = None;
     let mut nnue_dir = None;
-    let mut fast_nnue = false;
+    let mut fast_nnue = true;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -130,6 +130,9 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "--fast-nnue" => {
                 fast_nnue = true;
+            }
+            "--legacy-nnue" => {
+                fast_nnue = false;
             }
             "--profile" | "--fast-history-ordering" | "--no-fast-history-ordering" => {
                 return Err(format!("{arg} was removed with the Fast profile"));

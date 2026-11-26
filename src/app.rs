@@ -169,6 +169,7 @@ pub struct GameController {
     time_limit_ms: u32,
     generation: u64,
     search_tt: Option<TranspositionTable>,
+    fast_searcher: Option<Arc<crate::fast_engine::FastSearcher>>,
     search_pool: Arc<Mutex<Option<SearchWorkerPool>>>,
 }
 
@@ -179,6 +180,7 @@ pub struct EngineSearchTask {
     limits: SearchLimits,
     generation: u64,
     tt: Option<TranspositionTable>,
+    fast_searcher: Option<Arc<crate::fast_engine::FastSearcher>>,
     worker_pool: Arc<Mutex<Option<SearchWorkerPool>>>,
     record_nnue_history: bool,
 }
@@ -190,7 +192,8 @@ enum EngineSearchOutcome {
         elapsed_ms: f64,
         used_nnue: bool,
         estimate: Option<NnuePositionEstimate>,
-        tt: TranspositionTable,
+        tt: Option<TranspositionTable>,
+        fast_searcher: Option<Arc<crate::fast_engine::FastSearcher>>,
         worker_pool: Option<SearchWorkerPool>,
     },
     Failed {
@@ -216,7 +219,7 @@ impl EngineSearchCompletion {
     #[cfg(test)]
     fn tt(&self) -> Option<&TranspositionTable> {
         match &self.outcome {
-            EngineSearchOutcome::Completed { tt, .. } => Some(tt),
+            EngineSearchOutcome::Completed { tt, .. } => tt.as_ref(),
             EngineSearchOutcome::Failed { .. } => None,
         }
     }
@@ -376,6 +379,7 @@ impl GameController {
             time_limit_ms: DEFAULT_TIME_LIMIT_MS,
             generation: 0,
             search_tt: None,
+            fast_searcher: None,
             search_pool: Arc::new(Mutex::new(None)),
         }
     }
@@ -394,6 +398,9 @@ impl GameController {
         if self.config.runtime.nnue_dir != normalized {
             self.config.runtime.nnue_dir = normalized;
             self.search_tt = None;
+            if let Some(fs) = &self.fast_searcher {
+                fs.clear_tt();
+            }
             if let Some(history) = &mut self.nnue_history {
                 history.clear();
             }
@@ -480,6 +487,9 @@ impl GameController {
             history.clear();
         }
         self.search_tt = None;
+        if let Some(fs) = &self.fast_searcher {
+            fs.clear_tt();
+        }
         if self.search_limits().max_depth < ABDADA_PARALLEL_START_DEPTH {
             if let Ok(mut guard) = self.search_pool.lock() {
                 *guard = None;
@@ -720,6 +730,7 @@ impl GameController {
             limits: self.search_limits(),
             generation: self.generation,
             tt: self.search_tt.clone(),
+            fast_searcher: self.fast_searcher.clone(),
             worker_pool: Arc::new(Mutex::new(taken_pool)),
             record_nnue_history: self.nnue_history.is_some(),
         })
@@ -729,7 +740,7 @@ impl GameController {
         if self.generation != completion.generation {
             return false;
         }
-        let (result, trace, elapsed_ms, used_nnue, estimate, tt, worker_pool) =
+        let (result, trace, elapsed_ms, used_nnue, estimate, tt, fast_searcher, worker_pool) =
             match completion.outcome {
                 EngineSearchOutcome::Completed {
                     result,
@@ -738,6 +749,7 @@ impl GameController {
                     used_nnue,
                     estimate,
                     tt,
+                    fast_searcher,
                     worker_pool,
                 } => (
                     result,
@@ -746,6 +758,7 @@ impl GameController {
                     used_nnue,
                     estimate,
                     tt,
+                    fast_searcher,
                     worker_pool,
                 ),
                 EngineSearchOutcome::Failed { error } => {
@@ -755,7 +768,12 @@ impl GameController {
                     return true;
                 }
             };
-        self.search_tt = Some(tt);
+        if let Some(tt) = tt {
+            self.search_tt = Some(tt);
+        }
+        if let Some(fs) = fast_searcher {
+            self.fast_searcher = Some(fs);
+        }
         if self.config.runtime.threads > 1
             && self.search_limits().max_depth >= ABDADA_PARALLEL_START_DEPTH
         {
@@ -988,23 +1006,87 @@ impl EngineSearchTask {
 
     pub fn run(mut self) -> EngineSearchCompletion {
         let nnue = crate::search::alphabeta::load_nnue_for_config(&self.config);
+        if let Some(mut evaluator) = nnue {
+            let start = Instant::now();
+            let rule = self.config.rule_set;
+            evaluator.sync_with_board(&self.board);
+            let fast_searcher = self.fast_searcher.unwrap_or_else(|| {
+                let tt_kb = (1_usize << DEFAULT_INTERACTIVE_TT_BITS) * 32 / 1024;
+                Arc::new(crate::fast_engine::FastSearcher::new(tt_kb))
+            });
+            let fb = crate::fast_engine::FastBoard::from_legacy_board(
+                &self.board,
+                rule,
+                crate::fast_engine::CandRange::Square3Line4,
+            );
+            let cfg = crate::fast_engine::FastSearchConfig {
+                max_depth: 99,
+                max_nodes: self.limits.node_limit.map(|n| n as u64),
+                time_limit_ms: self.limits.time_limit_ms.map(|ms| ms.max(10.0) as u64),
+                time_left_ms: None,
+                num_threads: self.config.runtime.threads.max(1),
+                cand_range: crate::fast_engine::CandRange::Square3Line4,
+            };
+            let res = fast_searcher.search(&fb, &evaluator, &cfg);
+            let mut move_ = res.best_move;
+            if !self
+                .board
+                .is_legal_move_for_rule(move_, self.board.side_to_move(), rule)
+            {
+                let Some(fallback) = (0..crate::constants::BOARD_AREA as u16).find(|&c| {
+                    self.board
+                        .is_legal_move_for_rule(c, self.board.side_to_move(), rule)
+                }) else {
+                    return EngineSearchCompletion::failed(self.generation, "无合法落子。");
+                };
+                move_ = fallback;
+            }
+            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let result = SearchResult {
+                move_,
+                score: res.score,
+                depth: res.depth,
+                nodes: res.nodes as usize,
+            };
+            let estimate = if self.record_nnue_history
+                && self.board.play_for_rule(result.move_, None, rule).is_ok()
+                && !self.board.is_terminal()
+            {
+                evaluator.sync_with_board(&self.board);
+                let (_, logits, _) = evaluator.evaluate_value_detailed(self.board.side_to_move());
+                Some(NnuePositionEstimate::from_logits(&self.board, logits))
+            } else {
+                None
+            };
+            return EngineSearchCompletion {
+                generation: self.generation,
+                outcome: EngineSearchOutcome::Completed {
+                    result,
+                    trace: None,
+                    elapsed_ms,
+                    used_nnue: true,
+                    estimate,
+                    tt: None,
+                    fast_searcher: Some(fast_searcher),
+                    worker_pool: None,
+                },
+            };
+        }
+
         let tt_bits = DEFAULT_INTERACTIVE_TT_BITS;
         let tt = match self.tt {
             Some(tt) => tt,
-            None => {
-                match TranspositionTable::try_new_with_fallback_layout(tt_bits, 16, nnue.is_some())
-                {
-                    Ok((tt, _)) => tt,
-                    Err(_) => {
-                        return EngineSearchCompletion::failed(
-                            self.generation,
-                            "内存不足，无法分配置换表。",
-                        );
-                    }
+            None => match TranspositionTable::try_new_with_fallback_layout(tt_bits, 16, false) {
+                Ok((tt, _)) => tt,
+                Err(_) => {
+                    return EngineSearchCompletion::failed(
+                        self.generation,
+                        "内存不足，无法分配置换表。",
+                    );
                 }
-            }
+            },
         };
-        let mut searcher = RootSearcher::with_tt_and_nnue(self.config, tt, nnue);
+        let mut searcher = RootSearcher::with_tt_and_nnue(self.config, tt, None);
         let reused_pool = self
             .worker_pool
             .lock()
@@ -1022,23 +1104,6 @@ impl EngineSearchTask {
             }
         };
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let used_nnue = searcher.has_nnue();
-        // Sample the position after the chosen move on the task's private board.
-        // The live board and its history are updated only on a successful commit.
-        let estimate = if self.record_nnue_history
-            && used_nnue
-            && self
-                .board
-                .play_for_rule(result.move_, None, searcher.config.rule_set)
-                .is_ok()
-            && !self.board.is_terminal()
-        {
-            searcher
-                .nnue_position_logits(&self.board)
-                .map(|logits| NnuePositionEstimate::from_logits(&self.board, logits))
-        } else {
-            None
-        };
         let worker_pool = searcher.take_worker_pool();
         EngineSearchCompletion {
             generation: self.generation,
@@ -1046,9 +1111,10 @@ impl EngineSearchTask {
                 result,
                 trace: searcher.last_trace,
                 elapsed_ms,
-                used_nnue,
-                estimate,
-                tt: searcher.tt,
+                used_nnue: false,
+                estimate: None,
+                tt: Some(searcher.tt),
+                fast_searcher: None,
                 worker_pool,
             },
         }
@@ -1737,5 +1803,44 @@ mod tests {
         assert_eq!(white_to_move.draw, black_to_move.draw);
         let sum = white_to_move.black_win + white_to_move.white_win + white_to_move.draw;
         assert!((sum - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pro_mode_runs_fast_engine_and_records_nnue_position_estimate() {
+        let dir = Path::new("opponent/rapfi-networks/mix9svq");
+        if !mix9svq_files_exist_for_rule(dir, RuleSet::Renju) {
+            return;
+        }
+        let mut config = load_default_config();
+        SearchDifficulty::Normal.apply_to_config(&mut config);
+        config.runtime.threads = 4;
+        config.runtime.nnue_dir = Some(dir.to_string_lossy().into_owned());
+        let mut controller =
+            GameController::new_with_clock(config, SearchClockMode::Timed).with_nnue_history();
+
+        assert!(controller.new_game_with_clock(
+            BLACK,
+            RuleSet::Renju,
+            GameMode::VsEngine,
+            SearchClockMode::Timed,
+        ));
+        assert!(controller.play_human(7, 7));
+
+        let mut task = controller.prepare_engine_search().unwrap();
+        task.limits.time_limit_ms = Some(150.0);
+        let completion = task.run();
+        assert!(controller.commit_engine_search(completion));
+        assert!(controller.fast_searcher.is_some());
+
+        let snap = controller.snapshot();
+        let res = snap.last_result.expect("pro search result");
+        assert!(res.used_nnue);
+        assert!(res.depth >= 1);
+        assert!(res.nodes >= 1);
+        let hist = snap.nnue_history.expect("nnue history recorded");
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].ply, 2);
+        let sum = hist[0].black_win + hist[0].draw + hist[0].white_win;
+        assert!((sum - 1.0).abs() < 1e-5);
     }
 }

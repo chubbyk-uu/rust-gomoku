@@ -82,7 +82,7 @@ impl GomocupProtocol {
             time_left_ms: None,
             node_limit: None,
             tt_bits: None,
-            fast_nnue: false,
+            fast_nnue: true,
             ended: false,
             pending_error: None,
             searcher: None,
