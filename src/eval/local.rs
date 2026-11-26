@@ -285,6 +285,27 @@ pub fn value_wide_compute_for_rule(
     changed: (usize, usize),
     rule: RuleSet,
 ) {
+    value_wide_compute_inner::<true>(board, caches, changed, rule);
+}
+
+/// Incremental cache update that skips `dgn_cc` / `dgn_sum` neighbor-density
+/// tracking (only consumed by classical `evaluate_board_main`). All shape,
+/// bucket, attack, bitboard, and Renju `dt3` caches remain bit-exact.
+pub fn value_wide_compute_for_rule_no_dgn(
+    board: &mut Board,
+    caches: &mut EvalCaches,
+    changed: (usize, usize),
+    rule: RuleSet,
+) {
+    value_wide_compute_inner::<false>(board, caches, changed, rule);
+}
+
+fn value_wide_compute_inner<const TRACK_DGN: bool>(
+    board: &mut Board,
+    caches: &mut EvalCaches,
+    changed: (usize, usize),
+    rule: RuleSet,
+) {
     if !caches.initialized || caches.rule_set != rule {
         recompute_all_for_rule(board, caches, rule);
         return;
@@ -312,7 +333,7 @@ pub fn value_wide_compute_for_rule(
         debug_assert_eq!(diagonal_up, PackedLine::through(grid, cx, cy, -1, -1));
     }
     let mut old_center_zero = [[false; 4]; 2];
-    if center_changed {
+    if TRACK_DGN && center_changed {
         for (player, row) in old_center_zero.iter_mut().enumerate() {
             for (dir, slot) in row.iter_mut().enumerate() {
                 *slot = ((caches.shape_cache[player][cx][cy][dir] >> 16) & 15) == 0;
@@ -326,15 +347,19 @@ pub fn value_wide_compute_for_rule(
         }
     }
 
-    let skip_stone = center_changed.then_some((cx, cy));
+    let skip_stone = if TRACK_DGN {
+        center_changed.then_some((cx, cy))
+    } else {
+        None
+    };
     // Process center cell (cx, cy) directly (the sole intersection of all 4 lines).
     remove_empty_bucket_contribution(caches, cx, cy);
     if new_cell == EMPTY {
-        let notify_center_dgn = !center_changed;
+        let notify_center_dgn = TRACK_DGN && !center_changed;
         let mut changed_player = [false; 2];
         merge_changed_player(
             &mut changed_player,
-            update_direction_cache(
+            update_direction_cache::<TRACK_DGN>(
                 board,
                 caches,
                 cx,
@@ -347,7 +372,7 @@ pub fn value_wide_compute_for_rule(
         );
         merge_changed_player(
             &mut changed_player,
-            update_direction_cache(
+            update_direction_cache::<TRACK_DGN>(
                 board,
                 caches,
                 cx,
@@ -360,7 +385,7 @@ pub fn value_wide_compute_for_rule(
         );
         merge_changed_player(
             &mut changed_player,
-            update_direction_cache(
+            update_direction_cache::<TRACK_DGN>(
                 board,
                 caches,
                 cx,
@@ -373,7 +398,7 @@ pub fn value_wide_compute_for_rule(
         );
         merge_changed_player(
             &mut changed_player,
-            update_direction_cache(
+            update_direction_cache::<TRACK_DGN>(
                 board,
                 caches,
                 cx,
@@ -399,7 +424,7 @@ pub fn value_wide_compute_for_rule(
             caches.set_dt3_present(cx, cy, false);
         }
     }
-    if center_changed {
+    if TRACK_DGN && center_changed {
         update_center_neighbor_dgn(board, caches, cx, cy, old_cell, new_cell, &old_center_zero);
     }
     add_empty_bucket_contribution(board, caches, cx, cy);
@@ -410,7 +435,7 @@ pub fn value_wide_compute_for_rule(
     for (dy, count) in [(1_isize, h_fwd), (-1_isize, h_bwd)] {
         for step in 1..=count as isize {
             let y = (cy as isize + step * dy) as usize;
-            update_line_neighbor_point(
+            update_line_neighbor_point::<TRACK_DGN>(
                 board,
                 caches,
                 cx,
@@ -429,7 +454,7 @@ pub fn value_wide_compute_for_rule(
     for (dx, count) in [(1_isize, v_fwd), (-1_isize, v_bwd)] {
         for step in 1..=count as isize {
             let x = (cx as isize + step * dx) as usize;
-            update_line_neighbor_point(
+            update_line_neighbor_point::<TRACK_DGN>(
                 board,
                 caches,
                 x,
@@ -449,7 +474,7 @@ pub fn value_wide_compute_for_rule(
         for step in 1..=count as isize {
             let x = (cx as isize + step * dx) as usize;
             let y = (cy as isize + step * dy) as usize;
-            update_line_neighbor_point(
+            update_line_neighbor_point::<TRACK_DGN>(
                 board,
                 caches,
                 x,
@@ -469,7 +494,7 @@ pub fn value_wide_compute_for_rule(
         for step in 1..=count as isize {
             let x = (cx as isize + step * dx) as usize;
             let y = (cy as isize + step * dy) as usize;
-            update_line_neighbor_point(
+            update_line_neighbor_point::<TRACK_DGN>(
                 board,
                 caches,
                 x,
@@ -485,7 +510,7 @@ pub fn value_wide_compute_for_rule(
         }
     }
 
-    if center_changed && new_cell != EMPTY {
+    if TRACK_DGN && center_changed && new_cell != EMPTY {
         let new_player = side_index(new_cell);
         let cc = blocked_neighbor_count(
             board.grid_rows(),
@@ -516,7 +541,7 @@ fn has_point_bit(bits: &[u64; 4], idx: usize) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn update_line_neighbor_point(
+fn update_line_neighbor_point<const TRACK_DGN: bool>(
     board: &Board,
     caches: &mut EvalCaches,
     x: usize,
@@ -536,8 +561,9 @@ fn update_line_neighbor_point(
             remove_empty_bucket_contribution(caches, x, y);
         }
         let shapes = line.hypothetical_shapes(line_pos, renju);
-        let changed_player =
-            update_direction_cache(board, caches, x, y, direction, shapes, true, skip_stone);
+        let changed_player = update_direction_cache::<TRACK_DGN>(
+            board, caches, x, y, direction, shapes, TRACK_DGN, skip_stone,
+        );
         for (player, changed) in changed_player.into_iter().enumerate() {
             if changed {
                 let old_bucket = caches.value_cache[player][x][y] as usize;
@@ -740,7 +766,8 @@ fn update_center_neighbor_dgn(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update_direction_cache(
+#[inline(always)]
+fn update_direction_cache<const TRACK_DGN: bool>(
     board: &Board,
     caches: &mut EvalCaches,
     x: usize,
@@ -752,9 +779,6 @@ fn update_direction_cache(
 ) -> [bool; 2] {
     let mut changed = [false; 2];
     let direction_index = direction as usize;
-    let (dx, dy) = DIRECTION_STEPS[direction_index];
-    let grid = board.grid_rows();
-    let size = board.size() as isize;
     for (player, new_shape) in shapes.into_iter().enumerate() {
         let old = caches.shape_cache[player][x][y][direction_index];
         if old != new_shape {
@@ -763,10 +787,13 @@ fn update_direction_cache(
             }
             caches.shape_cache[player][x][y][direction_index] = new_shape;
             changed[player] = true;
-            if notify_dgn {
+            if TRACK_DGN && notify_dgn {
                 let old_zero = ((old >> 16) & 15) == 0;
                 let new_zero = ((new_shape >> 16) & 15) == 0;
                 if old_zero != new_zero {
+                    let (dx, dy) = DIRECTION_STEPS[direction_index];
+                    let grid = board.grid_rows();
+                    let size = board.size() as isize;
                     let target_stone = if player == 0 { BLACK } else { WHITE };
                     let delta = if new_zero { 1 } else { -1 };
                     for sign in [-1_isize, 1_isize] {
@@ -1339,6 +1366,70 @@ mod tests {
                 board.undo().unwrap();
                 caches.restore_snapshot(snap);
                 assert_masks_exact(&board, &caches, &format!("{rule:?} undo step {step}"));
+            }
+        }
+    }
+
+    #[test]
+    fn no_dgn_update_matches_full_update_for_all_non_dgn_fields() {
+        use crate::board::xy_to_move;
+
+        fn assert_non_dgn_eq(a: &EvalCaches, b: &EvalCaches, label: &str) {
+            assert_eq!(a.board_shadow, b.board_shadow, "{label}: board_shadow");
+            assert_eq!(a.shape_cache, b.shape_cache, "{label}: shape_cache");
+            assert_eq!(a.value_cache, b.value_cache, "{label}: value_cache");
+            assert_eq!(a.attack_cache, b.attack_cache, "{label}: attack_cache");
+            assert_eq!(
+                a.empty_bucket_counts, b.empty_bucket_counts,
+                "{label}: empty_bucket_counts"
+            );
+            assert_eq!(
+                a.nonzero_bucket_mask, b.nonzero_bucket_mask,
+                "{label}: nonzero_bucket_mask"
+            );
+            assert_eq!(a.attack4_mask, b.attack4_mask, "{label}: attack4_mask");
+            assert_eq!(a.l5_mask, b.l5_mask, "{label}: l5_mask");
+            assert_eq!(a.dt3_present, b.dt3_present, "{label}: dt3_present");
+        }
+
+        for rule in [RuleSet::Freestyle, RuleSet::Renju] {
+            let mut board = Board::new();
+            let mut full = EvalCaches::new();
+            let mut fast = EvalCaches::new();
+            recompute_all_for_rule(&mut board, &mut full, rule);
+            recompute_all_for_rule(&mut board, &mut fast, rule);
+
+            let moves = [
+                (7, 7, BLACK),
+                (7, 8, WHITE),
+                (8, 7, BLACK),
+                (8, 8, WHITE),
+                (6, 6, BLACK),
+                (9, 7, WHITE),
+                (6, 8, BLACK),
+                (5, 7, WHITE),
+                (7, 6, BLACK),
+                (8, 6, WHITE),
+            ];
+            let mut full_snaps = Vec::new();
+            let mut fast_snaps = Vec::new();
+            for (step, &(x, y, side)) in moves.iter().enumerate() {
+                full_snaps.push(full.snapshot());
+                fast_snaps.push(fast.snapshot());
+                board.play(xy_to_move(x, y).unwrap(), Some(side)).unwrap();
+                value_wide_compute_for_rule(&mut board, &mut full, (x, y), rule);
+                value_wide_compute_for_rule_no_dgn(&mut board, &mut fast, (x, y), rule);
+                assert_non_dgn_eq(&full, &fast, &format!("{rule:?} play step {step}"));
+                assert!(
+                    fast.dgn_cc_log.is_empty(),
+                    "{rule:?}: no_dgn must never log dgn_cc"
+                );
+            }
+            for step in (0..moves.len()).rev() {
+                board.undo().unwrap();
+                full.restore_snapshot(&full_snaps[step]);
+                fast.restore_snapshot(&fast_snaps[step]);
+                assert_non_dgn_eq(&full, &fast, &format!("{rule:?} undo step {step}"));
             }
         }
     }

@@ -14,7 +14,8 @@ use crate::constants::{
     WIN,
 };
 use crate::eval::{
-    attack_level, evaluate_board, value_wide_compute_for_rule, EvalCaches, EvalSnapshot,
+    attack_level, evaluate_board, value_wide_compute_for_rule, value_wide_compute_for_rule_no_dgn,
+    EvalCaches, EvalSnapshot,
 };
 use crate::nnue::{load_mix9svq_evaluator_for_rule, Mix9svqEvaluator};
 use crate::rules::RuleSet;
@@ -730,7 +731,16 @@ impl AlphaBetaSearcher {
         if let Some(((mx, my), snapshot_slot)) = pending_cache {
             if snapshot_slot.is_none() {
                 *snapshot_slot = Some(caches.snapshot());
-                value_wide_compute_for_rule(board, caches, (mx, my), self.config.rule_set);
+                if self.nnue.is_some() {
+                    value_wide_compute_for_rule_no_dgn(
+                        board,
+                        caches,
+                        (mx, my),
+                        self.config.rule_set,
+                    );
+                } else {
+                    value_wide_compute_for_rule(board, caches, (mx, my), self.config.rule_set);
+                }
             }
         }
 
@@ -2555,7 +2565,7 @@ impl AlphaBetaSearcher {
             if let Some(nnue) = self.nnue.as_mut() {
                 nnue.before_move(side, mx, my);
             }
-            value_wide_compute_for_rule(board, caches, (mx, my), self.config.rule_set);
+            value_wide_compute_for_rule_no_dgn(board, caches, (mx, my), self.config.rule_set);
 
             let child_score = -self.vcfdefend(
                 board,
@@ -2690,7 +2700,7 @@ impl AlphaBetaSearcher {
         if let Some(nnue) = self.nnue.as_mut() {
             nnue.before_move(side, mx, my);
         }
-        value_wide_compute_for_rule(board, caches, (mx, my), self.config.rule_set);
+        value_wide_compute_for_rule_no_dgn(board, caches, (mx, my), self.config.rule_set);
 
         let value = -self.vcfsearch(
             board,
