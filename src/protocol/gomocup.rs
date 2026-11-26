@@ -58,7 +58,7 @@ pub struct GomocupProtocol {
     searcher: Option<RootSearcher>,
     fast_searcher: Option<Arc<crate::fast_engine::FastSearcher>>,
     fast_evaluator: Option<(std::path::PathBuf, RuleSet, crate::nnue::Mix9svqEvaluator)>,
-    fast_tt_kb: usize,
+    max_memory_fast_tt_kb: Option<usize>,
     auto_tt_max_bits: u32,
     max_memory_tt_bits: Option<u32>,
     nnue_prewarm: Option<(std::path::PathBuf, RuleSet, Arc<(Mutex<u8>, Condvar)>)>,
@@ -88,7 +88,7 @@ impl GomocupProtocol {
             searcher: None,
             fast_searcher: None,
             fast_evaluator: None,
-            fast_tt_kb: 32 * 1024,
+            max_memory_fast_tt_kb: None,
             auto_tt_max_bits: MAX_TT_BUCKET_BITS,
             max_memory_tt_bits: None,
             nnue_prewarm: None,
@@ -329,6 +329,7 @@ impl GomocupProtocol {
             } else {
                 raw_val
             };
+            let prev_dir = self.config.runtime.nnue_dir.clone();
             let trimmed = unquoted.trim();
             if trimmed.is_empty() {
                 self.config.runtime.nnue_dir = None;
@@ -336,6 +337,12 @@ impl GomocupProtocol {
             } else {
                 self.config.runtime.nnue_dir = Some(trimmed.to_string());
                 self.config.runtime.use_nnue = true;
+            }
+            if self.config.runtime.nnue_dir != prev_dir {
+                self.fast_evaluator = None;
+                if let Some(fs) = &self.fast_searcher {
+                    fs.clear_tt();
+                }
             }
             self.searcher = None;
             self.nnue_prewarm = None;
@@ -457,12 +464,14 @@ impl GomocupProtocol {
             }
             "max_memory" => {
                 if let Some(parsed) = parse_one::<u64>(value) {
-                    if parsed > 0 {
-                        let kb = ((parsed / 1024) as usize).clamp(1024, 512 * 1024);
-                        if self.fast_tt_kb != kb {
-                            self.fast_tt_kb = kb;
-                            self.fast_searcher = None;
-                        }
+                    let new_fast_kb = if parsed == 0 {
+                        None
+                    } else {
+                        Some(((parsed / 1024) as usize).clamp(1, 512 * 1024))
+                    };
+                    if self.max_memory_fast_tt_kb != new_fast_kb {
+                        self.max_memory_fast_tt_kb = new_fast_kb;
+                        self.fast_searcher = None;
                     }
                     let new_cap = if parsed == 0 {
                         None
@@ -489,8 +498,11 @@ impl GomocupProtocol {
             "tt_bits" => {
                 if let Some(parsed) = parse_one::<u32>(value) {
                     if parsed <= MAX_TT_BUCKET_BITS {
-                        self.tt_bits = Some(parsed);
-                        self.searcher = None;
+                        if self.tt_bits != Some(parsed) {
+                            self.tt_bits = Some(parsed);
+                            self.searcher = None;
+                            self.fast_searcher = None;
+                        }
                         self.clear_pending_error(PendingProtocolError::TtBitsOutOfRange);
                     } else {
                         self.pending_error = Some(PendingProtocolError::TtBitsOutOfRange);
@@ -503,6 +515,10 @@ impl GomocupProtocol {
                         if self.config.rule_set != parsed {
                             self.config.rule_set = parsed;
                             self.searcher = None;
+                            self.fast_evaluator = None;
+                            if let Some(fs) = &self.fast_searcher {
+                                fs.clear_tt();
+                            }
                             let _ = self.ensure_prewarm_status();
                         }
                     }
@@ -904,12 +920,23 @@ impl GomocupProtocol {
         }
     }
 
+    fn effective_fast_tt_kb(&self) -> usize {
+        if let Some(bits) = self.tt_bits {
+            let bytes = 32_u64
+                .checked_shl(bits.min(MAX_TT_BUCKET_BITS))
+                .unwrap_or(u64::MAX);
+            return ((bytes / 1024) as usize).clamp(1, 512 * 1024);
+        }
+        self.max_memory_fast_tt_kb.unwrap_or(32 * 1024)
+    }
+
     fn try_search_move_fast_nnue(&mut self, cmd_start: std::time::Instant) -> Option<Vec<String>> {
         let dir = self.config.runtime.nnue_dir.as_deref()?;
         let rule = self.config.rule_set;
         let path = std::path::Path::new(dir);
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
 
+        let had_prev_evaluator = self.fast_evaluator.is_some();
         let needs_reload = match &self.fast_evaluator {
             Some((d, r, _)) => d != &canonical || *r != rule,
             None => true,
@@ -917,15 +944,25 @@ impl GomocupProtocol {
         if needs_reload {
             let loaded = crate::nnue::load_mix9svq_evaluator_for_rule(&canonical, rule).ok()?;
             self.fast_evaluator = Some((canonical, rule, loaded));
+            if had_prev_evaluator {
+                if let Some(fs) = &self.fast_searcher {
+                    fs.clear_tt();
+                }
+            }
         }
+
+        let target_tt_kb = self.effective_fast_tt_kb();
+        let searcher = match &self.fast_searcher {
+            Some(fs) if fs.tt().hash_size_kb() == target_tt_kb => fs.clone(),
+            _ => {
+                let fs = Arc::new(crate::fast_engine::FastSearcher::new(target_tt_kb));
+                self.fast_searcher = Some(fs.clone());
+                fs
+            }
+        };
 
         let eval = &mut self.fast_evaluator.as_mut()?.2;
         eval.sync_with_board(&self.board);
-
-        let searcher = self
-            .fast_searcher
-            .get_or_insert_with(|| Arc::new(crate::fast_engine::FastSearcher::new(self.fast_tt_kb)))
-            .clone();
 
         let fb = crate::fast_engine::FastBoard::from_legacy_board(
             &self.board,
@@ -936,11 +973,11 @@ impl GomocupProtocol {
         let setup_ms = cmd_start.elapsed().as_secs_f64() * 1000.0;
         let turn_ms = self
             .timeout_turn_ms
-            .map(|t| (t - setup_ms).max(10.0) as u64);
+            .map(|t| (t - setup_ms).max(0.0).floor() as u64);
         let left_ms = self
             .time_left_ms
             .filter(|&l| l < 50_000_000.0)
-            .map(|l| (l - setup_ms).max(10.0) as u64);
+            .map(|l| (l - setup_ms).max(0.0).floor() as u64);
         let max_depth = self.default_limits.map(|l| l.max_depth).unwrap_or(99);
         let num_threads = if self.node_limit.is_some() {
             1
@@ -1281,5 +1318,146 @@ mod tests {
         let _ = protocol.handle_line("BEGIN");
         let searcher = protocol.searcher.as_ref().expect("searcher rebuilt");
         assert_eq!(searcher.tt.bucket_count(), 1_usize << 18);
+    }
+
+    #[test]
+    fn fast_nnue_hot_swap_nnue_dir_and_rule_clears_fast_tt() {
+        let mut protocol = GomocupProtocol::default();
+        let fs = Arc::new(crate::fast_engine::FastSearcher::new(64));
+        protocol.fast_searcher = Some(fs.clone());
+        protocol.config.runtime.nnue_dir = Some("/tmp/weights_a".to_string());
+        protocol.config.runtime.use_nnue = true;
+
+        let sentinel_key = 0xDEAD_BEEF_CAFE_1234_u64;
+        fs.tt().store(
+            sentinel_key,
+            321,
+            100,
+            true,
+            crate::fast_engine::tt::BOUND_EXACT,
+            112,
+            10,
+            0,
+        );
+        assert!(fs.tt().probe(sentinel_key, 0).is_some());
+
+        // Re-sending the exact same nnue_dir keeps the TT intact.
+        protocol.handle_line("INFO nnue_dir /tmp/weights_a");
+        assert!(fs.tt().probe(sentinel_key, 0).is_some());
+
+        // Switching nnue_dir clears FastTT so stale scores cannot leak.
+        protocol.handle_line("INFO nnue_dir /tmp/weights_b");
+        assert!(fs.tt().probe(sentinel_key, 0).is_none());
+
+        // Switching rule on empty board also clears FastTT.
+        fs.tt().store(
+            sentinel_key,
+            321,
+            100,
+            true,
+            crate::fast_engine::tt::BOUND_EXACT,
+            112,
+            10,
+            0,
+        );
+        assert!(fs.tt().probe(sentinel_key, 0).is_some());
+        protocol.handle_line("INFO rule 4");
+        assert!(fs.tt().probe(sentinel_key, 0).is_none());
+    }
+
+    #[test]
+    fn fast_nnue_respects_tt_bits_max_memory_and_small_max_node() {
+        let mut protocol = GomocupProtocol::default();
+        assert_eq!(protocol.effective_fast_tt_kb(), 32 * 1024);
+
+        // INFO max_memory sizes FastTT and INFO max_memory 0 resets to 32 MiB.
+        protocol.handle_line("INFO max_memory 4194304");
+        assert_eq!(protocol.effective_fast_tt_kb(), 4096);
+        protocol.handle_line("INFO max_memory 0");
+        assert_eq!(protocol.effective_fast_tt_kb(), 32 * 1024);
+
+        // Explicit tt_bits (via CLI or INFO) overrides max_memory and default.
+        protocol.handle_line("INFO max_memory 33554432");
+        protocol.tt_bits = Some(18);
+        assert_eq!(protocol.effective_fast_tt_kb(), 8192);
+        protocol.handle_line("INFO tt_bits 16");
+        assert_eq!(protocol.effective_fast_tt_kb(), 2048);
+
+        let local_weights = std::path::Path::new("opponent/rapfi-networks/mix9svq");
+        if !local_weights.exists() {
+            return;
+        }
+        let mut p = GomocupProtocol::new(
+            None,
+            Some(SearchLimits {
+                max_depth: 18,
+                root_width: 40,
+                ..SearchLimits::default()
+            }),
+        );
+        p.handle_line(&format!("INFO nnue_dir {}", local_weights.display()));
+        p.handle_line("INFO rule 4");
+        p.handle_line("INFO tt_bits 16");
+        p.handle_line("INFO max_node 32");
+        p.handle_line("INFO root_profile 1");
+        assert_eq!(p.handle_line("START 15"), vec!["OK"]);
+        p.handle_line("BOARD");
+        p.handle_line("7,7,1");
+        p.handle_line("7,6,2");
+        p.handle_line("8,6,1");
+        p.handle_line("6,8,2");
+        let resp = p.handle_line("DONE");
+        let fs = p.fast_searcher.as_ref().expect("fast searcher initialized");
+        assert_eq!(fs.tt().hash_size_kb(), 2048);
+        let msg = resp
+            .iter()
+            .find(|line| line.starts_with("MESSAGE fast_nnue "))
+            .expect("fast_nnue message present");
+        let nodes_str = msg
+            .split_whitespace()
+            .find_map(|tok| tok.strip_prefix("nodes="))
+            .expect("nodes= field");
+        let nodes: u64 = nodes_str.parse().expect("numeric nodes");
+        assert!(
+            nodes <= 32,
+            "INFO max_node 32 must cap fast_nnue search, got {nodes} ({msg})"
+        );
+    }
+
+    #[test]
+    fn fast_nnue_honors_match_only_time_left_without_timeout_turn() {
+        let local_weights = std::path::Path::new("opponent/rapfi-networks/mix9svq");
+        if !local_weights.exists() {
+            return;
+        }
+        let mut p = GomocupProtocol::new(
+            None,
+            Some(SearchLimits {
+                max_depth: 18,
+                root_width: 40,
+                ..SearchLimits::default()
+            }),
+        );
+        p.handle_line(&format!("INFO nnue_dir {}", local_weights.display()));
+        p.handle_line("INFO rule 4");
+        p.handle_line("INFO tt_bits 16");
+        p.handle_line("INFO time_left 100");
+        assert_eq!(p.handle_line("START 15"), vec!["OK"]);
+        p.handle_line("BOARD");
+        p.handle_line("7,7,1");
+        p.handle_line("7,6,2");
+        p.handle_line("8,6,1");
+        p.handle_line("6,8,2");
+        let t0 = std::time::Instant::now();
+        let resp = p.handle_line("DONE");
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        assert!(
+            resp.last().is_some_and(|s| s.contains(',')),
+            "expected legal move coordinate, got {resp:?}"
+        );
+        assert!(
+            elapsed_ms < 250.0,
+            "match-only INFO time_left 100 must not run unbounded depth 18, took {elapsed_ms:.1}ms"
+        );
     }
 }

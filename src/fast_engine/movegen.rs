@@ -146,10 +146,11 @@ impl MoveList {
 
     #[inline(always)]
     pub fn push(&mut self, mv: ScoredMove) {
-        debug_assert!(self.len < BOARD_AREA);
-        unsafe {
-            self.data.get_unchecked_mut(self.len).write(mv);
-        }
+        assert!(
+            self.len < BOARD_AREA,
+            "MoveList capacity ({BOARD_AREA}) exceeded"
+        );
+        self.data[self.len].write(mv);
         self.len += 1;
     }
 
@@ -966,5 +967,14 @@ mod tests {
             coords3.contains(&(8, 7)),
             "missing F3 def (8,7) in {coords3:?}"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "MoveList capacity")]
+    fn move_list_push_panics_cleanly_at_capacity() {
+        let mut list = MoveList::new();
+        for i in 0..=BOARD_AREA {
+            list.push(ScoredMove::new(i as u16));
+        }
     }
 }

@@ -521,6 +521,10 @@ impl FastSearcher {
             start,
             optimum_ms,
             maximum_ms,
+            time_check_mask: match maximum_ms {
+                Some(m) if m <= 20 => 63,
+                _ => 2047,
+            },
             max_depth: cfg.max_depth.clamp(1, MAX_DEPTH),
             max_nodes: cfg.max_nodes,
             num_threads,
@@ -598,26 +602,48 @@ fn compute_time_budget(
     moves_left: usize,
 ) -> (Option<u64>, Option<u64>) {
     const TURN_RESERVE_MS: u64 = 30;
-    let Some(turn) = turn_ms else {
-        return (None, None);
+    let safe_budget = |raw_ms: u64| -> u64 {
+        if raw_ms >= TURN_RESERVE_MS * 2 {
+            raw_ms - TURN_RESERVE_MS
+        } else if raw_ms > 2 {
+            (raw_ms / 2).max(1)
+        } else {
+            0
+        }
     };
-    let max_turn = turn.saturating_sub(TURN_RESERVE_MS).max(10);
-    let max_ms = match time_left_ms {
-        Some(left) if left > 0 => {
-            let safe_left = left.saturating_sub(TURN_RESERVE_MS).max(10);
-            let moves_est = ((moves_left / 2).max(1)).min(64) as u64;
-            if turn * moves_est <= left {
-                max_turn
+    let moves_est = ((moves_left / 2).max(1)).min(64) as u64;
+    let max_ms = match (turn_ms, time_left_ms) {
+        (Some(turn), Some(left)) => {
+            let max_turn = safe_budget(turn);
+            let safe_left = safe_budget(left);
+            if max_turn == 0 || safe_left == 0 {
+                0
+            } else if turn.saturating_mul(moves_est) <= left {
+                max_turn.min(safe_left)
             } else {
-                // Tight match clock: allocate proportionally.
-                let opt_left = (safe_left / moves_est.max(4)).max(10);
+                // Tight match clock: allocate proportionally without raising above remaining time.
+                let opt_left = (safe_left / moves_est.max(4)).max(1).min(safe_left);
                 opt_left.min(max_turn)
             }
         }
-        _ => max_turn,
+        (Some(turn), None) => safe_budget(turn),
+        (None, Some(left)) => {
+            // Match-clock only (no per-turn limit): pace strictly inside remaining match time.
+            let safe_left = safe_budget(left);
+            if safe_left == 0 {
+                0
+            } else {
+                (safe_left / moves_est.max(4)).max(1).min(safe_left)
+            }
+        }
+        (None, None) => return (None, None),
     };
-    let opt_ms = ((max_ms as f64) * 0.90) as u64;
-    (Some(opt_ms.max(5)), Some(max_ms))
+    let opt_ms = if max_ms == 0 {
+        0
+    } else {
+        ((max_ms as f64) * 0.90) as u64
+    };
+    (Some(opt_ms.min(max_ms)), Some(max_ms))
 }
 
 struct SharedSearchState<'a> {
@@ -629,6 +655,7 @@ struct SharedSearchState<'a> {
     start: Instant,
     optimum_ms: Option<u64>,
     maximum_ms: Option<u64>,
+    time_check_mask: u64,
     max_depth: i32,
     max_nodes: Option<u64>,
     num_threads: usize,
@@ -753,6 +780,7 @@ struct SearchWorker<'a> {
     root_moves: Vec<RootMove>,
     shared: &'a SharedSearchState<'a>,
     local_nodes: u64,
+    total_local_nodes: u64,
     sel_depth: i32,
     root_depth: i32,
     completed_depth: i32,
@@ -792,6 +820,7 @@ impl<'a> SearchWorker<'a> {
             root_moves,
             shared,
             local_nodes: 0,
+            total_local_nodes: 0,
             sel_depth: 0,
             root_depth: 0,
             completed_depth: 0,
@@ -803,10 +832,10 @@ impl<'a> SearchWorker<'a> {
 
     fn flush_nodes(&mut self) {
         if self.local_nodes > 0 {
-            self.shared
-                .total_nodes
-                .fetch_add(self.local_nodes, Ordering::Relaxed);
+            let n = self.local_nodes;
             self.local_nodes = 0;
+            self.total_local_nodes += n;
+            self.shared.total_nodes.fetch_add(n, Ordering::Relaxed);
         }
     }
 
@@ -834,11 +863,48 @@ impl<'a> SearchWorker<'a> {
 
     #[inline(always)]
     fn inc_node_and_check_exit(&mut self) -> bool {
+        if let Some(max_n) = self.shared.max_nodes {
+            if self.shared.num_threads == 1 {
+                if self.total_local_nodes + self.local_nodes >= max_n {
+                    self.shared.stop.store(true, Ordering::Relaxed);
+                    return true;
+                }
+                self.local_nodes += 1;
+                let worker_total = self.total_local_nodes + self.local_nodes;
+                if (worker_total & self.shared.time_check_mask) == 0 {
+                    self.flush_nodes();
+                    if self.tid == 0 {
+                        return self.shared.check_exit(0);
+                    }
+                    return self.shared.is_terminating();
+                }
+                return false;
+            }
+            // Multi-threaded `max_nodes`: claim exact node quota atomically so
+            // concurrent workers never overshoot `max_nodes`, and check the
+            // clock on the worker's monotonic node count.
+            if self.shared.is_terminating() {
+                return true;
+            }
+            let prev = self.shared.total_nodes.fetch_add(1, Ordering::Relaxed);
+            if prev >= max_n {
+                self.shared.total_nodes.fetch_sub(1, Ordering::Relaxed);
+                self.shared.stop.store(true, Ordering::Relaxed);
+                return true;
+            }
+            self.total_local_nodes += 1;
+            if (self.total_local_nodes & self.shared.time_check_mask) == 0 {
+                if self.tid == 0 {
+                    return self.shared.check_exit(0);
+                }
+                return self.shared.is_terminating();
+            }
+            return false;
+        }
+        // Fast path for normal timed / fixed-depth search (`max_nodes == None`).
         self.local_nodes += 1;
-        if (self.local_nodes & 2047) == 0 {
-            let n = self.local_nodes;
-            self.local_nodes = 0;
-            self.shared.total_nodes.fetch_add(n, Ordering::Relaxed);
+        if (self.local_nodes & self.shared.time_check_mask) == 0 {
+            self.flush_nodes();
             if self.tid == 0 {
                 return self.shared.check_exit(0);
             }
@@ -2087,6 +2153,189 @@ mod tests {
         assert!(
             (bx == 4 && by == 7) || (bx == 8 && by == 7),
             "expected (4,7) or (8,7) open four, got ({bx},{by})"
+        );
+    }
+
+    #[test]
+    fn compute_time_budget_handles_match_only_and_turn_limits() {
+        assert_eq!(compute_time_budget(None, None, 200), (None, None));
+
+        // Match-only tight clock (e.g. time_left=100ms, no timeout_turn) must stay well under 100ms.
+        let (opt, max) = compute_time_budget(None, Some(100), 220);
+        let opt = opt.expect("match-only optimum budget");
+        let max = max.expect("match-only maximum budget");
+        assert!(max <= 70, "expected max <= 70ms for 100ms left, got {max}");
+        assert!(opt <= max);
+
+        // Ultra-short clocks (e.g. 5ms or 0ms) must NEVER be raised above remaining time,
+        // and budgets must be monotonically non-decreasing with given time.
+        let (opt5, max5) = compute_time_budget(None, Some(5), 220);
+        assert!(
+            max5.unwrap() <= 2,
+            "expected <= 2ms for 5ms left, got {max5:?}"
+        );
+        assert!(opt5.unwrap() <= max5.unwrap());
+        assert_eq!(compute_time_budget(None, Some(0), 220), (Some(0), Some(0)));
+        assert_eq!(compute_time_budget(Some(5), None, 220), (Some(1), Some(2)));
+        assert_eq!(compute_time_budget(Some(0), None, 220), (Some(0), Some(0)));
+
+        let mut prev_turn_max = 0_u64;
+        let mut prev_left_max = 0_u64;
+        for ms in 0..=200_u64 {
+            let (to, tm) = compute_time_budget(Some(ms), None, 200);
+            let tm = tm.unwrap();
+            assert!(to.unwrap() <= tm && tm <= ms);
+            assert!(
+                tm >= prev_turn_max,
+                "turn budget decreased at {ms}ms: {prev_turn_max} -> {tm}"
+            );
+            prev_turn_max = tm;
+
+            let (lo, lm) = compute_time_budget(None, Some(ms), 200);
+            let lm = lm.unwrap();
+            assert!(lo.unwrap() <= lm && lm <= ms);
+            assert!(
+                lm >= prev_left_max,
+                "match budget decreased at {ms}ms: {prev_left_max} -> {lm}"
+            );
+            prev_left_max = lm;
+        }
+
+        // Match-only 60s clock paces opening move around ~937ms.
+        let (opt60, max60) = compute_time_budget(None, Some(60_000), 220);
+        assert!(
+            (500..=1500).contains(&max60.unwrap()),
+            "unexpected 60s opening max budget: {max60:?}"
+        );
+        assert!(opt60.unwrap() <= max60.unwrap());
+
+        // Pure per-turn limit keeps original 970ms max / 873ms opt behavior.
+        assert_eq!(
+            compute_time_budget(Some(1000), None, 200),
+            (Some(873), Some(970))
+        );
+    }
+
+    #[test]
+    fn fast_search_respects_small_max_nodes_and_match_only_clock() {
+        let dir = Path::new("opponent/rapfi-networks/mix9svq");
+        if !dir.exists() {
+            return;
+        }
+        let mut eval = load_mix9svq_evaluator_for_rule(dir, RuleSet::Renju).expect("load mix9svq");
+        let mut legacy = Board::new();
+        let mut fb = FastBoard::new(RuleSet::Renju, CandRange::Square3Line4);
+        for &(x, y) in &[(7, 7), (7, 6), (8, 6), (6, 8), (6, 6)] {
+            let m = xy_to_move(x, y).unwrap();
+            legacy.play_for_rule(m, None, RuleSet::Renju).unwrap();
+            fb.play(m as usize);
+        }
+        eval.sync_with_board(&legacy);
+
+        let searcher = FastSearcher::new(1024);
+
+        // Small max_nodes must stop at or before the limit rather than waiting for 2048 nodes.
+        let r_nodes = searcher.search(
+            &fb,
+            &eval,
+            &FastSearchConfig {
+                max_depth: 18,
+                max_nodes: Some(32),
+                time_limit_ms: None,
+                time_left_ms: None,
+                num_threads: 1,
+                ..Default::default()
+            },
+        );
+        assert!((r_nodes.best_move as usize) < BOARD_AREA);
+        assert!(
+            r_nodes.nodes <= 32,
+            "expected <= 32 visited nodes, got {}",
+            r_nodes.nodes
+        );
+
+        // Match-only time_left=100ms without time_limit_ms must respect the clock.
+        searcher.clear_tt();
+        let r_time = searcher.search(
+            &fb,
+            &eval,
+            &FastSearchConfig {
+                max_depth: 18,
+                max_nodes: None,
+                time_limit_ms: None,
+                time_left_ms: Some(100),
+                num_threads: 1,
+                ..Default::default()
+            },
+        );
+        assert!((r_time.best_move as usize) < BOARD_AREA);
+        assert!(
+            r_time.elapsed_ms < 250.0,
+            "match-only time_left=100ms should stop quickly, took {:.1}ms",
+            r_time.elapsed_ms
+        );
+
+        // Multi-threaded 4T exact max_nodes=1 must visit <= 1 node (not 32).
+        searcher.clear_tt();
+        let r_4t_1 = searcher.search(
+            &fb,
+            &eval,
+            &FastSearchConfig {
+                max_depth: 18,
+                max_nodes: Some(1),
+                time_limit_ms: None,
+                time_left_ms: None,
+                num_threads: 4,
+                ..Default::default()
+            },
+        );
+        assert!((r_4t_1.best_move as usize) < BOARD_AREA);
+        assert!(
+            r_4t_1.nodes <= 1,
+            "4T max_nodes=1 must not overshoot, got {}",
+            r_4t_1.nodes
+        );
+
+        // Multi-threaded 4T simultaneous huge max_nodes + short time_limit must still honor the clock.
+        searcher.clear_tt();
+        let r_4t_both = searcher.search(
+            &fb,
+            &eval,
+            &FastSearchConfig {
+                max_depth: 30,
+                max_nodes: Some(10_000_000),
+                time_limit_ms: Some(50),
+                time_left_ms: None,
+                num_threads: 4,
+                ..Default::default()
+            },
+        );
+        assert!((r_4t_both.best_move as usize) < BOARD_AREA);
+        assert!(
+            r_4t_both.elapsed_ms < 200.0,
+            "4T max_nodes + 50ms clock must still fire in-iteration timer, took {:.1}ms",
+            r_4t_both.elapsed_ms
+        );
+
+        // Ultra-short time_left=5ms must not be lifted to 10ms.
+        searcher.clear_tt();
+        let r_5ms = searcher.search(
+            &fb,
+            &eval,
+            &FastSearchConfig {
+                max_depth: 18,
+                max_nodes: None,
+                time_limit_ms: None,
+                time_left_ms: Some(5),
+                num_threads: 1,
+                ..Default::default()
+            },
+        );
+        assert!((r_5ms.best_move as usize) < BOARD_AREA);
+        assert!(
+            r_5ms.elapsed_ms < 5.0,
+            "prewarmed 5ms time_left should finish < 5ms, took {:.2}ms",
+            r_5ms.elapsed_ms
         );
     }
 }

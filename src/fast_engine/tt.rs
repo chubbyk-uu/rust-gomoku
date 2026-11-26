@@ -187,10 +187,10 @@ impl Drop for FastTT {
 
 impl FastTT {
     pub fn new_kb(hash_size_kb: usize) -> Self {
-        let mut num_buckets = (hash_size_kb * 1024) / std::mem::size_of::<TTBucket>();
-        if num_buckets == 0 {
-            num_buckets = 1;
-        }
+        let bytes = hash_size_kb
+            .checked_mul(1024)
+            .expect("FastTT hash_size_kb overflow");
+        let num_buckets = (bytes / std::mem::size_of::<TTBucket>()).max(1);
         let layout = Layout::array::<TTBucket>(num_buckets).expect("valid TTBucket array layout");
         let ptr = unsafe { alloc_zeroed(layout) as *mut TTBucket };
         assert!(
@@ -213,18 +213,35 @@ impl FastTT {
     }
 
     pub fn resize_kb(&mut self, hash_size_kb: usize) {
-        let new_buckets = ((hash_size_kb * 1024) / std::mem::size_of::<TTBucket>()).max(1);
+        self.resize_kb_with_alloc(hash_size_kb, |layout| unsafe { alloc_zeroed(layout) });
+    }
+
+    #[inline(always)]
+    fn resize_kb_with_alloc(
+        &mut self,
+        hash_size_kb: usize,
+        alloc_fn: impl FnOnce(Layout) -> *mut u8,
+    ) {
+        let bytes = hash_size_kb
+            .checked_mul(1024)
+            .expect("FastTT hash_size_kb overflow");
+        let new_buckets = (bytes / std::mem::size_of::<TTBucket>()).max(1);
         if new_buckets == self.num_buckets {
             return;
         }
-        let old_layout = Layout::array::<TTBucket>(self.num_buckets).expect("old layout");
-        unsafe { dealloc(self.ptr as *mut u8, old_layout) };
+        // Allocate the new buffer before freeing the old one (strong exception
+        // safety): if layout validation or allocation fails, the existing table
+        // remains intact and valid for subsequent probe/store/hash_usage calls.
         let new_layout = Layout::array::<TTBucket>(new_buckets).expect("new layout");
-        let ptr = unsafe { alloc_zeroed(new_layout) as *mut TTBucket };
+        let ptr = alloc_fn(new_layout) as *mut TTBucket;
         assert!(
             !ptr.is_null(),
             "failed to allocate FastTT ({hash_size_kb} KiB)"
         );
+        if !self.ptr.is_null() && self.num_buckets > 0 {
+            let old_layout = Layout::array::<TTBucket>(self.num_buckets).expect("old layout");
+            unsafe { dealloc(self.ptr as *mut u8, old_layout) };
+        }
         self.ptr = ptr;
         self.num_buckets = new_buckets;
         self.generation.store(0, Ordering::Relaxed);
@@ -249,6 +266,9 @@ impl FastTT {
 
     #[inline(always)]
     fn buckets(&self) -> &[TTBucket] {
+        if self.ptr.is_null() || self.num_buckets == 0 {
+            return &[];
+        }
         unsafe { std::slice::from_raw_parts(self.ptr, self.num_buckets) }
     }
 
@@ -430,5 +450,43 @@ mod tests {
         let still = tt.probe(key, 4).expect("still deep");
         assert_eq!(still.depth, 12);
         assert_eq!(still.best_move, 112);
+    }
+
+    #[test]
+    fn fast_tt_resize_kb_is_panic_safe_on_invalid_size() {
+        let mut tt = FastTT::new_kb(64);
+        let key = 0x1122_3344_5566_7788_u64;
+        tt.store(key, 123, 45, true, BOUND_EXACT, 112, 8, 2);
+
+        // Overflowing size must panic cleanly without freeing or corrupting `tt`.
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tt.resize_kb(usize::MAX);
+        }));
+        assert!(res.is_err());
+        assert_eq!(tt.hash_size_kb(), 64);
+        assert_eq!(tt.probe(key, 2).expect("old table still intact").value, 123);
+
+        // Layout exceeding `isize::MAX` must also panic before freeing old memory.
+        let res2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tt.resize_kb((isize::MAX as usize / 1024) + 1);
+        }));
+        assert!(res2.is_err());
+        assert_eq!(tt.hash_size_kb(), 64);
+        assert_eq!(tt.probe(key, 2).expect("old table still intact").value, 123);
+
+        // Deterministic simulated allocation failure (independent of OS overcommit policy)
+        // must keep the old table intact so `hash_usage_permill`, `probe`, and `store` stay safe.
+        let res3 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tt.resize_kb_with_alloc(128, |_| std::ptr::null_mut());
+        }));
+        assert!(res3.is_err());
+        assert_eq!(tt.hash_size_kb(), 64);
+        let _ = tt.hash_usage_permill();
+        assert_eq!(tt.probe(key, 2).expect("old table survives OOM").value, 123);
+
+        // Valid resize works and clears old contents.
+        tt.resize_kb(128);
+        assert_eq!(tt.hash_size_kb(), 128);
+        assert!(tt.probe(key, 2).is_none());
     }
 }
