@@ -591,6 +591,8 @@ mod tests {
             "selectMode('two_player')",
             "sendHeartbeat",
             "/heartbeat",
+            "NNUE 局势估计",
+            "NNUE (Mix9svq · FastEngine)",
         ] {
             assert!(INDEX_HTML.contains(marker), "missing marker: {marker}");
         }
@@ -1425,19 +1427,24 @@ const INDEX_HTML: &str = r#"<!doctype html>
       renderNnueEstimate();
       if (twoPlayer) return;
 
+      const usingFastNnue = r ? !!r.used_nnue : (p.clock_mode === 'timed' && p.use_nnue && p.nnue_available);
       let evaluator = '经典评估';
-      if (r?.used_nnue) evaluator = 'NNUE (Mix9svq)';
+      if (r?.used_nnue) evaluator = 'NNUE (Mix9svq · FastEngine)';
       else if (p.clock_mode === 'timed') {
         if (!p.nnue_available) evaluator += '（未找到 NNUE 权重）';
-        else evaluator = r ? '经典评估（NNUE 加载失败）' : 'NNUE（等待验证）';
+        else evaluator = r ? '经典评估（NNUE 加载失败）' : 'NNUE (Mix9svq · FastEngine)';
       }
       const config = p.clock_mode === 'timed' ? `${p.time_limit_ms} ms` : `深度 ${p.depth}`;
       const searchRows = [
         ['评估器', evaluator],
-        ['搜索配置', `${config} · 宽度 ${p.width} · ${p.threads} 线程`],
-        ['战术配置', [p.compute_vcf ? `VCF ${p.root_vcf_depth}` : 'VCF 关闭',
-          p.compute_vct ? `VCT ${p.root_vct_depth}` : 'VCT 关闭'].join(' · ')],
+        ['搜索配置', usingFastNnue
+          ? `${config} · ${p.threads} 线程 · 32 MiB TT`
+          : `${config} · 宽度 ${p.width} · ${p.threads} 线程`],
       ];
+      if (!usingFastNnue) {
+        searchRows.push(['战术配置', [p.compute_vcf ? `VCF ${p.root_vcf_depth}` : 'VCF 关闭',
+          p.compute_vct ? `VCT ${p.root_vct_depth}` : 'VCT 关闭'].join(' · ')]);
+      }
       if (r) {
         searchRows.push(['搜索结果', `深度 ${r.depth} · ${r.nodes.toLocaleString('zh-CN')} 节点 · 引擎侧分数 ${r.score}`]);
       }

@@ -47,6 +47,13 @@ const canvas = document.getElementById("board");
 const wrap = document.getElementById("board-wrap");
 const area = document.getElementById("board-area");
 const ctx = canvas.getContext("2d");
+const positionPanel = document.getElementById("position-estimate");
+const positionCurrent = document.getElementById("position-current");
+const positionPoint = document.getElementById("position-point");
+const positionChart = document.getElementById("position-chart");
+const positionCtx = positionChart ? positionChart.getContext("2d") : null;
+const chartBounds = { left: 56, right: 622, top: 14, bottom: 112 };
+let selectedEstimatePly = null;
 const statusMsg = document.getElementById("status-msg");
 const turnDot = document.getElementById("turn-dot");
 const toastEl = document.getElementById("toast");
@@ -351,10 +358,94 @@ function render(state) {
   }
   // controls
   UiLogic.syncBusyControls(document, busy, state);
-  // advanced panel
+  // position estimate chart & advanced panel
+  renderNnueEstimate(state);
   fillAdvanced(state.last_result, state.params);
   draw();
   showResultIfNeeded(state);
+}
+
+function blackExpectedScore(point) { return point.black_win + point.draw * 0.5; }
+function percent(value) { return `${(value * 100).toFixed(1)}%`; }
+function chartMaxPly(points) { return Math.max(4, points[points.length - 1].ply); }
+
+function renderNnueEstimate(state) {
+  if (!positionPanel || !positionChart || !positionCtx) return;
+  const points = (state && state.nnue_history) || [];
+  const p = (state && state.params) || {};
+  const fallback = state && state.last_result && state.last_result.used_nnue === false;
+  positionPanel.hidden = p.mode !== "vs_engine" || p.clock_mode !== "timed" || !p.nnue_available || fallback;
+  positionChart.hidden = points.length === 0;
+  if (positionPanel.hidden || points.length === 0) {
+    selectedEstimatePly = null;
+    if (positionCurrent) positionCurrent.textContent = "引擎落子后更新";
+    if (positionPoint) positionPoint.textContent = "";
+    return;
+  }
+
+  const latest = points[points.length - 1];
+  const selected = points.find((point) => point.ply === selectedEstimatePly) || latest;
+  const latestScore = blackExpectedScore(latest);
+  const scorePerMille = Math.round(latestScore * 1000);
+  const advantage = scorePerMille > 500 ? "黑方占优" : scorePerMille < 500 ? "白方占优" : "均势";
+  if (positionCurrent) {
+    positionCurrent.textContent = `第 ${latest.ply} 手 · ${advantage} ${percent(latestScore)}`;
+  }
+  if (positionPoint) {
+    positionPoint.textContent =
+      `第 ${selected.ply} 手：黑胜 ${percent(selected.black_win)} · 和棋 ${percent(selected.draw)} · 白胜 ${percent(selected.white_win)}`;
+  }
+
+  const { left, right, top, bottom } = chartBounds;
+  const maxPly = chartMaxPly(points);
+  const x = (ply) => left + (right - left) * ply / maxPly;
+  const y = (score) => bottom - (bottom - top) * score;
+  const c = positionCtx;
+  c.clearRect(0, 0, positionChart.width, positionChart.height);
+  c.font = '18px system-ui, "Noto Sans SC", sans-serif';
+  c.fillStyle = "#6f685f";
+  c.textAlign = "right";
+  c.textBaseline = "middle";
+  for (const score of [1, 0.5, 0]) {
+    c.beginPath();
+    c.strokeStyle = score === 0.5 ? "#9ea7a2" : "#e3e0d8";
+    c.lineWidth = 1.5;
+    c.setLineDash(score === 0.5 ? [6, 5] : []);
+    c.moveTo(left, y(score));
+    c.lineTo(right, y(score));
+    c.stroke();
+    c.fillText(`${score * 100}%`, left - 7, y(score));
+  }
+  c.setLineDash([]);
+  c.fillText(`${maxPly} 手`, right, bottom + 19);
+  c.textAlign = "left";
+  c.fillText("0", left, bottom + 19);
+  c.beginPath();
+  c.strokeStyle = COLORS.accent;
+  c.lineWidth = 3;
+  points.forEach((point, index) => {
+    const px_ = x(point.ply);
+    const py_ = y(blackExpectedScore(point));
+    if (index === 0) c.moveTo(px_, py_);
+    else c.lineTo(px_, py_);
+  });
+  c.stroke();
+  c.beginPath();
+  c.fillStyle = COLORS.accent;
+  c.arc(x(selected.ply), y(blackExpectedScore(selected)), 5.5, 0, Math.PI * 2);
+  c.fill();
+}
+
+function selectEstimateAtEvent(evt) {
+  const points = lastState && lastState.nnue_history;
+  if (!points || !points.length || !positionChart) return;
+  const rect = positionChart.getBoundingClientRect();
+  if (rect.width <= 0) return;
+  const x = (evt.clientX - rect.left) * positionChart.width / rect.width;
+  const ply = (x - chartBounds.left) * chartMaxPly(points) / (chartBounds.right - chartBounds.left);
+  selectedEstimatePly = points.reduce((best, point) =>
+    Math.abs(point.ply - ply) < Math.abs(best.ply - ply) ? point : best).ply;
+  renderNnueEstimate(lastState);
 }
 
 function fillAdvanced(res, params) {
@@ -364,7 +455,8 @@ function fillAdvanced(res, params) {
   };
   const isTimed = params.clock_mode === "timed";
   const limitLabel = formatTimeLimit(params.time_limit_ms || 1000);
-  set("eval", isTimed ? (params.use_nnue ? "NNUE (Mix9svq)" : "经典评估（未找到权重）") : "经典评估");
+  const usedNnue = res ? Boolean(res.used_nnue) : Boolean(params.use_nnue);
+  set("eval", isTimed ? (usedNnue ? "NNUE (Mix9svq · FastEngine)" : "经典评估（未找到权重）") : "经典评估");
   set("clock", isTimed ? `专业（每步 ${limitLabel}）` : "休闲（固定深度）");
   set("difficulty", isTimed ? "自动深度" : (difficultyNames[params.difficulty] || params.difficulty || "—"));
   set("threads", params.threads != null ? params.threads + " 线程" : "—");
@@ -655,6 +747,19 @@ function bindEvents() {
   // Resume the AudioContext on the first user gesture so engine-first moves can
   // also play (Web Audio starts suspended until a gesture).
   window.addEventListener("pointerdown", unlockAudio);
+
+  if (positionChart) {
+    positionChart.addEventListener("pointerdown", selectEstimateAtEvent);
+    positionChart.addEventListener("pointermove", (evt) => {
+      if (evt.buttons || evt.pointerType === "mouse") selectEstimateAtEvent(evt);
+    });
+    const resetEstimateSelection = () => {
+      selectedEstimatePly = null;
+      if (lastState) renderNnueEstimate(lastState);
+    };
+    positionChart.addEventListener("pointerleave", resetEstimateSelection);
+    positionChart.addEventListener("pointercancel", resetEstimateSelection);
+  }
 
   window.addEventListener("resize", resize);
   window.addEventListener("orientationchange", resize);

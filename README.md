@@ -10,13 +10,13 @@ Download the Windows x64 program and signed Android ARM64 APK / AAB from the [la
 
 ### Windows / Desktop GUI
 
-The Windows program opens this local browser interface. Play against the engine or another person, choose freestyle or Renju, switch between Pro mode (NNUE `Mix9svq` with per-move time budgets `500 ms`–`5000 ms`, default `1000 ms`) and Casual mode (four classical fixed-depth presets), and toggle multi-threaded search from the side panel.
+The Windows program opens this local browser interface. Play against the engine or another person, choose freestyle or Renju, switch between Pro mode (native `fast_engine` NNUE `Mix9svq` with per-move time budgets `500 ms`–`5000 ms`, default `1000 ms`, plus a live NNUE win-rate estimate curve) and Casual mode (four classical fixed-depth presets), and toggle multi-threaded search from the side panel.
 
 ![Desktop GUI showing a Renju game against the engine with Pro NNUE 1s mode and multi-thread controls](docs/screenshots/desktop-gui.png)
 
 ### Android
 
-The mobile interface puts the board, turn status, and undo/new-game controls together. It bundles the `Mix9svq` NNUE weights and defaults to Pro timed mode (`500 ms` / `1000 ms` / `2500 ms` / `5000 ms`, default `1000 ms`, unified `tt_bits = 20` / 32 MiB TT), while also offering Casual fixed-depth mode (Beginner / Normal / Senior / Master) and a multi-threaded search toggle.
+The mobile interface puts the board, turn status, live NNUE win-rate estimate curve (in Pro mode), and undo/new-game controls together. It bundles the `Mix9svq` NNUE weights and defaults to Pro timed mode (`500 ms` / `1000 ms` / `2500 ms` / `5000 ms`, default `1000 ms`, native `fast_engine` with 32 MiB TT), while also offering Casual fixed-depth mode (Beginner / Normal / Senior / Master) and a multi-threaded search toggle.
 
 <p>
   <img src="docs/screenshots/android-portrait.png" alt="Android interface in portrait orientation during a Renju Pro 1s game" width="320">
@@ -36,8 +36,8 @@ Completed:
 - 15x15 freestyle and Renju state machine, zobrist, config, pattern, eval cache, movegen, ordering, TT, and alpha-beta root search.
 - Renju black forbidden-move handling for overline, double-four, and recursive true double-three, with exact-five priority; freestyle remains the default.
 - Rule-aware root VCF (including deep 16-ply Zobrist-TT attacker VCF under NNUE) and `df-pn` VCT solver (`src/threats/dfpn.rs`) with `Pattern4` incremental bitboard/LUT tactical acceleration (`5.5x`–`8.6x` faster on dense Renju VCT6).
-- Pure-Rust incremental `Mix9svq` NNUE evaluation (compatible with Rapfi CC0 `.bin.lz4` weights) with Value + Policy ordering, AVX2 / VEX AVX-VNNI SIMD on x86_64, 64B-aligned 4-way TT caching `static_eval`, Rapfi-calibrated `policyReduction` / `futilityMoveCount` / `PVS+LMR`, `O(1)` quickWinCheck & single-forcing fast path, leaf QVCF, and asynchronous Lazy SMP multi-threaded NNUE search.
-- Multi-threaded ABDADA classical search (`--threads N` / `INFO thread_num N`) with `1/64`-ply sub-ply TT depth encoding and mode-isolated dual TT bucket planes.
+- Native Rust NNUE core (`src/fast_engine/`): zero-allocation `FastBoard` (`3.67x` faster `play+undo`), 4-direction incremental `Pattern4` tables with exact Renju forbidden detection, 5-tier 12-byte 64B-aligned XOR `FastTT`, staged `MoveGen`/`MovePicker` + neighbor `QVCF`, dual-accumulator incremental `Mix9svq` NNUE (x86_64 AVX2 / VEX AVX-VNNI and ARM64 NEON + runtime `dotprod` SIMD, compatible with Rapfi CC0 `.bin.lz4` weights), and pure Lazy SMP iterative deepening up to `d99`. Reaches 50/50 parity against `pbrain-rapfi` under strictly equal conditions (same `Mix9svq` weights, 32 MiB TT, `1s/move`, `database=off`): **49.5%** Renju 1T (100g), **50.5%** Renju 4T (100g), **49.5%** Freestyle 1T (100g) — **129-130-41 (`49.83%`, `LL=0/150` pairs)** overall with 0 errors and 0 timeouts.
+- Multi-threaded ABDADA classical search (`--threads N` / `INFO thread_num N`) with `1/64`-ply sub-ply TT depth encoding and mode-isolated dual TT bucket planes, preserving the verified `pygomoku` classical `base` mainline (`13/13` baseline checks).
 - Gomocup stdin/stdout engine entry point, local Web GUI (`gomoku_gui`), and signed Android ARM64 APK / AAB with bundled `Mix9svq` weights and a shared Rust `GameController`.
 - Rust/reference diff harness (`13/13` classical baseline checks passing), head-to-head Gomocup match runner, Renju oracle/stress tooling, and same-position benchmark scaffolding.
 - External reference engines such as SlowRenju and Rapfi are used from local checkouts when needed; bundled lightweight opponents are not committed.
@@ -60,9 +60,9 @@ The main defaults live in `src/config.rs`.
 |---|---:|
 | Fixed search depth | `8` |
 | Fixed root width | `40` |
-| Time-control max depth | `48` |
-| Time-control max width | `40` |
-| `root_vcf_depth` | `8` (classical); automatically deepens to `16` with 64K Zobrist VCF TT in NNUE mode unless explicitly overridden |
+| Time-control max depth | `48` (classical timed); `99` (`fast_engine` Pro NNUE) |
+| Time-control max width | `40` (classical) |
+| `root_vcf_depth` | `8` (classical); `16` with 64K Zobrist VCF TT in legacy NNUE mode |
 | `opponent_vcf_depth` | `7` |
 | `vct_verify_opponent_vcf_depth` | `4` |
 | `vcf_multi_reply` | `true` |
@@ -70,17 +70,18 @@ The main defaults live in `src/config.rs`.
 | `vct_use_dfpn` | `true` (`df-pn` VCT up to `(root_vct_depth * 3).clamp(2, 22)` plies; set `0` for legacy IDDFS VCT) |
 | `vct_strict_and_memo_key` | `true` (legacy IDDFS VCT only) |
 | `use_nnue` | `false` in library/Gomocup unless `--nnue-dir` / `INFO nnue_dir` / `RUST_GOMOKU_NNUE_DIR` is supplied; enabled by default in GUI/Android Pro mode when weights are available |
-| TT bucket bits | `20` (32 MiB) unified for GUI & Android; library/Gomocup defaults to `20` (1–3 threads or depth `< 5`) / `21` (4+ threads at depth `>= 5`), or auto-sized via `INFO max_memory` |
+| `fast_nnue` | `true` whenever `use_nnue` is enabled (uses native `src/fast_engine/`; pass `--legacy-nnue` or `INFO fast_nnue 0` to fall back to the legacy NNUE search path) |
+| TT bucket bits | `20` (32 MiB) unified for GUI & Android (including `FastTT` 32 MiB); library/Gomocup defaults to `20` (1–3 threads or depth `< 5`) / `21` (4+ threads at depth `>= 5`), or auto-sized via `INFO max_memory` |
 | `threads` | `1` (lib/Gomocup); `4` on 4+ cores or `min(2, cores)` on `< 4` cores (GUI & Android; override with `--threads N` / `set_threads`) |
-| `compute_vcf` / `compute_vct` | VCF enabled; VCT enabled in classical & 1T NNUE, skipped by default on multi-threaded NNUE (`threads > 1` without overlap; override via `INFO compute_vct`) |
-| `overlap_vct_alphabeta` | off; GUI enables it only when `threads == 1` |
+| `compute_vcf` / `compute_vct` | VCF & VCT enabled in classical mode (`fast_engine` handles tactical forcing & QVCF natively inside search) |
+| `overlap_vct_alphabeta` | off; GUI enables it only when `threads == 1` in classical mode |
 | `nonroot_vcf` | off |
 | `static_board` | on |
 | `dynamic_board_margin` | `4` |
 
-The desktop GUI and Android app support two modes (both using unified `tt_bits = 20` / 32 MiB TT):
+The desktop GUI and Android app support two modes (both using 32 MiB TT):
 
-1. **Pro mode (default)** — NNUE (`Mix9svq`) timed search with four per-move time limit presets (`500 ms`, `1000 ms`, `2500 ms`, `5000 ms`; default `1000 ms`), running iterative deepening up to `d48 / w40` with VCF enabled (and 1T root VCT; multi-threaded NNUE skips serial root df-pn VCT by default). If NNUE weights are unavailable on desktop, Pro mode falls back cleanly to classical evaluation.
+1. **Pro mode (default)** — native `fast_engine` NNUE (`Mix9svq`) timed search with four per-move time limit presets (`500 ms`, `1000 ms`, `2500 ms`, `5000 ms`; default `1000 ms`), iterative deepening up to `d99`, persistent 32 MiB `FastTT` across turns, multi-threaded Lazy SMP, and a live NNUE win-rate estimate curve on both desktop and Android. If NNUE weights are unavailable on desktop, Pro mode falls back cleanly to classical evaluation.
 
 2. **Casual mode** — four shared classical fixed-depth difficulty presets:
 
@@ -179,6 +180,7 @@ Common `INFO` commands:
 - `INFO root_vct_depth N`
 - `INFO vct_use_dfpn 0|1`
 - `INFO use_nnue 0|1`
+- `INFO fast_nnue 0|1` (default `1` when `use_nnue` is enabled; CLI `--legacy-nnue` forces the legacy NNUE path)
 - `INFO nnue_dir PATH` (directory containing Rapfi CC0 `mix9svq*.bin.lz4` weights; CLI `--nnue-dir PATH` or env `RUST_GOMOKU_NNUE_DIR`)
 - `INFO vct_strict_and_memo_key 0|1`
 - `INFO nonroot_vcf 0|1`
@@ -286,8 +288,8 @@ tests/               Rust automated tests
 ## Current Focus
 
 1. Preserve verified rule correctness and classical regression coverage across Freestyle and Renju (forbidden-move oracle/stress suite and `13/13` Python reference baseline diffs).
-2. Build on the locked `Mix9svq` NNUE baseline (`35.5%` 1T / `34.0%` 4T vs same-weight Rapfi at 32 MiB TT, Renju `1s/move`) to further improve search efficiency, tactical defense movegen, aspiration windows, and multi-thread scaling.
-3. Add ARM64 NEON SIMD kernels for `Mix9svq` to boost mobile search depth on Android devices.
+2. Maintain 50/50 parity against same-weight `pbrain-rapfi` on the native `src/fast_engine/` NNUE core (`49.5%` Renju 1T, `50.5%` Renju 4T, `49.5%` Freestyle 1T at `1s/move`, 32 MiB TT) while keeping long-tail latency tight and zero errors/timeouts.
+3. Continue improving desktop GUI and Android ARM64 UX (live NNUE win-rate estimation, opening/analysis polish, and real-device responsiveness).
 4. Require every performance or strength change to report correctness, latency, nodes, and fair match results together in `docs/perf-log.md`.
 
 ## License

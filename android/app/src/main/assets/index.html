@@ -26,6 +26,14 @@
         <canvas id="board" aria-label="15路五子棋棋盘"></canvas>
       </div>
     </main>
+    <section id="position-estimate" class="position-estimate" aria-labelledby="position-title" hidden>
+      <div class="position-head">
+        <span id="position-title">NNUE 局势估计</span>
+        <span class="position-caption" id="position-current">引擎落子后更新</span>
+      </div>
+      <canvas id="position-chart" width="640" height="140" hidden aria-label="黑方预计得分曲线"></canvas>
+      <p class="position-caption" id="position-point"></p>
+    </section>
     <nav id="actionbar">
       <button id="btn-undo" class="warn">悔棋</button>
       <button id="btn-newgame" class="primary">新局</button>

@@ -229,6 +229,10 @@ test("the packaged page wires all tested UI helpers before app startup", () => {
   assert.match(page, /data-value="two_player"/);
   assert.match(page, /data-engine-only/);
   assert.match(page, /data-adv="eval"/);
+  assert.match(page, /id="position-estimate"/);
+  assert.match(page, /id="position-chart"/);
+  assert.match(appScript, /renderNnueEstimate\(state\)/);
+  assert.match(appScript, /NNUE \(Mix9svq · FastEngine\)/);
   assert.match(appScript, /op: "new_game", human_side, rule, mode, clock_mode/);
   assert.match(page, /id="meta-difficulty"/);
   assert.match(appScript, /getElementById\("meta-difficulty"\)/);

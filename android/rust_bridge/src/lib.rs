@@ -102,7 +102,7 @@ impl BridgeRegistry {
             config.runtime.nnue_dir = Some(dir);
             config.runtime.use_nnue = true;
         }
-        let controller = Arc::new(Mutex::new(GameController::new(config)));
+        let controller = Arc::new(Mutex::new(GameController::new(config).with_nnue_history()));
         self.controllers
             .lock()
             .map_err(|_| BridgeError::internal("Native handle registry is unavailable."))?
@@ -677,11 +677,32 @@ mod tests {
         let pro = response(
             &registry,
             handle,
-            r#"{"op":"new_game","human_side":"black","rule":"renju","clock_mode":"timed"}"#,
+            r#"{"op":"new_game","human_side":"white","rule":"renju","clock_mode":"timed"}"#,
         );
         assert_eq!(pro["ok"], true);
         assert_eq!(pro["state"]["params"]["nnue_available"], true);
         assert_eq!(pro["state"]["params"]["use_nnue"], true);
+
+        let _ = response(
+            &registry,
+            handle,
+            r#"{"op":"set_time_limit","time_limit_ms":500}"#,
+        );
+        let moved = response(&registry, handle, r#"{"op":"engine_move"}"#);
+        assert_eq!(moved["ok"], true);
+        assert_eq!(moved["state"]["last_result"]["used_nnue"], true);
+        let history = moved["state"]["nnue_history"]
+            .as_array()
+            .expect("nnue_history should be recorded on Android Pro mode");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["ply"], 1);
+        let sum = history[0]["black_win"].as_f64().unwrap()
+            + history[0]["draw"].as_f64().unwrap()
+            + history[0]["white_win"].as_f64().unwrap();
+        assert!(
+            (sum - 1.0).abs() < 1e-4,
+            "probabilities should sum to 1, got {sum}"
+        );
 
         let casual = response(
             &registry,

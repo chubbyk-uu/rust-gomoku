@@ -8,13 +8,13 @@ Windows x64 程序和已签名的 Android ARM64 APK / AAB 可从[最新 Release]
 
 ### Windows / 桌面 GUI
 
-Windows 程序启动后打开本地网页界面。可与引擎对弈或进行双人对局，在右侧选择无禁手或连珠规则、切换专业模式（NNUE `Mix9svq` 每步限时 `500 ms`–`5000 ms`，默认 `1000 ms`）或休闲模式（四档经典固定深度），并可开关多线程搜索。
+Windows 程序启动后打开本地网页界面。可与引擎对弈或进行双人对局，在右侧选择无禁手或连珠规则、切换专业模式（原生 `fast_engine` NNUE `Mix9svq` 每步限时 `500 ms`–`5000 ms`，默认 `1000 ms`，附实时 NNUE 胜率估计曲线）或休闲模式（四档经典固定深度），并可开关多线程搜索。
 
 ![桌面 GUI：连珠人机对局，右侧提供规则、休闲/专业 NNUE 限时与多线程设置](docs/screenshots/desktop-gui.png)
 
 ### Android
 
-手机界面集中展示棋盘、当前回合，以及悔棋和新局操作。内置打包 `Mix9svq` NNUE 权重，默认启用专业限时模式（`500 ms` / `1000 ms` / `2500 ms` / `5000 ms`，默认 `1000 ms`，统一 `tt_bits = 20` / 32 MiB TT），同时提供休闲四档难度（入门、普通、高级、大师）以及多线程搜索开关。
+手机界面集中展示棋盘、当前回合、专业模式实时 NNUE 胜率估计曲线，以及悔棋和新局操作。内置打包 `Mix9svq` NNUE 权重，默认启用专业限时模式（`500 ms` / `1000 ms` / `2500 ms` / `5000 ms`，默认 `1000 ms`，原生 `fast_engine` + 32 MiB TT），同时提供休闲四档难度（入门、普通、高级、大师）以及多线程搜索开关。
 
 <p>
   <img src="docs/screenshots/android-portrait.png" alt="Android 竖屏界面：连珠专业 1s 对局进行中" width="320">
@@ -34,8 +34,8 @@ Windows 程序启动后打开本地网页界面。可与引擎对弈或进行双
 - 15x15 无禁手与连珠规则状态机、zobrist、配置、pattern、eval cache、movegen、ordering、TT、alpha-beta root search。
 - 连珠黑方长连、四四、递归真三三禁手及五连优先语义；默认规则仍为无禁手。
 - 规则感知的 root VCF（NNUE 模式下自动启用 16 层深搜 + 64K Zobrist VCF TT）与 `df-pn` VCT 求解器（`src/threats/dfpn.rs`），配备四方向增量 `Pattern4` 位棋盘/LUT 战术加速（连珠密集 VCT6 提速 `5.5x`–`8.6x`）。
-- 纯 Rust 增量 `Mix9svq` NNUE 评估（兼容 Rapfi CC0 `.bin.lz4` 权重），支持 Value + Policy 候选排序、x86_64 AVX2 / VEX AVX-VNNI SIMD、64B 对齐 4-way TT（缓存 `static_eval`）、对齐 Rapfi 的 `policyReduction` / `futilityMoveCount` / `PVS+LMR`、`O(1)` 必胜快判与单防点直通、叶子 QVCF 及异步 Lazy SMP 多线程 NNUE 搜索。
-- 经典模式多线程 ABDADA 搜索（`--threads N` / `INFO thread_num N`），支持 `1/64` 层细粒度 TT 深度编码与按单/多线程模式隔离的双平面共享置换表。
+- 原生 Rust NNUE 核心（`src/fast_engine/`）：零分配 `FastBoard`（`play+undo` 提速 `3.67x`）、四方向增量 `Pattern4` 查表与精确连珠禁手判定、5-tier 12 字节 64B 对齐 XOR `FastTT`、分阶段 `MoveGen`/`MovePicker` + 邻域 `QVCF`、双累加器增量 `Mix9svq` NNUE（x86_64 AVX2 / VEX AVX-VNNI 与 ARM64 NEON + 运行时 `dotprod` SIMD，兼容 Rapfi CC0 `.bin.lz4` 权重），以及原生 Lazy SMP 多线程迭代加深（最高 `d99`）。同等条件下（同 `Mix9svq` 权重、32 MiB TT、`1s/move`、`database=off`）对 `pbrain-rapfi` 300 局公平对战达成五五开：连珠 1T **49.5%**（100 局）、连珠 4T **50.5%**（100 局）、无禁手 1T **49.5%**（100 局），总计 **129-130-41（`49.83%`，`LL=0/150` 对）**，0 错手、0 超时。
+- 经典模式多线程 ABDADA 搜索（`--threads N` / `INFO thread_num N`），支持 `1/64` 层细粒度 TT 深度编码与按单/多线程模式隔离的双平面共享置换表，完整守住 `pygomoku` 经典主线（`13/13` 基准检查全绿）。
 - Gomocup stdin/stdout 引擎入口、本地 Web GUI（`gomoku_gui`）以及内置打包 `Mix9svq` 权重的已签名 Android ARM64 APK / AAB（两端共享 Rust `GameController`）。
 - Rust/reference 差分脚手架（经典 `13/13` 基准检查全绿）、双引擎对战裁判、连珠 oracle/压测工具和同局面 benchmark。
 - SlowRenju、Rapfi 等外部参考引擎按需从本地 checkout 使用；仓库不提交轻量对手或完整 Python reference。
@@ -58,9 +58,9 @@ Android 架构、手机界面、JNI 边界、分阶段验证门槛与发版记�
 |---|---:|
 | 固定搜索深度 | `8` |
 | 固定 root width | `40` |
-| 时间控制最大深度 | `25` |
-| 时间控制最大 width | `40` |
-| `root_vcf_depth` | `8`（经典）；NNUE 模式下未显式覆盖时自动加深至 `16`（配 64K Zobrist VCF TT） |
+| 时间控制最大深度 | `48`（经典限时）；`99`（`fast_engine` 专业 NNUE） |
+| 时间控制最大 width | `40`（经典） |
+| `root_vcf_depth` | `8`（经典）；旧版 NNUE 模式下为 `16`（配 64K Zobrist VCF TT） |
 | `opponent_vcf_depth` | `7` |
 | `vct_verify_opponent_vcf_depth` | `4` |
 | `vcf_multi_reply` | `true` |
@@ -68,17 +68,18 @@ Android 架构、手机界面、JNI 边界、分阶段验证门槛与发版记�
 | `vct_use_dfpn` | `true`（默认 `df-pn` VCT，上限 `(root_vct_depth * 3).clamp(2, 22)` ply；设 `0` 可回退旧版 IDDFS VCT） |
 | `vct_strict_and_memo_key` | `true`（仅旧版 IDDFS VCT 生效） |
 | `use_nnue` | 库/Gomocup 默认关闭（传 `--nnue-dir` / `INFO nnue_dir` / `RUST_GOMOKU_NNUE_DIR` 时开启）；桌面 GUI 与 Android 专业模式在权重可用时默认开启 |
-| TT bucket bits | 桌面 GUI 与 Android 统一默认 `20`（32 MiB）；库/Gomocup 默认 1–3 线程或深度 `< 5` 为 `20`、4+ 线程且深度 `>= 5` 为 `21`，或由 `INFO max_memory` 自动计算 |
+| `fast_nnue` | `use_nnue` 开启时默认 `true`（使用原生 `src/fast_engine/`；传 `--legacy-nnue` 或 `INFO fast_nnue 0` 可回退旧版 NNUE 搜索路径） |
+| TT bucket bits | 桌面 GUI 与 Android 统一默认 `20`（32 MiB，含 `FastTT` 32 MiB）；库/Gomocup 默认 1–3 线程或深度 `< 5` 为 `20`、4+ 线程且深度 `>= 5` 为 `21`，或由 `INFO max_memory` 自动计算 |
 | `threads` | 库/Gomocup 默认 `1`；桌面 GUI 与 Android 在 `>= 4` 核默认 `4`，`< 4` 核默认 `min(2, cores)`（支持 `--threads N` / `set_threads` 回退单线程） |
-| `compute_vcf` / `compute_vct` | VCF 开启；VCT 在经典与单线程 NNUE 开启，多线程 NNUE（`threads > 1` 且未开 overlap）默认跳过串行 root df-pn VCT（可用 `INFO compute_vct` 显式覆盖） |
-| `overlap_vct_alphabeta` | 关闭；GUI 仅在 `threads == 1` 时开启 |
+| `compute_vcf` / `compute_vct` | 经典模式默认开启 VCF/VCT（`fast_engine` 在搜索内部原生处理必胜/防杀与 QVCF） |
+| `overlap_vct_alphabeta` | 关闭；GUI 仅在经典模式 `threads == 1` 时开启 |
 | `nonroot_vcf` | 关闭 |
 | `static_board` | 开启 |
 | `dynamic_board_margin` | `4` |
 
-桌面 GUI 和 Android 应用支持两种模式（两端统一使用 `tt_bits = 20` / 32 MiB 置换表）：
+桌面 GUI 和 Android 应用支持两种模式（两端统一使用 32 MiB 置换表）：
 
-1. **专业模式（默认）**——NNUE（`Mix9svq`）限时搜索，提供四档每步时间上限（`500 ms`、`1000 ms`、`2500 ms`、`5000 ms`，默认 `1000 ms`），在 `w40` 下迭代加深至最多 `d25` 并开启 VCF（单线程开启 root VCT，多线程 NNUE 默认跳过串行 root df-pn VCT）。桌面端若未找到 NNUE 权重则自动回退经典评估。
+1. **专业模式（默认）**——原生 `fast_engine` NNUE（`Mix9svq`）限时搜索，提供四档每步时间上限（`500 ms`、`1000 ms`、`2500 ms`、`5000 ms`，默认 `1000 ms`），支持最高 `d99` 迭代加深、跨手持久化 32 MiB `FastTT`、多线程 Lazy SMP，并在桌面端与 Android 端实时绘制 NNUE 胜率估计曲线。桌面端若未找到 NNUE 权重则自动回退经典评估。
 
 2. **休闲模式**——提供四档共享经典评估固定深度难度：
 
@@ -175,6 +176,7 @@ target/release/gomocup_engine --tt-bits 22
 - `INFO root_vct_depth N`
 - `INFO vct_use_dfpn 0|1`
 - `INFO use_nnue 0|1`
+- `INFO fast_nnue 0|1`（`use_nnue` 开启时默认 `1`；传 CLI `--legacy-nnue` 可回退旧版 NNUE 路径）
 - `INFO nnue_dir PATH`（指向 Rapfi CC0 `mix9svq*.bin.lz4` 权重目录；亦支持 CLI `--nnue-dir PATH` 或环境变量 `RUST_GOMOKU_NNUE_DIR`）
 - `INFO vct_strict_and_memo_key 0|1`
 - `INFO nonroot_vcf 0|1`
@@ -277,8 +279,8 @@ tests/               Rust 自动测试
 ## 当前重点
 
 1. 守住无禁手与连珠的规则正确性和经典回归门槛（禁手 oracle/压测与 `13/13` Python reference 基准差分）。
-2. 基于已锁定的 `Mix9svq` NNUE 基线（同权重 32 MiB TT、连珠 `1s/move` 对 Rapfi 1T `35.5%` / 4T `34.0%`），继续推进搜索效率、防守候选生成、Aspiration Window 与多线程扩展。
-3. 为 `Mix9svq` 补充 ARM64 NEON SIMD 内核，进一步提升 Android 端搜索深度与响应速度。
+2. 在原生 `src/fast_engine/` NNUE 核心已达成同权重对 `pbrain-rapfi` 五五开（连珠 1T `49.5%`、连珠 4T `50.5%`、无禁手 1T `49.5%`，`1s/move`、32 MiB TT）的基础上，持续打磨长尾耗时与稳定性。
+3. 持续完善桌面 GUI 与 Android ARM64 对局体验（实时 NNUE 胜率曲线、复盘/分析交互及真机响应）。
 4. 所有性能与棋力实验统一在 `docs/perf-log.md` 同时记录正确性、耗时、nodes 与公平对战结果。
 
 ## 许可证
