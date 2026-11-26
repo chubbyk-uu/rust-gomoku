@@ -1,7 +1,6 @@
 //! Normal search candidate generation.
 
 use std::collections::HashSet;
-use std::sync::LazyLock;
 
 use crate::board::{move_to_xy, xy_to_move, Board};
 use crate::config::EngineConfig;
@@ -47,25 +46,30 @@ const COVER_DIRS: [(isize, isize); 32] = [
 ];
 
 const COVER_NEIGHBOR_CAP: usize = 32;
-const COVER_SENTINEL: Move = u16::MAX;
+const COVER_SENTINEL: u8 = u8::MAX;
 
-static COVER_NEIGHBORS: LazyLock<[[Move; COVER_NEIGHBOR_CAP]; BOARD_AREA]> = LazyLock::new(|| {
+static COVER_NEIGHBORS: [[u8; COVER_NEIGHBOR_CAP]; BOARD_AREA] = {
     let mut table = [[COVER_SENTINEL; COVER_NEIGHBOR_CAP]; BOARD_AREA];
-    for move_index in 0..BOARD_AREA {
-        let x = move_index % BOARD_SIZE;
-        let y = move_index / BOARD_SIZE;
-        let mut count = 0;
-        for &(dx, dy) in COVER_DIRS.iter() {
-            let xx = x as isize + dx;
-            let yy = y as isize + dy;
+    let mut move_index = 0_usize;
+    while move_index < BOARD_AREA {
+        let x = (move_index % BOARD_SIZE) as isize;
+        let y = (move_index / BOARD_SIZE) as isize;
+        let mut count = 0_usize;
+        let mut dir_idx = 0_usize;
+        while dir_idx < COVER_DIRS.len() {
+            let (dx, dy) = COVER_DIRS[dir_idx];
+            let xx = x + dx;
+            let yy = y + dy;
             if xx >= 0 && yy >= 0 && xx < BOARD_SIZE as isize && yy < BOARD_SIZE as isize {
-                table[move_index][count] = (yy as usize * BOARD_SIZE + xx as usize) as Move;
+                table[move_index][count] = (yy as usize * BOARD_SIZE + xx as usize) as u8;
                 count += 1;
             }
+            dir_idx += 1;
         }
+        move_index += 1;
     }
     table
-});
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Candidate {

@@ -87,50 +87,59 @@ fn update_quiet_history(entry: &mut i32, bonus: i32) {
 
 /// Precomputed `RANGE_SQUARE2_LINE4` neighborhood bitboards for each board square
 /// (all cells within Chebyshev distance <= 2 plus distance 3..=4 along the 4 lines).
-static QVCF_NEIGHBOR_MASKS: LazyLock<[[u64; 4]; BOARD_AREA]> = LazyLock::new(|| {
+static QVCF_NEIGHBOR_MASKS: [[u64; 4]; BOARD_AREA] = {
+    const DIRS: [(isize, isize); 8] = [
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (-1, -1),
+        (1, -1),
+        (-1, 1),
+    ];
     let mut table = [[0_u64; 4]; BOARD_AREA];
-    for idx in 0..BOARD_AREA {
+    let mut idx = 0_usize;
+    while idx < BOARD_AREA {
         let cx = (idx % BOARD_SIZE) as isize;
         let cy = (idx / BOARD_SIZE) as isize;
         let mut mask = [0_u64; 4];
-        for dy in -2_isize..=2 {
-            for dx in -2_isize..=2 {
-                if dx == 0 && dy == 0 {
-                    continue;
+        let mut dy = -2_isize;
+        while dy <= 2 {
+            let mut dx = -2_isize;
+            while dx <= 2 {
+                if dx != 0 || dy != 0 {
+                    let nx = cx + dx;
+                    let ny = cy + dy;
+                    if nx >= 0 && nx < BOARD_SIZE as isize && ny >= 0 && ny < BOARD_SIZE as isize {
+                        let nidx = ny as usize * BOARD_SIZE + nx as usize;
+                        mask[nidx >> 6] |= 1_u64 << (nidx & 63);
+                    }
                 }
-                let nx = cx + dx;
-                let ny = cy + dy;
-                if (0..BOARD_SIZE as isize).contains(&nx) && (0..BOARD_SIZE as isize).contains(&ny)
-                {
-                    let nidx = ny as usize * BOARD_SIZE + nx as usize;
-                    mask[nidx >> 6] |= 1_u64 << (nidx & 63);
-                }
+                dx += 1;
             }
+            dy += 1;
         }
-        for &(dx, dy) in &[
-            (1_isize, 0_isize),
-            (-1, 0),
-            (0, 1),
-            (0, -1),
-            (1, 1),
-            (-1, -1),
-            (1, -1),
-            (-1, 1),
-        ] {
-            for dist in 3_isize..=4 {
+        let mut dir_i = 0_usize;
+        while dir_i < DIRS.len() {
+            let (dx, dy) = DIRS[dir_i];
+            let mut dist = 3_isize;
+            while dist <= 4 {
                 let nx = cx + dx * dist;
                 let ny = cy + dy * dist;
-                if (0..BOARD_SIZE as isize).contains(&nx) && (0..BOARD_SIZE as isize).contains(&ny)
-                {
+                if nx >= 0 && nx < BOARD_SIZE as isize && ny >= 0 && ny < BOARD_SIZE as isize {
                     let nidx = ny as usize * BOARD_SIZE + nx as usize;
                     mask[nidx >> 6] |= 1_u64 << (nidx & 63);
                 }
+                dist += 1;
             }
+            dir_i += 1;
         }
         table[idx] = mask;
+        idx += 1;
     }
     table
-});
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RootCandidateProfile {
