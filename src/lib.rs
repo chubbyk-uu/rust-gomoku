@@ -8,6 +8,7 @@ pub mod board;
 pub mod config;
 pub mod constants;
 pub mod eval;
+pub mod fast_engine;
 pub mod nnue;
 pub mod patterns;
 pub mod protocol;
