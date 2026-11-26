@@ -16,6 +16,9 @@
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
+
 /// Runtime check for AVX2 support on x86_64.
 #[inline(always)]
 pub fn has_avx2() -> bool {
@@ -38,6 +41,25 @@ pub fn has_avxvnni() -> bool {
             && std::arch::is_x86_feature_detected!("avxvnni")
     }
     #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Compile-time check for baseline ARMv8 NEON support on aarch64.
+#[inline(always)]
+pub fn has_neon() -> bool {
+    cfg!(target_arch = "aarch64")
+}
+
+/// Runtime check for ARMv8.2+ NEON `dotprod` (`sdot`) support on aarch64.
+#[inline(always)]
+pub fn has_neon_dotprod() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        std::arch::is_aarch64_feature_detected!("dotprod")
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     {
         false
     }
@@ -928,4 +950,632 @@ pub unsafe fn linear_i8_row4_avxvnni<const IN: usize>(
     let total = _mm_add_epi32(lo, hi);
     let b = _mm_loadu_si128(bias.as_ptr() as *const __m128i);
     _mm_storeu_si128(output.as_mut_ptr() as *mut __m128i, _mm_add_epi32(total, b));
+}
+
+// ============================================================================
+// ARM64 NEON & NEON-DOTPROD SIMD Kernels (aarch64)
+// ============================================================================
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn mulhi_i16_neon(a: int16x8_t, b: int16x8_t) -> int16x8_t {
+    let ab_lo = vmull_s16(vget_low_s16(a), vget_low_s16(b));
+    let ab_hi = vmull_high_s16(a, b);
+    vuzp2q_s16(vreinterpretq_s16_s32(ab_lo), vreinterpretq_s16_s32(ab_hi))
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn dot2_u7i8_pair_neon(a: int8x16_t, b: int8x16_t) -> int16x8_t {
+    let a_u8 = vreinterpretq_u8_s8(a);
+    let tl = vmulq_s16(
+        vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(a_u8))),
+        vmovl_s8(vget_low_s8(b)),
+    );
+    let th = vmulq_s16(
+        vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(a_u8))),
+        vmovl_s8(vget_high_s8(b)),
+    );
+    vqaddq_s16(vuzp1q_s16(tl, th), vuzp2q_s16(tl, th))
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn dot4_u7i8_accum_neon(acc: &mut int32x4_t, a: int8x16_t, b: int8x16_t) {
+    let p0 = vmull_s8(vget_low_s8(a), vget_low_s8(b));
+    let p1 = vmull_high_s8(a, b);
+    let sum = vpaddq_s16(p0, p1);
+    *acc = vpadalq_s16(*acc, sum);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn dot4_i8i8_accum_neon(acc: &mut int32x4_t, a: int8x16_t, b: int8x16_t) {
+    // Widen before adding: two (-128) * (-128) products sum to +32768, overflowing i16.
+    let p0 = vmull_s8(vget_low_s8(a), vget_low_s8(b));
+    let p1 = vmull_high_s8(a, b);
+    let sum01 = vpaddq_s32(vpaddlq_s16(p0), vpaddlq_s16(p1));
+    *acc = vaddq_s32(*acc, sum01);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn crelu_i32_to_i8_neon<const SIZE: usize, const SHIFT: i32, const NO_RELU: bool>(
+    output: &mut [i8; SIZE],
+    input: &[i32; SIZE],
+) {
+    debug_assert_eq!(SIZE % 16, 0);
+    let zero = vdupq_n_s8(0);
+    let batches = SIZE / 16;
+    let in_ptr = input.as_ptr();
+    let out_ptr = output.as_mut_ptr();
+    for i in 0..batches {
+        let base = i * 16;
+        let in0 = vld1q_s32(in_ptr.add(base));
+        let in1 = vld1q_s32(in_ptr.add(base + 4));
+        let in2 = vld1q_s32(in_ptr.add(base + 8));
+        let in3 = vld1q_s32(in_ptr.add(base + 12));
+        let mut in01 = vqmovn_high_s32(vqmovn_s32(in0), in1);
+        let mut in23 = vqmovn_high_s32(vqmovn_s32(in2), in3);
+        if SHIFT > 0 {
+            in01 = vshrq_n_s16::<SHIFT>(in01);
+            in23 = vshrq_n_s16::<SHIFT>(in23);
+        }
+        let mut res = vqmovn_high_s16(vqmovn_s16(in01), in23);
+        if !NO_RELU {
+            res = vmaxq_s8(res, zero);
+        }
+        vst1q_s8(out_ptr.add(base), res);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn crelu_i32_to_i16_neon<const SIZE: usize, const SHIFT: i32, const NO_RELU: bool>(
+    output: &mut [i16; SIZE],
+    input: &[i32; SIZE],
+) {
+    debug_assert_eq!(SIZE % 8, 0);
+    let zero = vdupq_n_s16(0);
+    let batches = SIZE / 8;
+    let in_ptr = input.as_ptr();
+    let out_ptr = output.as_mut_ptr();
+    for i in 0..batches {
+        let base = i * 8;
+        let mut in0 = vld1q_s32(in_ptr.add(base));
+        let mut in1 = vld1q_s32(in_ptr.add(base + 4));
+        if SHIFT > 0 {
+            let neg_shift = vdupq_n_s32(-SHIFT);
+            in0 = vshlq_s32(in0, neg_shift);
+            in1 = vshlq_s32(in1, neg_shift);
+        }
+        let mut res = vqmovn_high_s32(vqmovn_s32(in0), in1);
+        if !NO_RELU {
+            res = vmaxq_s16(res, zero);
+        }
+        vst1q_s16(out_ptr.add(base), res);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn dot2_u7i8_neon<const OUT: usize, const SHIFT: i32>(
+    output: &mut [i8; OUT],
+    input_u7: &[i8],
+    input_i8: &[i8],
+) {
+    debug_assert_eq!(OUT % 16, 0);
+    let batches = OUT / 16;
+    let u7_ptr = input_u7.as_ptr();
+    let i8_ptr = input_i8.as_ptr();
+    let out_ptr = output.as_mut_ptr();
+    for i in 0..batches {
+        let in10 = vld1q_s8(u7_ptr.add(i * 32));
+        let in11 = vld1q_s8(u7_ptr.add(i * 32 + 16));
+        let in20 = vld1q_s8(i8_ptr.add(i * 32));
+        let in21 = vld1q_s8(i8_ptr.add(i * 32 + 16));
+        let d0 = vshrq_n_s16::<SHIFT>(dot2_u7i8_pair_neon(in10, in20));
+        let d1 = vshrq_n_s16::<SHIFT>(dot2_u7i8_pair_neon(in11, in21));
+        let packed = vqmovn_high_s16(vqmovn_s16(d0), d1);
+        vst1q_s8(out_ptr.add(i * 16), packed);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn linear_i8_chunk4_neon<const OUT: usize, const IN: usize, const SIGNED_INPUT: bool>(
+    output: &mut [i32; OUT],
+    input: &[i8],
+    weight: &[i8],
+    bias: &[i32],
+) {
+    debug_assert_eq!(OUT % 4, 0);
+    debug_assert_eq!(IN % 4, 0);
+    let num_batches = OUT / 4;
+    let num_chunks = IN / 4;
+    let in32_ptr = input.as_ptr() as *const i32;
+    let w_ptr = weight.as_ptr();
+    let b_ptr = bias.as_ptr();
+    let o_ptr = output.as_mut_ptr();
+    let stride = OUT * 4;
+
+    let mut out_batch = 0;
+    // 16-register accumulator tile (64 outputs per tile) leverages AArch64's 32 NEON
+    // vector registers with zero stack spills.
+    while out_batch + 16 <= num_batches {
+        let boff = out_batch * 4;
+        let mut a0 = vld1q_s32(b_ptr.add(boff));
+        let mut a1 = vld1q_s32(b_ptr.add(boff + 4));
+        let mut a2 = vld1q_s32(b_ptr.add(boff + 8));
+        let mut a3 = vld1q_s32(b_ptr.add(boff + 12));
+        let mut a4 = vld1q_s32(b_ptr.add(boff + 16));
+        let mut a5 = vld1q_s32(b_ptr.add(boff + 20));
+        let mut a6 = vld1q_s32(b_ptr.add(boff + 24));
+        let mut a7 = vld1q_s32(b_ptr.add(boff + 28));
+        let mut a8 = vld1q_s32(b_ptr.add(boff + 32));
+        let mut a9 = vld1q_s32(b_ptr.add(boff + 36));
+        let mut a10 = vld1q_s32(b_ptr.add(boff + 40));
+        let mut a11 = vld1q_s32(b_ptr.add(boff + 44));
+        let mut a12 = vld1q_s32(b_ptr.add(boff + 48));
+        let mut a13 = vld1q_s32(b_ptr.add(boff + 52));
+        let mut a14 = vld1q_s32(b_ptr.add(boff + 56));
+        let mut a15 = vld1q_s32(b_ptr.add(boff + 60));
+
+        let w_base = w_ptr.add(out_batch * 16);
+        for c in 0..num_chunks {
+            let in0 = vreinterpretq_s8_s32(vdupq_n_s32(std::ptr::read_unaligned(in32_ptr.add(c))));
+            let wc = w_base.add(c * stride);
+            macro_rules! step {
+                ($acc:ident, $off:expr) => {{
+                    let wv = vld1q_s8(wc.add($off));
+                    if SIGNED_INPUT {
+                        dot4_i8i8_accum_neon(&mut $acc, in0, wv);
+                    } else {
+                        dot4_u7i8_accum_neon(&mut $acc, in0, wv);
+                    }
+                }};
+            }
+            step!(a0, 0);
+            step!(a1, 16);
+            step!(a2, 32);
+            step!(a3, 48);
+            step!(a4, 64);
+            step!(a5, 80);
+            step!(a6, 96);
+            step!(a7, 112);
+            step!(a8, 128);
+            step!(a9, 144);
+            step!(a10, 160);
+            step!(a11, 176);
+            step!(a12, 192);
+            step!(a13, 208);
+            step!(a14, 224);
+            step!(a15, 240);
+        }
+
+        vst1q_s32(o_ptr.add(boff), a0);
+        vst1q_s32(o_ptr.add(boff + 4), a1);
+        vst1q_s32(o_ptr.add(boff + 8), a2);
+        vst1q_s32(o_ptr.add(boff + 12), a3);
+        vst1q_s32(o_ptr.add(boff + 16), a4);
+        vst1q_s32(o_ptr.add(boff + 20), a5);
+        vst1q_s32(o_ptr.add(boff + 24), a6);
+        vst1q_s32(o_ptr.add(boff + 28), a7);
+        vst1q_s32(o_ptr.add(boff + 32), a8);
+        vst1q_s32(o_ptr.add(boff + 36), a9);
+        vst1q_s32(o_ptr.add(boff + 40), a10);
+        vst1q_s32(o_ptr.add(boff + 44), a11);
+        vst1q_s32(o_ptr.add(boff + 48), a12);
+        vst1q_s32(o_ptr.add(boff + 52), a13);
+        vst1q_s32(o_ptr.add(boff + 56), a14);
+        vst1q_s32(o_ptr.add(boff + 60), a15);
+        out_batch += 16;
+    }
+
+    let rem = num_batches - out_batch;
+    if rem > 0 {
+        let mut acc = [vdupq_n_s32(0); 16];
+        for t in 0..rem {
+            acc[t] = vld1q_s32(b_ptr.add((out_batch + t) * 4));
+        }
+        let w_base = w_ptr.add(out_batch * 16);
+        for c in 0..num_chunks {
+            let in0 = vreinterpretq_s8_s32(vdupq_n_s32(std::ptr::read_unaligned(in32_ptr.add(c))));
+            let wc = w_base.add(c * stride);
+            for t in 0..rem {
+                let wv = vld1q_s8(wc.add(t * 16));
+                if SIGNED_INPUT {
+                    dot4_i8i8_accum_neon(&mut acc[t], in0, wv);
+                } else {
+                    dot4_u7i8_accum_neon(&mut acc[t], in0, wv);
+                }
+            }
+        }
+        for t in 0..rem {
+            vst1q_s32(o_ptr.add((out_batch + t) * 4), acc[t]);
+        }
+    }
+}
+
+/// ARMv8.2+ `sdot` (`vdotq_s32`) helper using stable inline assembly because
+/// `std::arch::aarch64::vdotq_s32` is still gated behind `stdarch_neon_dotprod`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,dotprod")]
+#[inline]
+unsafe fn sdot_s32_neon(mut acc: int32x4_t, a: int8x16_t, b: int8x16_t) -> int32x4_t {
+    core::arch::asm!(
+        "sdot {acc:v}.4s, {a:v}.16b, {b:v}.16b",
+        acc = inout(vreg) acc,
+        a = in(vreg) a,
+        b = in(vreg) b,
+        options(pure, nomem, nostack),
+    );
+    acc
+}
+
+/// ARMv8.2+ `dotprod` (`sdot`) chunk-4 i8 affine layer.
+/// Handles both `u7 * i8` (`0..=127`) and signed `i8 * i8` (`-128..=127`) identically
+/// in a single `sdot` instruction with zero bias adjustment.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn linear_i8_chunk4_neon_dotprod<const OUT: usize, const IN: usize>(
+    output: &mut [i32; OUT],
+    input: &[i8],
+    weight: &[i8],
+    bias: &[i32],
+) {
+    debug_assert_eq!(OUT % 4, 0);
+    debug_assert_eq!(IN % 4, 0);
+    let num_batches = OUT / 4;
+    let num_chunks = IN / 4;
+    let in32_ptr = input.as_ptr() as *const i32;
+    let w_ptr = weight.as_ptr();
+    let b_ptr = bias.as_ptr();
+    let o_ptr = output.as_mut_ptr();
+    let stride = OUT * 4;
+
+    let mut out_batch = 0;
+    while out_batch + 16 <= num_batches {
+        let boff = out_batch * 4;
+        let mut a0 = vld1q_s32(b_ptr.add(boff));
+        let mut a1 = vld1q_s32(b_ptr.add(boff + 4));
+        let mut a2 = vld1q_s32(b_ptr.add(boff + 8));
+        let mut a3 = vld1q_s32(b_ptr.add(boff + 12));
+        let mut a4 = vld1q_s32(b_ptr.add(boff + 16));
+        let mut a5 = vld1q_s32(b_ptr.add(boff + 20));
+        let mut a6 = vld1q_s32(b_ptr.add(boff + 24));
+        let mut a7 = vld1q_s32(b_ptr.add(boff + 28));
+        let mut a8 = vld1q_s32(b_ptr.add(boff + 32));
+        let mut a9 = vld1q_s32(b_ptr.add(boff + 36));
+        let mut a10 = vld1q_s32(b_ptr.add(boff + 40));
+        let mut a11 = vld1q_s32(b_ptr.add(boff + 44));
+        let mut a12 = vld1q_s32(b_ptr.add(boff + 48));
+        let mut a13 = vld1q_s32(b_ptr.add(boff + 52));
+        let mut a14 = vld1q_s32(b_ptr.add(boff + 56));
+        let mut a15 = vld1q_s32(b_ptr.add(boff + 60));
+
+        let w_base = w_ptr.add(out_batch * 16);
+        for c in 0..num_chunks {
+            let in0 = vreinterpretq_s8_s32(vdupq_n_s32(std::ptr::read_unaligned(in32_ptr.add(c))));
+            let wc = w_base.add(c * stride);
+            a0 = sdot_s32_neon(a0, in0, vld1q_s8(wc));
+            a1 = sdot_s32_neon(a1, in0, vld1q_s8(wc.add(16)));
+            a2 = sdot_s32_neon(a2, in0, vld1q_s8(wc.add(32)));
+            a3 = sdot_s32_neon(a3, in0, vld1q_s8(wc.add(48)));
+            a4 = sdot_s32_neon(a4, in0, vld1q_s8(wc.add(64)));
+            a5 = sdot_s32_neon(a5, in0, vld1q_s8(wc.add(80)));
+            a6 = sdot_s32_neon(a6, in0, vld1q_s8(wc.add(96)));
+            a7 = sdot_s32_neon(a7, in0, vld1q_s8(wc.add(112)));
+            a8 = sdot_s32_neon(a8, in0, vld1q_s8(wc.add(128)));
+            a9 = sdot_s32_neon(a9, in0, vld1q_s8(wc.add(144)));
+            a10 = sdot_s32_neon(a10, in0, vld1q_s8(wc.add(160)));
+            a11 = sdot_s32_neon(a11, in0, vld1q_s8(wc.add(176)));
+            a12 = sdot_s32_neon(a12, in0, vld1q_s8(wc.add(192)));
+            a13 = sdot_s32_neon(a13, in0, vld1q_s8(wc.add(208)));
+            a14 = sdot_s32_neon(a14, in0, vld1q_s8(wc.add(224)));
+            a15 = sdot_s32_neon(a15, in0, vld1q_s8(wc.add(240)));
+        }
+
+        vst1q_s32(o_ptr.add(boff), a0);
+        vst1q_s32(o_ptr.add(boff + 4), a1);
+        vst1q_s32(o_ptr.add(boff + 8), a2);
+        vst1q_s32(o_ptr.add(boff + 12), a3);
+        vst1q_s32(o_ptr.add(boff + 16), a4);
+        vst1q_s32(o_ptr.add(boff + 20), a5);
+        vst1q_s32(o_ptr.add(boff + 24), a6);
+        vst1q_s32(o_ptr.add(boff + 28), a7);
+        vst1q_s32(o_ptr.add(boff + 32), a8);
+        vst1q_s32(o_ptr.add(boff + 36), a9);
+        vst1q_s32(o_ptr.add(boff + 40), a10);
+        vst1q_s32(o_ptr.add(boff + 44), a11);
+        vst1q_s32(o_ptr.add(boff + 48), a12);
+        vst1q_s32(o_ptr.add(boff + 52), a13);
+        vst1q_s32(o_ptr.add(boff + 56), a14);
+        vst1q_s32(o_ptr.add(boff + 60), a15);
+        out_batch += 16;
+    }
+
+    let rem = num_batches - out_batch;
+    if rem > 0 {
+        let mut acc = [vdupq_n_s32(0); 16];
+        for t in 0..rem {
+            acc[t] = vld1q_s32(b_ptr.add((out_batch + t) * 4));
+        }
+        let w_base = w_ptr.add(out_batch * 16);
+        for c in 0..num_chunks {
+            let in0 = vreinterpretq_s8_s32(vdupq_n_s32(std::ptr::read_unaligned(in32_ptr.add(c))));
+            let wc = w_base.add(c * stride);
+            for t in 0..rem {
+                acc[t] = sdot_s32_neon(acc[t], in0, vld1q_s8(wc.add(t * 16)));
+            }
+        }
+        for t in 0..rem {
+            vst1q_s32(o_ptr.add((out_batch + t) * 4), acc[t]);
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn linear_i8_row4_neon<const IN: usize>(
+    output: &mut [i32; 4],
+    input: &[i8; IN],
+    weight: &[i8],
+    bias: &[i32; 4],
+) {
+    debug_assert_eq!(IN % 16, 0);
+    let mut sum0 = vdupq_n_s32(0);
+    let mut sum1 = vdupq_n_s32(0);
+    let mut sum2 = vdupq_n_s32(0);
+    let mut sum3 = vdupq_n_s32(0);
+    let in_ptr = input.as_ptr();
+    let w_ptr = weight.as_ptr();
+    for j in 0..(IN / 16) {
+        let off = j * 16;
+        let inv = vld1q_s8(in_ptr.add(off));
+        dot4_u7i8_accum_neon(&mut sum0, inv, vld1q_s8(w_ptr.add(off)));
+        dot4_u7i8_accum_neon(&mut sum1, inv, vld1q_s8(w_ptr.add(IN + off)));
+        dot4_u7i8_accum_neon(&mut sum2, inv, vld1q_s8(w_ptr.add(2 * IN + off)));
+        dot4_u7i8_accum_neon(&mut sum3, inv, vld1q_s8(w_ptr.add(3 * IN + off)));
+    }
+    let s01 = vpaddq_s32(sum0, sum1);
+    let s23 = vpaddq_s32(sum2, sum3);
+    let total = vpaddq_s32(s01, s23);
+    let b = vld1q_s32(bias.as_ptr());
+    vst1q_s32(output.as_mut_ptr(), vaddq_s32(total, b));
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn linear_i8_row4_neon_dotprod<const IN: usize>(
+    output: &mut [i32; 4],
+    input: &[i8; IN],
+    weight: &[i8],
+    bias: &[i32; 4],
+) {
+    debug_assert_eq!(IN % 16, 0);
+    let mut sum0 = vdupq_n_s32(0);
+    let mut sum1 = vdupq_n_s32(0);
+    let mut sum2 = vdupq_n_s32(0);
+    let mut sum3 = vdupq_n_s32(0);
+    let in_ptr = input.as_ptr();
+    let w_ptr = weight.as_ptr();
+    for j in 0..(IN / 16) {
+        let off = j * 16;
+        let inv = vld1q_s8(in_ptr.add(off));
+        sum0 = sdot_s32_neon(sum0, inv, vld1q_s8(w_ptr.add(off)));
+        sum1 = sdot_s32_neon(sum1, inv, vld1q_s8(w_ptr.add(IN + off)));
+        sum2 = sdot_s32_neon(sum2, inv, vld1q_s8(w_ptr.add(2 * IN + off)));
+        sum3 = sdot_s32_neon(sum3, inv, vld1q_s8(w_ptr.add(3 * IN + off)));
+    }
+    let s01 = vpaddq_s32(sum0, sum1);
+    let s23 = vpaddq_s32(sum2, sum3);
+    let total = vpaddq_s32(s01, s23);
+    let b = vld1q_s32(bias.as_ptr());
+    vst1q_s32(output.as_mut_ptr(), vaddq_s32(total, b));
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn linear_i16_chunk2_prerelu_neon<const OUT: usize, const IN: usize>(
+    output: &mut [i32; OUT],
+    input: &[i16],
+    weight: &[i16],
+    bias: &[i32; OUT],
+) {
+    debug_assert_eq!(OUT, 16);
+    debug_assert_eq!(IN % 2, 0);
+    let zero = vdupq_n_s16(0);
+    let mut acc0 = vld1q_s32(bias.as_ptr());
+    let mut acc1 = vld1q_s32(bias.as_ptr().add(4));
+    let mut acc2 = vld1q_s32(bias.as_ptr().add(8));
+    let mut acc3 = vld1q_s32(bias.as_ptr().add(12));
+    let in32_ptr = input.as_ptr() as *const i32;
+    let w_ptr = weight.as_ptr();
+    for c in 0..(IN / 2) {
+        let in0 = vmaxq_s16(
+            vreinterpretq_s16_s32(vdupq_n_s32(std::ptr::read_unaligned(in32_ptr.add(c)))),
+            zero,
+        );
+        let in_lo = vget_low_s16(in0);
+        let wc = w_ptr.add(c * 32);
+        macro_rules! step {
+            ($acc:ident, $off:expr) => {{
+                let w = vld1q_s16(wc.add($off));
+                let lo = vmull_s16(in_lo, vget_low_s16(w));
+                let hi = vmull_high_s16(in0, w);
+                $acc = vaddq_s32($acc, vpaddq_s32(lo, hi));
+            }};
+        }
+        step!(acc0, 0);
+        step!(acc1, 8);
+        step!(acc2, 16);
+        step!(acc3, 24);
+    }
+    vst1q_s32(output.as_mut_ptr(), acc0);
+    vst1q_s32(output.as_mut_ptr().add(4), acc1);
+    vst1q_s32(output.as_mut_ptr().add(8), acc2);
+    vst1q_s32(output.as_mut_ptr().add(12), acc3);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn policy_dot16_neon(p_i32: &[i32; 16], w_f32: &[f32; 16], bias: f32) -> f32 {
+    let zero = vdupq_n_s32(0);
+    let v0 = vcvtq_f32_s32(vmaxq_s32(vld1q_s32(p_i32.as_ptr()), zero));
+    let v1 = vcvtq_f32_s32(vmaxq_s32(vld1q_s32(p_i32.as_ptr().add(4)), zero));
+    let v2 = vcvtq_f32_s32(vmaxq_s32(vld1q_s32(p_i32.as_ptr().add(8)), zero));
+    let v3 = vcvtq_f32_s32(vmaxq_s32(vld1q_s32(p_i32.as_ptr().add(12)), zero));
+    let mut acc0 = vmulq_f32(v0, vld1q_f32(w_f32.as_ptr()));
+    let mut acc1 = vmulq_f32(v1, vld1q_f32(w_f32.as_ptr().add(4)));
+    acc0 = vfmaq_f32(acc0, v2, vld1q_f32(w_f32.as_ptr().add(8)));
+    acc1 = vfmaq_f32(acc1, v3, vld1q_f32(w_f32.as_ptr().add(12)));
+    vaddvq_f32(vaddq_f32(acc0, acc1)) + bias
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn avg_pool_2x2_u8_neon(
+    q00: &mut [i8; 64],
+    q01: &mut [i8; 64],
+    q10: &mut [i8; 64],
+    q11: &mut [i8; 64],
+    g: &[[[i8; 64]; 3]; 3],
+) {
+    for b in 0..4 {
+        let off = b * 16;
+        let v00 = vld1q_u8(g[0][0].as_ptr().add(off) as *const u8);
+        let v01 = vld1q_u8(g[0][1].as_ptr().add(off) as *const u8);
+        let v02 = vld1q_u8(g[0][2].as_ptr().add(off) as *const u8);
+        let v10 = vld1q_u8(g[1][0].as_ptr().add(off) as *const u8);
+        let v11 = vld1q_u8(g[1][1].as_ptr().add(off) as *const u8);
+        let v12 = vld1q_u8(g[1][2].as_ptr().add(off) as *const u8);
+        let v20 = vld1q_u8(g[2][0].as_ptr().add(off) as *const u8);
+        let v21 = vld1q_u8(g[2][1].as_ptr().add(off) as *const u8);
+        let v22 = vld1q_u8(g[2][2].as_ptr().add(off) as *const u8);
+
+        let r00 = vrhaddq_u8(vrhaddq_u8(v00, v01), vrhaddq_u8(v10, v11));
+        let r01 = vrhaddq_u8(vrhaddq_u8(v01, v02), vrhaddq_u8(v11, v12));
+        let r10 = vrhaddq_u8(vrhaddq_u8(v10, v11), vrhaddq_u8(v20, v21));
+        let r11 = vrhaddq_u8(vrhaddq_u8(v11, v12), vrhaddq_u8(v21, v22));
+
+        vst1q_u8(q00.as_mut_ptr().add(off) as *mut u8, r00);
+        vst1q_u8(q01.as_mut_ptr().add(off) as *mut u8, r01);
+        vst1q_u8(q10.as_mut_ptr().add(off) as *mut u8, r10);
+        vst1q_u8(q11.as_mut_ptr().add(off) as *mut u8, r11);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn update_point_neon(
+    old_codebook: &[i16; 64],
+    new_codebook: &[i16; 64],
+    old_map_sum: &[i16; 64],
+    new_map_sum: &mut [i16; 64],
+    dwconv_weight: &[[i16; 32]; 9],
+    map_conv: &mut [[i16; 32]],
+    outer_indices: &[u16; 9],
+    vsum_group: &mut [i32; 64],
+) {
+    let zero = vdupq_n_s16(0);
+    let mut old_f = [zero; 8];
+    let mut new_f = [zero; 8];
+    for b in 0..8 {
+        let off = b * 8;
+        let old_cb = vld1q_s16(old_codebook.as_ptr().add(off));
+        let new_cb = vld1q_s16(new_codebook.as_ptr().add(off));
+        let old_s = vld1q_s16(old_map_sum.as_ptr().add(off));
+        let new_s = vaddq_s16(vsubq_s16(old_s, old_cb), new_cb);
+        vst1q_s16(new_map_sum.as_mut_ptr().add(off), new_s);
+        old_f[b] = vmaxq_s16(old_s, zero);
+        new_f[b] = vmaxq_s16(new_s, zero);
+    }
+
+    // Channels 0..32: depthwise 3x3 conv delta
+    let old_c0 = vshlq_n_s16::<2>(old_f[0]);
+    let old_c1 = vshlq_n_s16::<2>(old_f[1]);
+    let old_c2 = vshlq_n_s16::<2>(old_f[2]);
+    let old_c3 = vshlq_n_s16::<2>(old_f[3]);
+    let new_c0 = vshlq_n_s16::<2>(new_f[0]);
+    let new_c1 = vshlq_n_s16::<2>(new_f[1]);
+    let new_c2 = vshlq_n_s16::<2>(new_f[2]);
+    let new_c3 = vshlq_n_s16::<2>(new_f[3]);
+
+    for k in 0..9 {
+        let w_row = &dwconv_weight[8 - k];
+        let w0 = vld1q_s16(w_row.as_ptr());
+        let w1 = vld1q_s16(w_row.as_ptr().add(8));
+        let w2 = vld1q_s16(w_row.as_ptr().add(16));
+        let w3 = vld1q_s16(w_row.as_ptr().add(24));
+        let d0 = vsubq_s16(mulhi_i16_neon(w0, new_c0), mulhi_i16_neon(w0, old_c0));
+        let d1 = vsubq_s16(mulhi_i16_neon(w1, new_c1), mulhi_i16_neon(w1, old_c1));
+        let d2 = vsubq_s16(mulhi_i16_neon(w2, new_c2), mulhi_i16_neon(w2, old_c2));
+        let d3 = vsubq_s16(mulhi_i16_neon(w3, new_c3), mulhi_i16_neon(w3, old_c3));
+        let dst = map_conv
+            .get_unchecked_mut(outer_indices[k] as usize)
+            .as_mut_ptr();
+        vst1q_s16(dst, vaddq_s16(vld1q_s16(dst), d0));
+        vst1q_s16(dst.add(8), vaddq_s16(vld1q_s16(dst.add(8)), d1));
+        vst1q_s16(dst.add(16), vaddq_s16(vld1q_s16(dst.add(16)), d2));
+        vst1q_s16(dst.add(24), vaddq_s16(vld1q_s16(dst.add(24)), d3));
+    }
+
+    // Channels 32..64: direct delta into vsum_group[32..64]
+    for b in 4..8 {
+        let diff = vsubq_s16(new_f[b], old_f[b]);
+        let ptr = vsum_group.as_mut_ptr().add(b * 8);
+        let cur0 = vld1q_s32(ptr);
+        let cur1 = vld1q_s32(ptr.add(4));
+        vst1q_s32(ptr, vaddw_s16(cur0, vget_low_s16(diff)));
+        vst1q_s32(ptr.add(4), vaddw_high_s16(cur1, diff));
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn commit_conv_cell_neon(
+    old_conv: &[i16; 32],
+    new_conv: &mut [i16; 32],
+    vsum_group: &mut [i32; 64],
+) {
+    let zero = vdupq_n_s16(0);
+    for b in 0..4 {
+        let off = b * 8;
+        let old_v = vld1q_s16(old_conv.as_ptr().add(off));
+        let delta_v = vld1q_s16(new_conv.as_ptr().add(off));
+        let new_v = vaddq_s16(old_v, delta_v);
+        vst1q_s16(new_conv.as_mut_ptr().add(off), new_v);
+        let diff = vsubq_s16(vmaxq_s16(new_v, zero), vmaxq_s16(old_v, zero));
+        let ptr = vsum_group.as_mut_ptr().add(off);
+        let cur0 = vld1q_s32(ptr);
+        let cur1 = vld1q_s32(ptr.add(4));
+        vst1q_s32(ptr, vaddw_s16(cur0, vget_low_s16(diff)));
+        vst1q_s32(ptr.add(4), vaddw_high_s16(cur1, diff));
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn commit_vsum_neon(
+    prev_groups: &[[[i32; 64]; 3]; 3],
+    deltas: &[[[i32; 64]; 3]; 3],
+    next_groups: &mut [[[i32; 64]; 3]; 3],
+    next_global: &mut [i32; 64],
+) {
+    for b in 0..16 {
+        let off = b * 4;
+        let mut g_acc = vdupq_n_s32(0);
+        for i in 0..3 {
+            for j in 0..3 {
+                let old_v = vld1q_s32(prev_groups[i][j].as_ptr().add(off));
+                let del_v = vld1q_s32(deltas[i][j].as_ptr().add(off));
+                let new_v = vaddq_s32(old_v, del_v);
+                vst1q_s32(next_groups[i][j].as_mut_ptr().add(off), new_v);
+                g_acc = vaddq_s32(g_acc, new_v);
+            }
+        }
+        vst1q_s32(next_global.as_mut_ptr().add(off), g_acc);
+    }
 }

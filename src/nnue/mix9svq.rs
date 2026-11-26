@@ -10,9 +10,9 @@ use crate::constants::{BLACK, BOARD_AREA, BOARD_SIZE, EMPTY};
 use crate::nnue::lz4::decompress_lz4_frame;
 use crate::nnue::simd::{
     avg_u8, compute_signed_input_bias, crelu_i32_to_i16_scalar, crelu_i32_to_i8_scalar,
-    dot2_u7i8_scalar, has_avx2, has_avxvnni, linear_i16_chunk2_prerelu_scalar,
-    linear_i8_chunk4_scalar, linear_i8_row4_scalar, mulhi_i16, preprocess_dynamic_weight_linear,
-    preprocess_linear,
+    dot2_u7i8_scalar, has_avx2, has_avxvnni, has_neon, has_neon_dotprod,
+    linear_i16_chunk2_prerelu_scalar, linear_i8_chunk4_scalar, linear_i8_row4_scalar, mulhi_i16,
+    preprocess_dynamic_weight_linear, preprocess_linear,
 };
 use crate::rules::RuleSet;
 use crate::types::Side;
@@ -23,6 +23,14 @@ use crate::nnue::simd::{
     crelu_i32_to_i8_avx2, dot2_u7i8_avx2, linear_i16_chunk2_prerelu_avx2, linear_i8_chunk4_avx2,
     linear_i8_chunk4_avxvnni, linear_i8_row4_avx2, linear_i8_row4_avxvnni, policy_dot16_avx2,
     update_point_avx2,
+};
+
+#[cfg(target_arch = "aarch64")]
+use crate::nnue::simd::{
+    avg_pool_2x2_u8_neon, commit_conv_cell_neon, commit_vsum_neon, crelu_i32_to_i16_neon,
+    crelu_i32_to_i8_neon, dot2_u7i8_neon, linear_i16_chunk2_prerelu_neon, linear_i8_chunk4_neon,
+    linear_i8_chunk4_neon_dotprod, linear_i8_row4_neon, linear_i8_row4_neon_dotprod,
+    policy_dot16_neon, update_point_neon,
 };
 
 pub const SHAPE_NUM: usize = 442_503;
@@ -515,6 +523,10 @@ pub struct Mix9svqAccumulator {
     use_avx2: bool,
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     use_avxvnni: bool,
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+    use_neon: bool,
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+    use_neon_dotprod: bool,
 }
 
 fn border_encoding(left: usize, right: usize) -> u32 {
@@ -603,6 +615,8 @@ impl Mix9svqAccumulator {
             group_index,
             use_avx2: has_avx2(),
             use_avxvnni: has_avxvnni(),
+            use_neon: has_neon(),
+            use_neon_dotprod: has_neon_dotprod(),
         }
     }
 
@@ -822,6 +836,24 @@ impl Mix9svqAccumulator {
                 }
                 continue;
             }
+            #[cfg(target_arch = "aarch64")]
+            if self.use_neon {
+                unsafe {
+                    let old_ptr = self.map_sum.as_ptr().add(c.old_map_idx);
+                    let new_ptr = self.map_sum.as_mut_ptr().add(c.new_map_idx);
+                    update_point_neon(
+                        &w.codebook[c.mapping_idx][c.old_cb_idx],
+                        &w.codebook[c.mapping_idx][c.new_cb_idx],
+                        &*old_ptr,
+                        &mut *new_ptr,
+                        &w.feature_dwconv_weight,
+                        &mut self.map_conv,
+                        &outer_indices,
+                        &mut vsum_group[gi][gj],
+                    );
+                }
+                continue;
+            }
 
             let old_cb = &w.codebook[c.mapping_idx][c.old_cb_idx];
             let new_cb = &w.codebook[c.mapping_idx][c.new_cb_idx];
@@ -879,6 +911,16 @@ impl Mix9svqAccumulator {
                     commit_idx += 1;
                     continue;
                 }
+                #[cfg(target_arch = "aarch64")]
+                if self.use_neon {
+                    unsafe {
+                        let old_ptr = self.map_conv.as_ptr().add(old_conv_idx);
+                        let new_ptr = self.map_conv.as_mut_ptr().add(commit_idx);
+                        commit_conv_cell_neon(&*old_ptr, &mut *new_ptr, &mut vsum_group[gi][gj]);
+                    }
+                    commit_idx += 1;
+                    continue;
+                }
 
                 let old_v = self.map_conv[old_conv_idx];
                 let delta_v = self.map_conv[commit_idx];
@@ -915,6 +957,21 @@ impl Mix9svqAccumulator {
             }
             return;
         }
+        #[cfg(target_arch = "aarch64")]
+        if self.use_neon {
+            // SAFETY: `ver < next_ver`, so the two entries in `value_sum_table` never alias.
+            unsafe {
+                let prev_ptr = self.value_sum_table.as_ptr().add(ver);
+                let next_ptr = self.value_sum_table.as_mut_ptr().add(next_ver);
+                commit_vsum_neon(
+                    &(*prev_ptr).group,
+                    &vsum_group,
+                    &mut (*next_ptr).group,
+                    &mut (*next_ptr).global,
+                );
+            }
+            return;
+        }
 
         let prev_sum = self.value_sum_table[ver];
         let next_sum = &mut self.value_sum_table[next_ver];
@@ -941,6 +998,16 @@ impl Mix9svqAccumulator {
         if self.use_avx2 {
             // SAFETY: checked via runtime `is_x86_feature_detected!("avx2")`.
             return unsafe { self.evaluate_value_logits_avx2(w) };
+        }
+        #[cfg(target_arch = "aarch64")]
+        if self.use_neon_dotprod {
+            // SAFETY: checked via runtime `is_aarch64_feature_detected!("dotprod")`.
+            return unsafe { self.evaluate_value_logits_neon_dotprod(w) };
+        }
+        #[cfg(target_arch = "aarch64")]
+        if self.use_neon {
+            // SAFETY: NEON is mandatory on aarch64.
+            return unsafe { self.evaluate_value_logits_neon(w) };
         }
         self.evaluate_value_logits_scalar(w)
     }
@@ -1229,6 +1296,187 @@ impl Mix9svqAccumulator {
         )
     }
 
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn evaluate_value_logits_neon(&self, w: &Mix9svqWeight) -> ([i32; 4], (f32, f32, f32)) {
+        let value_sum = &self.value_sum_table[self.current_version as usize];
+        let b = &w.bucket;
+
+        let mut layer0 = [0_i8; FEATURE_DIM + VALUE_DIM * 4];
+        let mut global_i8 = [0_i8; FEATURE_DIM];
+        crelu_i32_to_i8_neon::<FEATURE_DIM, 8, true>(&mut global_i8, &value_sum.global);
+        layer0[..FEATURE_DIM].copy_from_slice(&global_i8);
+
+        let mut group0 = [[[0_i8; FEATURE_DIM]; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                crelu_i32_to_i8_neon::<FEATURE_DIM, 5, true>(
+                    &mut group0[i][j],
+                    &value_sum.group[i][j],
+                );
+            }
+        }
+
+        let mut group1 = [[[0_i8; VALUE_DIM]; 3]; 3];
+        star_block_neon(&mut group1[0][0], &group0[0][0], &b.value_corner);
+        star_block_neon(&mut group1[0][2], &group0[0][2], &b.value_corner);
+        star_block_neon(&mut group1[2][0], &group0[2][0], &b.value_corner);
+        star_block_neon(&mut group1[2][2], &group0[2][2], &b.value_corner);
+
+        star_block_neon(&mut group1[0][1], &group0[0][1], &b.value_edge);
+        star_block_neon(&mut group1[1][0], &group0[1][0], &b.value_edge);
+        star_block_neon(&mut group1[1][2], &group0[1][2], &b.value_edge);
+        star_block_neon(&mut group1[2][1], &group0[2][1], &b.value_edge);
+
+        star_block_neon(&mut group1[1][1], &group0[1][1], &b.value_center);
+
+        let mut q00 = [0_i8; VALUE_DIM];
+        let mut q01 = [0_i8; VALUE_DIM];
+        let mut q10 = [0_i8; VALUE_DIM];
+        let mut q11 = [0_i8; VALUE_DIM];
+        avg_pool_2x2_u8_neon(&mut q00, &mut q01, &mut q10, &mut q11, &group1);
+
+        let mut quad_out = [[0_i8; VALUE_DIM]; 4];
+        star_block_neon(&mut quad_out[0], &q00, &b.value_quad);
+        star_block_neon(&mut quad_out[1], &q01, &b.value_quad);
+        star_block_neon(&mut quad_out[2], &q10, &b.value_quad);
+        star_block_neon(&mut quad_out[3], &q11, &b.value_quad);
+        for q in 0..4 {
+            let off = FEATURE_DIM + q * VALUE_DIM;
+            layer0[off..off + VALUE_DIM].copy_from_slice(&quad_out[q]);
+        }
+
+        let mut l1_i32 = [0_i32; VALUE_DIM];
+        let mut l1 = [0_i8; VALUE_DIM];
+        linear_i8_chunk4_neon::<VALUE_DIM, { FEATURE_DIM + VALUE_DIM * 4 }, false>(
+            &mut l1_i32,
+            &layer0,
+            &b.value_l1.weight,
+            &b.value_l1.bias,
+        );
+        crelu_i32_to_i8_neon::<VALUE_DIM, 7, false>(&mut l1, &l1_i32);
+
+        let mut l2_i32 = [0_i32; VALUE_DIM];
+        let mut l2 = [0_i8; VALUE_DIM];
+        linear_i8_chunk4_neon::<VALUE_DIM, VALUE_DIM, false>(
+            &mut l2_i32,
+            &l1,
+            &b.value_l2.weight,
+            &b.value_l2.bias,
+        );
+        crelu_i32_to_i8_neon::<VALUE_DIM, 7, false>(&mut l2, &l2_i32);
+
+        let mut l3_i32 = [0_i32; 4];
+        let l3_bias: [i32; 4] = [
+            b.value_l3.bias[0],
+            b.value_l3.bias[1],
+            b.value_l3.bias[2],
+            b.value_l3.bias[3],
+        ];
+        linear_i8_row4_neon::<VALUE_DIM>(&mut l3_i32, &l2, &b.value_l3.weight, &l3_bias);
+        let scale = 1.0_f32 / (128.0 * 128.0);
+        (
+            l3_i32,
+            (
+                l3_i32[0] as f32 * scale,
+                l3_i32[1] as f32 * scale,
+                l3_i32[2] as f32 * scale,
+            ),
+        )
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon,dotprod")]
+    unsafe fn evaluate_value_logits_neon_dotprod(
+        &self,
+        w: &Mix9svqWeight,
+    ) -> ([i32; 4], (f32, f32, f32)) {
+        let value_sum = &self.value_sum_table[self.current_version as usize];
+        let b = &w.bucket;
+
+        let mut layer0 = [0_i8; FEATURE_DIM + VALUE_DIM * 4];
+        let mut global_i8 = [0_i8; FEATURE_DIM];
+        crelu_i32_to_i8_neon::<FEATURE_DIM, 8, true>(&mut global_i8, &value_sum.global);
+        layer0[..FEATURE_DIM].copy_from_slice(&global_i8);
+
+        let mut group0 = [[[0_i8; FEATURE_DIM]; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                crelu_i32_to_i8_neon::<FEATURE_DIM, 5, true>(
+                    &mut group0[i][j],
+                    &value_sum.group[i][j],
+                );
+            }
+        }
+
+        let mut group1 = [[[0_i8; VALUE_DIM]; 3]; 3];
+        star_block_neon_dotprod(&mut group1[0][0], &group0[0][0], &b.value_corner);
+        star_block_neon_dotprod(&mut group1[0][2], &group0[0][2], &b.value_corner);
+        star_block_neon_dotprod(&mut group1[2][0], &group0[2][0], &b.value_corner);
+        star_block_neon_dotprod(&mut group1[2][2], &group0[2][2], &b.value_corner);
+
+        star_block_neon_dotprod(&mut group1[0][1], &group0[0][1], &b.value_edge);
+        star_block_neon_dotprod(&mut group1[1][0], &group0[1][0], &b.value_edge);
+        star_block_neon_dotprod(&mut group1[1][2], &group0[1][2], &b.value_edge);
+        star_block_neon_dotprod(&mut group1[2][1], &group0[2][1], &b.value_edge);
+
+        star_block_neon_dotprod(&mut group1[1][1], &group0[1][1], &b.value_center);
+
+        let mut q00 = [0_i8; VALUE_DIM];
+        let mut q01 = [0_i8; VALUE_DIM];
+        let mut q10 = [0_i8; VALUE_DIM];
+        let mut q11 = [0_i8; VALUE_DIM];
+        avg_pool_2x2_u8_neon(&mut q00, &mut q01, &mut q10, &mut q11, &group1);
+
+        let mut quad_out = [[0_i8; VALUE_DIM]; 4];
+        star_block_neon_dotprod(&mut quad_out[0], &q00, &b.value_quad);
+        star_block_neon_dotprod(&mut quad_out[1], &q01, &b.value_quad);
+        star_block_neon_dotprod(&mut quad_out[2], &q10, &b.value_quad);
+        star_block_neon_dotprod(&mut quad_out[3], &q11, &b.value_quad);
+        for q in 0..4 {
+            let off = FEATURE_DIM + q * VALUE_DIM;
+            layer0[off..off + VALUE_DIM].copy_from_slice(&quad_out[q]);
+        }
+
+        let mut l1_i32 = [0_i32; VALUE_DIM];
+        let mut l1 = [0_i8; VALUE_DIM];
+        linear_i8_chunk4_neon_dotprod::<VALUE_DIM, { FEATURE_DIM + VALUE_DIM * 4 }>(
+            &mut l1_i32,
+            &layer0,
+            &b.value_l1.weight,
+            &b.value_l1.bias,
+        );
+        crelu_i32_to_i8_neon::<VALUE_DIM, 7, false>(&mut l1, &l1_i32);
+
+        let mut l2_i32 = [0_i32; VALUE_DIM];
+        let mut l2 = [0_i8; VALUE_DIM];
+        linear_i8_chunk4_neon_dotprod::<VALUE_DIM, VALUE_DIM>(
+            &mut l2_i32,
+            &l1,
+            &b.value_l2.weight,
+            &b.value_l2.bias,
+        );
+        crelu_i32_to_i8_neon::<VALUE_DIM, 7, false>(&mut l2, &l2_i32);
+
+        let mut l3_i32 = [0_i32; 4];
+        let l3_bias: [i32; 4] = [
+            b.value_l3.bias[0],
+            b.value_l3.bias[1],
+            b.value_l3.bias[2],
+            b.value_l3.bias[3],
+        ];
+        linear_i8_row4_neon_dotprod::<VALUE_DIM>(&mut l3_i32, &l2, &b.value_l3.weight, &l3_bias);
+        let scale = 1.0_f32 / (128.0 * 128.0);
+        (
+            l3_i32,
+            (
+                l3_i32[0] as f32 * scale,
+                l3_i32[1] as f32 * scale,
+                l3_i32[2] as f32 * scale,
+            ),
+        )
+    }
+
     /// Fast policy evaluation for an explicit slice of `Move`s (e.g. `<= 40`
     /// candidates), avoiding scanning all 225 cells.
     pub fn evaluate_policy_moves(
@@ -1249,6 +1497,20 @@ impl Mix9svqAccumulator {
         if self.use_avx2 {
             unsafe {
                 self.evaluate_policy_moves_avx2(w, moves, out_scores);
+            }
+            return;
+        }
+        #[cfg(target_arch = "aarch64")]
+        if self.use_neon_dotprod {
+            unsafe {
+                self.evaluate_policy_moves_neon_dotprod(w, moves, out_scores);
+            }
+            return;
+        }
+        #[cfg(target_arch = "aarch64")]
+        if self.use_neon {
+            unsafe {
+                self.evaluate_policy_moves_neon(w, moves, out_scores);
             }
             return;
         }
@@ -1434,6 +1696,124 @@ impl Mix9svqAccumulator {
         }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn evaluate_policy_moves_neon(
+        &self,
+        w: &Mix9svqWeight,
+        moves: &[crate::types::Move],
+        out_scores: &mut [f32],
+    ) {
+        let value_sum = &self.value_sum_table[self.current_version as usize];
+        let b = &w.bucket;
+
+        let mut layer0 = [0_i8; FEATURE_DIM];
+        crelu_i32_to_i8_neon::<FEATURE_DIM, 8, true>(&mut layer0, &value_sum.global);
+
+        let mut l1_i32 = [0_i32; POLICY_DIM * 2];
+        let mut l1 = [0_i8; POLICY_DIM * 2];
+        linear_i8_chunk4_neon::<{ POLICY_DIM * 2 }, FEATURE_DIM, false>(
+            &mut l1_i32,
+            &layer0,
+            &b.policy_pwconv_l1.weight,
+            &b.policy_pwconv_l1.bias,
+        );
+        crelu_i32_to_i8_neon::<{ POLICY_DIM * 2 }, 7, false>(&mut l1, &l1_i32);
+
+        const L2_OUT: usize = POLICY_PWCONV_DIM * POLICY_DIM + POLICY_PWCONV_DIM;
+        let mut l2_i32 = [0_i32; L2_OUT];
+        linear_i8_chunk4_neon::<L2_OUT, { POLICY_DIM * 2 }, false>(
+            &mut l2_i32,
+            &l1,
+            &b.policy_pwconv_l2.weight,
+            &b.policy_pwconv_l2.bias,
+        );
+        let mut pw_w = [0_i16; POLICY_PWCONV_DIM * POLICY_DIM];
+        let l2_head: &[i32; POLICY_PWCONV_DIM * POLICY_DIM] =
+            l2_i32[..POLICY_PWCONV_DIM * POLICY_DIM].try_into().unwrap();
+        crelu_i32_to_i16_neon::<{ POLICY_PWCONV_DIM * POLICY_DIM }, 0, true>(&mut pw_w, l2_head);
+        let mut pw_b = [0_i32; POLICY_PWCONV_DIM];
+        for i in 0..POLICY_PWCONV_DIM {
+            pw_b[i] = l2_i32[POLICY_PWCONV_DIM * POLICY_DIM + i] << 7;
+        }
+
+        let outer_ver_base = (self.current_version as usize) * OUTER_BOARD_AREA;
+        let mut p_i32 = [0_i32; POLICY_PWCONV_DIM];
+        for (dst, &m) in out_scores.iter_mut().zip(moves.iter()) {
+            let idx = m as usize;
+            let y = idx / BOARD_SIZE;
+            let x = idx % BOARD_SIZE;
+            let outer_idx = (y + 1) * OUTER_BOARD_SIZE + (x + 1);
+            let mc_idx = self.version_outer_index[outer_ver_base + outer_idx] as usize;
+            linear_i16_chunk2_prerelu_neon::<POLICY_PWCONV_DIM, POLICY_DIM>(
+                &mut p_i32,
+                &self.map_conv[mc_idx],
+                &pw_w,
+                &pw_b,
+            );
+            *dst = policy_dot16_neon(&p_i32, &b.policy_output_weight, b.policy_output_bias);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon,dotprod")]
+    unsafe fn evaluate_policy_moves_neon_dotprod(
+        &self,
+        w: &Mix9svqWeight,
+        moves: &[crate::types::Move],
+        out_scores: &mut [f32],
+    ) {
+        let value_sum = &self.value_sum_table[self.current_version as usize];
+        let b = &w.bucket;
+
+        let mut layer0 = [0_i8; FEATURE_DIM];
+        crelu_i32_to_i8_neon::<FEATURE_DIM, 8, true>(&mut layer0, &value_sum.global);
+
+        let mut l1_i32 = [0_i32; POLICY_DIM * 2];
+        let mut l1 = [0_i8; POLICY_DIM * 2];
+        linear_i8_chunk4_neon_dotprod::<{ POLICY_DIM * 2 }, FEATURE_DIM>(
+            &mut l1_i32,
+            &layer0,
+            &b.policy_pwconv_l1.weight,
+            &b.policy_pwconv_l1.bias,
+        );
+        crelu_i32_to_i8_neon::<{ POLICY_DIM * 2 }, 7, false>(&mut l1, &l1_i32);
+
+        const L2_OUT: usize = POLICY_PWCONV_DIM * POLICY_DIM + POLICY_PWCONV_DIM;
+        let mut l2_i32 = [0_i32; L2_OUT];
+        linear_i8_chunk4_neon_dotprod::<L2_OUT, { POLICY_DIM * 2 }>(
+            &mut l2_i32,
+            &l1,
+            &b.policy_pwconv_l2.weight,
+            &b.policy_pwconv_l2.bias,
+        );
+        let mut pw_w = [0_i16; POLICY_PWCONV_DIM * POLICY_DIM];
+        let l2_head: &[i32; POLICY_PWCONV_DIM * POLICY_DIM] =
+            l2_i32[..POLICY_PWCONV_DIM * POLICY_DIM].try_into().unwrap();
+        crelu_i32_to_i16_neon::<{ POLICY_PWCONV_DIM * POLICY_DIM }, 0, true>(&mut pw_w, l2_head);
+        let mut pw_b = [0_i32; POLICY_PWCONV_DIM];
+        for i in 0..POLICY_PWCONV_DIM {
+            pw_b[i] = l2_i32[POLICY_PWCONV_DIM * POLICY_DIM + i] << 7;
+        }
+
+        let outer_ver_base = (self.current_version as usize) * OUTER_BOARD_AREA;
+        let mut p_i32 = [0_i32; POLICY_PWCONV_DIM];
+        for (dst, &m) in out_scores.iter_mut().zip(moves.iter()) {
+            let idx = m as usize;
+            let y = idx / BOARD_SIZE;
+            let x = idx % BOARD_SIZE;
+            let outer_idx = (y + 1) * OUTER_BOARD_SIZE + (x + 1);
+            let mc_idx = self.version_outer_index[outer_ver_base + outer_idx] as usize;
+            linear_i16_chunk2_prerelu_neon::<POLICY_PWCONV_DIM, POLICY_DIM>(
+                &mut p_i32,
+                &self.map_conv[mc_idx],
+                &pw_w,
+                &pw_b,
+            );
+            *dst = policy_dot16_neon(&p_i32, &b.policy_output_weight, b.policy_output_bias);
+        }
+    }
+
     /// Compute policy logits for every cell where `compute_mask[y * 15 + x]` is `true`.
     pub fn evaluate_policy(
         &self,
@@ -1445,6 +1825,20 @@ impl Mix9svqAccumulator {
         if self.use_avx2 {
             unsafe {
                 self.evaluate_policy_avx2(w, compute_mask, out_policy);
+            }
+            return;
+        }
+        #[cfg(target_arch = "aarch64")]
+        if self.use_neon_dotprod {
+            unsafe {
+                self.evaluate_policy_neon_dotprod(w, compute_mask, out_policy);
+            }
+            return;
+        }
+        #[cfg(target_arch = "aarch64")]
+        if self.use_neon {
+            unsafe {
+                self.evaluate_policy_neon(w, compute_mask, out_policy);
             }
             return;
         }
@@ -1579,6 +1973,134 @@ impl Mix9svqAccumulator {
             }
         }
     }
+
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn evaluate_policy_neon(
+        &self,
+        w: &Mix9svqWeight,
+        compute_mask: &[bool; BOARD_AREA],
+        out_policy: &mut [f32; BOARD_AREA],
+    ) {
+        let value_sum = &self.value_sum_table[self.current_version as usize];
+        let b = &w.bucket;
+
+        let mut layer0 = [0_i8; FEATURE_DIM];
+        crelu_i32_to_i8_neon::<FEATURE_DIM, 8, true>(&mut layer0, &value_sum.global);
+
+        let mut l1_i32 = [0_i32; POLICY_DIM * 2];
+        let mut l1 = [0_i8; POLICY_DIM * 2];
+        linear_i8_chunk4_neon::<{ POLICY_DIM * 2 }, FEATURE_DIM, false>(
+            &mut l1_i32,
+            &layer0,
+            &b.policy_pwconv_l1.weight,
+            &b.policy_pwconv_l1.bias,
+        );
+        crelu_i32_to_i8_neon::<{ POLICY_DIM * 2 }, 7, false>(&mut l1, &l1_i32);
+
+        const L2_OUT: usize = POLICY_PWCONV_DIM * POLICY_DIM + POLICY_PWCONV_DIM;
+        let mut l2_i32 = [0_i32; L2_OUT];
+        linear_i8_chunk4_neon::<L2_OUT, { POLICY_DIM * 2 }, false>(
+            &mut l2_i32,
+            &l1,
+            &b.policy_pwconv_l2.weight,
+            &b.policy_pwconv_l2.bias,
+        );
+        let mut pw_w = [0_i16; POLICY_PWCONV_DIM * POLICY_DIM];
+        let l2_head: &[i32; POLICY_PWCONV_DIM * POLICY_DIM] =
+            l2_i32[..POLICY_PWCONV_DIM * POLICY_DIM].try_into().unwrap();
+        crelu_i32_to_i16_neon::<{ POLICY_PWCONV_DIM * POLICY_DIM }, 0, true>(&mut pw_w, l2_head);
+        let mut pw_b = [0_i32; POLICY_PWCONV_DIM];
+        for i in 0..POLICY_PWCONV_DIM {
+            pw_b[i] = l2_i32[POLICY_PWCONV_DIM * POLICY_DIM + i] << 7;
+        }
+
+        let outer_ver_base = (self.current_version as usize) * OUTER_BOARD_AREA;
+        let mut p_i32 = [0_i32; POLICY_PWCONV_DIM];
+        for y in 0..BOARD_SIZE {
+            let inner_row = y * BOARD_SIZE;
+            let outer_row = (y + 1) * OUTER_BOARD_SIZE + 1;
+            for x in 0..BOARD_SIZE {
+                let inner_idx = inner_row + x;
+                if !compute_mask[inner_idx] {
+                    continue;
+                }
+                let mc_idx = self.version_outer_index[outer_ver_base + outer_row + x] as usize;
+                linear_i16_chunk2_prerelu_neon::<POLICY_PWCONV_DIM, POLICY_DIM>(
+                    &mut p_i32,
+                    &self.map_conv[mc_idx],
+                    &pw_w,
+                    &pw_b,
+                );
+                out_policy[inner_idx] =
+                    policy_dot16_neon(&p_i32, &b.policy_output_weight, b.policy_output_bias);
+            }
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon,dotprod")]
+    unsafe fn evaluate_policy_neon_dotprod(
+        &self,
+        w: &Mix9svqWeight,
+        compute_mask: &[bool; BOARD_AREA],
+        out_policy: &mut [f32; BOARD_AREA],
+    ) {
+        let value_sum = &self.value_sum_table[self.current_version as usize];
+        let b = &w.bucket;
+
+        let mut layer0 = [0_i8; FEATURE_DIM];
+        crelu_i32_to_i8_neon::<FEATURE_DIM, 8, true>(&mut layer0, &value_sum.global);
+
+        let mut l1_i32 = [0_i32; POLICY_DIM * 2];
+        let mut l1 = [0_i8; POLICY_DIM * 2];
+        linear_i8_chunk4_neon_dotprod::<{ POLICY_DIM * 2 }, FEATURE_DIM>(
+            &mut l1_i32,
+            &layer0,
+            &b.policy_pwconv_l1.weight,
+            &b.policy_pwconv_l1.bias,
+        );
+        crelu_i32_to_i8_neon::<{ POLICY_DIM * 2 }, 7, false>(&mut l1, &l1_i32);
+
+        const L2_OUT: usize = POLICY_PWCONV_DIM * POLICY_DIM + POLICY_PWCONV_DIM;
+        let mut l2_i32 = [0_i32; L2_OUT];
+        linear_i8_chunk4_neon_dotprod::<L2_OUT, { POLICY_DIM * 2 }>(
+            &mut l2_i32,
+            &l1,
+            &b.policy_pwconv_l2.weight,
+            &b.policy_pwconv_l2.bias,
+        );
+        let mut pw_w = [0_i16; POLICY_PWCONV_DIM * POLICY_DIM];
+        let l2_head: &[i32; POLICY_PWCONV_DIM * POLICY_DIM] =
+            l2_i32[..POLICY_PWCONV_DIM * POLICY_DIM].try_into().unwrap();
+        crelu_i32_to_i16_neon::<{ POLICY_PWCONV_DIM * POLICY_DIM }, 0, true>(&mut pw_w, l2_head);
+        let mut pw_b = [0_i32; POLICY_PWCONV_DIM];
+        for i in 0..POLICY_PWCONV_DIM {
+            pw_b[i] = l2_i32[POLICY_PWCONV_DIM * POLICY_DIM + i] << 7;
+        }
+
+        let outer_ver_base = (self.current_version as usize) * OUTER_BOARD_AREA;
+        let mut p_i32 = [0_i32; POLICY_PWCONV_DIM];
+        for y in 0..BOARD_SIZE {
+            let inner_row = y * BOARD_SIZE;
+            let outer_row = (y + 1) * OUTER_BOARD_SIZE + 1;
+            for x in 0..BOARD_SIZE {
+                let inner_idx = inner_row + x;
+                if !compute_mask[inner_idx] {
+                    continue;
+                }
+                let mc_idx = self.version_outer_index[outer_ver_base + outer_row + x] as usize;
+                linear_i16_chunk2_prerelu_neon::<POLICY_PWCONV_DIM, POLICY_DIM>(
+                    &mut p_i32,
+                    &self.map_conv[mc_idx],
+                    &pw_w,
+                    &pw_b,
+                );
+                out_policy[inner_idx] =
+                    policy_dot16_neon(&p_i32, &b.policy_output_weight, b.policy_output_bias);
+            }
+        }
+    }
 }
 
 fn star_block_scalar(
@@ -1697,6 +2219,86 @@ unsafe fn star_block_avxvnni(
         &w.down.signed_bias,
     );
     crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(output, &out_i32);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn star_block_neon(
+    output: &mut [i8; VALUE_DIM],
+    input: &[i8; FEATURE_DIM],
+    w: &StarBlockWeight<VALUE_DIM, FEATURE_DIM>,
+) {
+    let mut up_i32 = [0_i32; VALUE_DIM * 2];
+    let mut up1 = [0_i8; VALUE_DIM * 2];
+    let mut up2 = [0_i8; VALUE_DIM * 2];
+
+    linear_i8_chunk4_neon::<{ VALUE_DIM * 2 }, FEATURE_DIM, false>(
+        &mut up_i32,
+        input,
+        &w.up1.weight,
+        &w.up1.bias,
+    );
+    crelu_i32_to_i8_neon::<{ VALUE_DIM * 2 }, 7, false>(&mut up1, &up_i32);
+
+    linear_i8_chunk4_neon::<{ VALUE_DIM * 2 }, FEATURE_DIM, false>(
+        &mut up_i32,
+        input,
+        &w.up2.weight,
+        &w.up2.bias,
+    );
+    crelu_i32_to_i8_neon::<{ VALUE_DIM * 2 }, 7, true>(&mut up2, &up_i32);
+
+    let mut dotsum = [0_i8; VALUE_DIM];
+    dot2_u7i8_neon::<VALUE_DIM, 7>(&mut dotsum, &up1, &up2);
+
+    let mut out_i32 = [0_i32; VALUE_DIM];
+    linear_i8_chunk4_neon::<VALUE_DIM, VALUE_DIM, true>(
+        &mut out_i32,
+        &dotsum,
+        &w.down.weight,
+        &w.down.bias,
+    );
+    crelu_i32_to_i8_neon::<VALUE_DIM, 7, false>(output, &out_i32);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,dotprod")]
+unsafe fn star_block_neon_dotprod(
+    output: &mut [i8; VALUE_DIM],
+    input: &[i8; FEATURE_DIM],
+    w: &StarBlockWeight<VALUE_DIM, FEATURE_DIM>,
+) {
+    let mut up_i32 = [0_i32; VALUE_DIM * 2];
+    let mut up1 = [0_i8; VALUE_DIM * 2];
+    let mut up2 = [0_i8; VALUE_DIM * 2];
+
+    linear_i8_chunk4_neon_dotprod::<{ VALUE_DIM * 2 }, FEATURE_DIM>(
+        &mut up_i32,
+        input,
+        &w.up1.weight,
+        &w.up1.bias,
+    );
+    crelu_i32_to_i8_neon::<{ VALUE_DIM * 2 }, 7, false>(&mut up1, &up_i32);
+
+    linear_i8_chunk4_neon_dotprod::<{ VALUE_DIM * 2 }, FEATURE_DIM>(
+        &mut up_i32,
+        input,
+        &w.up2.weight,
+        &w.up2.bias,
+    );
+    crelu_i32_to_i8_neon::<{ VALUE_DIM * 2 }, 7, true>(&mut up2, &up_i32);
+
+    let mut dotsum = [0_i8; VALUE_DIM];
+    dot2_u7i8_neon::<VALUE_DIM, 7>(&mut dotsum, &up1, &up2);
+
+    let mut out_i32 = [0_i32; VALUE_DIM];
+    linear_i8_chunk4_neon_dotprod::<VALUE_DIM, VALUE_DIM>(
+        &mut out_i32,
+        &dotsum,
+        &w.down.weight,
+        &w.down.bias,
+    );
+    crelu_i32_to_i8_neon::<VALUE_DIM, 7, false>(output, &out_i32);
 }
 
 /// Convert `(win_logit, loss_logit, draw_logit)` via softmax and Rapfi's
@@ -1972,12 +2574,14 @@ impl Mix9svqEvaluator {
         self.accumulator[slot].evaluate_policy(&self.weight[slot], compute_mask, out_policy);
     }
 
-    /// Verify scalar vs AVX2 vs AVX-VNNI bit-exactness (for tests).
+    /// Verify scalar vs SIMD (AVX2/AVX-VNNI on x86_64, NEON/DOTPROD on aarch64) bit-exactness.
     #[cfg(test)]
-    pub(crate) fn set_simd_mode(&mut self, avx2: bool, avxvnni: bool) {
+    pub(crate) fn set_simd_mode(&mut self, base_simd: bool, dotprod_simd: bool) {
         for acc in &mut self.accumulator {
-            acc.use_avx2 = avx2;
-            acc.use_avxvnni = avxvnni;
+            acc.use_avx2 = base_simd;
+            acc.use_avxvnni = dotprod_simd;
+            acc.use_neon = base_simd;
+            acc.use_neon_dotprod = dotprod_simd;
         }
     }
 }
@@ -2008,7 +2612,7 @@ mod tests {
         );
         let mut ev_vnni = Mix9svqEvaluator::new(fs_w.clone(), fs_w.clone());
         let mut ev_avx = Mix9svqEvaluator::new(fs_w.clone(), fs_w.clone());
-        ev_avx.set_simd_mode(has_avx2(), false);
+        ev_avx.set_simd_mode(has_avx2() || has_neon(), false);
         let mut ev_sca = Mix9svqEvaluator::new(fs_w.clone(), fs_w);
         ev_sca.set_simd_mode(false, false);
 
