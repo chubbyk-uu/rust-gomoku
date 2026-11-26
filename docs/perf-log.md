@@ -1348,6 +1348,10 @@ Verification & 100-game matches (Renju `1s/move`, 32 MiB TT, `center_50_prefixes
 - **`exp_d48_1t` vs `v0118_1t` (`j=8`)**: **`51-41-8` (`55.0% ± 5.98%`, `+34.86 Elo`, `WW=7, WD=1, WL/DD=38, LD=3, LL=1`)**, `0` errors / `0` timeouts; avg `492.5 ms` / med `112.6 ms` / p95 `1000.4 ms` / max `1000.8 ms` vs `v0118_1t` `482.5 ms`.
 - **`exp_d48_4t` vs `v0118_4t` (`j=4`)**: `45-47-8` (`49.0% ± 5.14%`, `-6.95 Elo`, `WW=2, WD=3, WL/DD=38, LD=5, LL=2`, 200-game 1T+4T combined `96-88-16` / `52.0%`), `0` errors / `0` timeouts; avg `539.2 ms` / med `1000.4 ms` / p95 `1000.9 ms` / max `1007.3 ms` vs `v0118_4t` `466.0 ms`.
 - **`exp_d48_1t` vs Rapfi 1T (`j=10`, fair `Mix9svq`, 32 MiB TT)**: **`32-63-5` (`34.5% ± 6.32%`, `-111.37 Elo`, `WW=0, WD=0, WL/DD=32, LD=5, LL=13`)**, `+1.0%` (`+7.74 Elo`, `LL: 15 -> 13`) over `v0.1.18 1T` (`33.5%`, `32-65-3`, `LL=15`); 1 ply-224 Renju black-no-legal-move loss, `0` real errors / `0` timeouts; avg `537.1 ms` / med `1000.2 ms` / p95 `1000.5 ms` / max `1000.9 ms` vs Rapfi `657.2 ms` / max `1052.6 ms`.
+- **`master_d48_4t` vs Rapfi 4T (`j=4`, fair `Mix9svq`, 32 MiB TT, 2×100g = 200g)**:
+  - Run 1: `30-68-2` (`31.0% ± 6.86%`, `-138.99 Elo`, `LL=18`, 0 errors/timeouts; 4/5 worse games diverged at ply 4–10 from Rapfi 4T's own nondeterminism).
+  - Run 2: **`31-63-6` (`34.0% ± 6.31%`, `-115.23 Elo`, `LL=13`, 0 errors/timeouts; avg `559.2 ms` / p95 `1000.9 ms` / max `1001.6 ms` vs Rapfi `623.0 ms` / max `1079.3 ms`)**.
+  - 200-game combined: `61-131-8` (`32.5%`, on par with `v0.1.18` `33.0%`).
 
 Decision:
 
