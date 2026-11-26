@@ -217,6 +217,7 @@ struct CandJournalEntry {
 struct StateInfo {
     journal_start: u16,
     last_move: u16,
+    last_actual_move: [u16; 2],
     last_flex4_attack: [u16; 2],
     /// Most recent empty cell reaching `[CBlock4Flex3, BFlex4, AFive]` per side.
     last_p4_move: [[u16; 3]; 2],
@@ -228,6 +229,7 @@ impl Default for StateInfo {
         Self {
             journal_start: 0,
             last_move: NONE_MOVE,
+            last_actual_move: [NONE_MOVE; 2],
             last_flex4_attack: [NONE_MOVE; 2],
             last_p4_move: [[NONE_MOVE; 3]; 2],
             p4_count: [[0; PATTERN4_NB]; 2],
@@ -235,18 +237,46 @@ impl Default for StateInfo {
     }
 }
 
+/// Bounds-safe step from `pos` along line direction `dir` (`0..4`) by `step` cells.
+#[inline(always)]
+pub fn step_pos(pos: usize, dir: usize, step: isize) -> Option<usize> {
+    const DIRS: [(isize, isize); 4] = [(1, 0), (0, 1), (1, -1), (1, 1)];
+    let (dx, dy) = DIRS[dir];
+    let nx = (pos % BOARD_SIZE) as isize + dx * step;
+    let ny = (pos / BOARD_SIZE) as isize + dy * step;
+    if nx >= 0 && nx < BOARD_SIZE as isize && ny >= 0 && ny < BOARD_SIZE as isize {
+        Some((ny as usize) * BOARD_SIZE + (nx as usize))
+    } else {
+        None
+    }
+}
+
+/// Chebyshev distance matching Rapfi `Pos::distance`: returns `-1` if either
+/// operand is `NONE_MOVE` or `PASS_MOVE`.
+#[inline(always)]
+pub fn chebyshev_distance(a: u16, b: u16) -> i32 {
+    if (a as usize) >= BOARD_AREA || (b as usize) >= BOARD_AREA {
+        return -1;
+    }
+    let ax = (a as usize % BOARD_SIZE) as i32;
+    let ay = (a as usize / BOARD_SIZE) as i32;
+    let bx = (b as usize % BOARD_SIZE) as i32;
+    let by = (b as usize / BOARD_SIZE) as i32;
+    (ax - bx).abs().max((ay - by).abs())
+}
+
 #[derive(Clone, Copy, Debug)]
 struct MoveRestore {
-    touched_mask: u64,
-    /// `(old_pattern2x, old_pattern4_pair)` in walk order matching `touched_mask` bits.
-    cells: [(u8, u8); 40],
+    len: u8,
+    /// Packed `u32`: `posi (8) | (dir << 8) | (old_p2x << 16) | (old_p4 << 24)`.
+    entries: [u32; 40],
 }
 
 impl Default for MoveRestore {
     fn default() -> Self {
         Self {
-            touched_mask: 0,
-            cells: [(0, 0); 40],
+            len: 0,
+            entries: [0; 40],
         }
     }
 }
@@ -471,6 +501,46 @@ impl FastBoard {
     }
 
     #[inline(always)]
+    pub fn last_actual_move(&self, side: usize) -> u16 {
+        self.state_infos[self.move_count].last_actual_move[side]
+    }
+
+    #[inline(always)]
+    pub fn tables(&self) -> &'static PatternTables {
+        self.tables
+    }
+
+    /// Check whether `pos` is a legal non-pass move for `side_to_move()`.
+    #[inline]
+    pub fn is_legal_non_pass(&mut self, pos: u16) -> bool {
+        if (pos as usize) >= BOARD_AREA || !self.is_empty(pos as usize) {
+            return false;
+        }
+        if self.rule == RuleSet::Renju && self.current_side == FE_BLACK {
+            return !self.check_forbidden_point(pos as usize);
+        }
+        true
+    }
+
+    /// Temporarily switch side to `side`, place a stone at `pos` without flipping
+    /// side, run `f(self)`, then undo and restore the original side.
+    #[inline]
+    pub fn with_probe_move<const RENJU: bool, R>(
+        &mut self,
+        side: usize,
+        pos: usize,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved_side = self.current_side;
+        self.current_side = side;
+        self.play_typed::<RENJU, false>(pos);
+        let res = f(self);
+        self.undo_typed::<RENJU, false>();
+        self.current_side = saved_side;
+        res
+    }
+
+    #[inline(always)]
     pub fn last_p4_move(&self, side: usize, p4: Pattern4) -> u16 {
         debug_assert!(p4 >= Pattern4::CBlock4Flex3 && p4 <= Pattern4::AFive);
         self.state_infos[self.move_count].last_p4_move[side]
@@ -578,6 +648,7 @@ impl FastBoard {
         self.move_count += 1;
         let mut st = prev_st;
         st.last_move = pos as u16;
+        st.last_actual_move[side] = pos as u16;
         st.journal_start = self.journal_top as u16;
 
         self.zobrist_key ^= ZOBRIST.piece[side][pos];
@@ -607,8 +678,6 @@ impl FastBoard {
         let pc_b = pcode_table_for::<RENJU>(t, FE_BLACK);
         let pc_w = pcode_table_for::<RENJU>(t, FE_WHITE);
         let mut restore_idx = 0_usize;
-        let mut touched_mask = 0_u64;
-        let mut step_idx = 0_usize;
 
         let mut i = -l;
         while i <= l {
@@ -623,54 +692,70 @@ impl FastBoard {
                     self.get_key_at::<RENJU>(posi, dir) & ((1_u64 << (4 * l + 2)) - 1)
                 );
 
-                let old_p2x = self.pattern2xs[posi][dir];
-                let new_p2x = lookup_pattern::<RENJU>(t, bit_key[dir]);
-                let p4_pair = self.pattern4x2[posi];
+                // SAFETY: `posi < BOARD_AREA` (empty cell check in padded bit_key guarantees
+                // on-board cell) and `dir < 4`, `idx_b/idx_w < 65536`, `p4 < 14`.
+                unsafe {
+                    let old_p2x = *self.pattern2xs.get_unchecked(posi).get_unchecked(dir);
+                    let new_p2x = lookup_pattern::<RENJU>(t, bit_key[dir]);
+                    let p4_pair = *self.pattern4x2.get_unchecked(posi);
 
-                if new_p2x == old_p2x {
-                    let b4 = p4_pair & 0x0F;
-                    let w4 = p4_pair >> 4;
-                    if b4 >= Pattern4::CBlock4Flex3 as u8 {
-                        st.last_p4_move[FE_BLACK][(b4 - Pattern4::CBlock4Flex3 as u8) as usize] =
+                    if new_p2x == old_p2x {
+                        let b4 = p4_pair & 0x0F;
+                        let w4 = p4_pair >> 4;
+                        if b4 >= Pattern4::CBlock4Flex3 as u8 {
+                            *st.last_p4_move[FE_BLACK]
+                                .get_unchecked_mut((b4 - Pattern4::CBlock4Flex3 as u8) as usize) =
+                                posi as u16;
+                        }
+                        if w4 >= Pattern4::CBlock4Flex3 as u8 {
+                            *st.last_p4_move[FE_WHITE]
+                                .get_unchecked_mut((w4 - Pattern4::CBlock4Flex3 as u8) as usize) =
+                                posi as u16;
+                        }
+                        continue;
+                    }
+
+                    let packed = (posi as u32)
+                        | ((dir as u32) << 8)
+                        | ((old_p2x.0 as u32) << 16)
+                        | ((p4_pair as u32) << 24);
+                    *self
+                        .move_restores
+                        .get_unchecked_mut(restore_slot)
+                        .entries
+                        .get_unchecked_mut(restore_idx) = packed;
+                    restore_idx += 1;
+
+                    let row_mut = self.pattern2xs.get_unchecked_mut(posi);
+                    *row_mut.get_unchecked_mut(dir) = new_p2x;
+                    let row = *row_mut;
+                    let idx_b = (row[0].black_raw() << 12)
+                        | (row[1].black_raw() << 8)
+                        | (row[2].black_raw() << 4)
+                        | row[3].black_raw();
+                    let idx_w = (row[0].white_raw() << 12)
+                        | (row[1].white_raw() << 8)
+                        | (row[2].white_raw() << 4)
+                        | row[3].white_raw();
+                    let p4_b = pc_b.get_unchecked(idx_b).pattern4_raw();
+                    let p4_w = pc_w.get_unchecked(idx_w).pattern4_raw();
+
+                    *st.p4_count[FE_BLACK].get_unchecked_mut((p4_pair & 0x0F) as usize) -= 1;
+                    *st.p4_count[FE_WHITE].get_unchecked_mut((p4_pair >> 4) as usize) -= 1;
+                    *st.p4_count[FE_BLACK].get_unchecked_mut(p4_b as usize) += 1;
+                    *st.p4_count[FE_WHITE].get_unchecked_mut(p4_w as usize) += 1;
+                    *self.pattern4x2.get_unchecked_mut(posi) = pack_p4_pair(p4_b, p4_w);
+
+                    if p4_b >= Pattern4::CBlock4Flex3 as u8 {
+                        *st.last_p4_move[FE_BLACK]
+                            .get_unchecked_mut((p4_b - Pattern4::CBlock4Flex3 as u8) as usize) =
                             posi as u16;
                     }
-                    if w4 >= Pattern4::CBlock4Flex3 as u8 {
-                        st.last_p4_move[FE_WHITE][(w4 - Pattern4::CBlock4Flex3 as u8) as usize] =
+                    if p4_w >= Pattern4::CBlock4Flex3 as u8 {
+                        *st.last_p4_move[FE_WHITE]
+                            .get_unchecked_mut((p4_w - Pattern4::CBlock4Flex3 as u8) as usize) =
                             posi as u16;
                     }
-                    continue;
-                }
-
-                self.move_restores[restore_slot].cells[restore_idx] = (old_p2x.0, p4_pair);
-                restore_idx += 1;
-                touched_mask |= 1_u64 << (step_idx * 4 + dir);
-
-                self.pattern2xs[posi][dir] = new_p2x;
-                let row = self.pattern2xs[posi];
-                let idx_b = (row[0].black_raw() << 12)
-                    | (row[1].black_raw() << 8)
-                    | (row[2].black_raw() << 4)
-                    | row[3].black_raw();
-                let idx_w = (row[0].white_raw() << 12)
-                    | (row[1].white_raw() << 8)
-                    | (row[2].white_raw() << 4)
-                    | row[3].white_raw();
-                let p4_b = pc_b[idx_b].pattern4_raw();
-                let p4_w = pc_w[idx_w].pattern4_raw();
-
-                st.p4_count[FE_BLACK][(p4_pair & 0x0F) as usize] -= 1;
-                st.p4_count[FE_WHITE][(p4_pair >> 4) as usize] -= 1;
-                st.p4_count[FE_BLACK][p4_b as usize] += 1;
-                st.p4_count[FE_WHITE][p4_w as usize] += 1;
-                self.pattern4x2[posi] = pack_p4_pair(p4_b, p4_w);
-
-                if p4_b >= Pattern4::CBlock4Flex3 as u8 {
-                    st.last_p4_move[FE_BLACK][(p4_b - Pattern4::CBlock4Flex3 as u8) as usize] =
-                        posi as u16;
-                }
-                if p4_w >= Pattern4::CBlock4Flex3 as u8 {
-                    st.last_p4_move[FE_WHITE][(p4_w - Pattern4::CBlock4Flex3 as u8) as usize] =
-                        posi as u16;
                 }
             }
 
@@ -680,9 +765,8 @@ impl FastBoard {
             bit_key[2] >>= shamt;
             bit_key[3] >>= shamt;
             i += if i == -1 { 2 } else { 1 };
-            step_idx += 1;
         }
-        self.move_restores[restore_slot].touched_mask = touched_mask;
+        self.move_restores[restore_slot].len = restore_idx as u8;
 
         // Drop the placed cell's own frozen p4 contribution (cell is no longer empty).
         let self_pair = self.pattern4x2[pos];
@@ -753,25 +837,22 @@ impl FastBoard {
         self.empty_bb.set(pos);
 
         self.move_count -= 1;
-        let restore = &self.move_restores[self.move_count];
-        let l: isize = if RENJU {
-            HALF_LEN_RENJU as isize
-        } else {
-            HALF_LEN_FREESTYLE as isize
-        };
-        let mut mask = restore.touched_mask;
-        let mut restore_idx = 0_usize;
-        while mask != 0 {
-            let slot = mask.trailing_zeros() as usize;
-            mask &= mask - 1;
-            let step = (slot >> 2) as isize;
-            let dir = slot & 3;
-            let i = if step < l { step - l } else { step - l + 1 };
-            let posi = (pos as isize + DIR_STEP[dir] * i) as usize;
-            let (old_p2x, old_p4) = restore.cells[restore_idx];
-            self.pattern2xs[posi][dir] = Pattern2x(old_p2x);
-            self.pattern4x2[posi] = old_p4;
-            restore_idx += 1;
+        // SAFETY: every entry recorded in `play_typed` has `posi < BOARD_AREA` and `dir < 4`.
+        unsafe {
+            let restore = self.move_restores.get_unchecked(self.move_count);
+            let len = restore.len as usize;
+            for idx in 0..len {
+                let packed = *restore.entries.get_unchecked(idx);
+                let posi = (packed & 0xFF) as usize;
+                let dir = ((packed >> 8) & 0x03) as usize;
+                let old_p2x = ((packed >> 16) & 0xFF) as u8;
+                let old_p4 = (packed >> 24) as u8;
+                *self
+                    .pattern2xs
+                    .get_unchecked_mut(posi)
+                    .get_unchecked_mut(dir) = Pattern2x(old_p2x);
+                *self.pattern4x2.get_unchecked_mut(posi) = old_p4;
+            }
         }
     }
 
@@ -858,24 +939,24 @@ impl FastBoard {
         win_by_three >= 2
     }
 
-    /// Exact Rapfi `quickWinCheck` (`game/wincheck.h`) using our `INF = 20_000`
-    /// mate-distance convention (`INF - (ply + k)` / `-INF + (ply + k)`).
+    /// Exact Rapfi `quickWinCheck` (`game/wincheck.h`) using Rapfi's `VALUE_MATE = 30_000`
+    /// mate-distance convention (`mate_in(ply + k)` / `mated_in(ply + k)`).
     /// Returns `0` if no static forced win/loss is proved.
     pub fn quick_win_check<const RENJU: bool>(&mut self, ply: i32, beta: i32) -> i32 {
-        use crate::constants::INF;
+        use crate::fast_engine::tt::{mate_in, mated_in};
         let self_side = self.current_side;
         let opp_side = self_side ^ 1;
 
         if self.p4_count(self_side, Pattern4::AFive) > 0 {
-            return INF - (ply + 1);
+            return mate_in(ply + 1);
         }
         match self.p4_count(opp_side, Pattern4::AFive) {
             0 => {}
             1 => return 0,
-            _ => return -INF + (ply + 2),
+            _ => return mated_in(ply + 2),
         }
         if self.p4_count(self_side, Pattern4::BFlex4) > 0 {
-            return INF - (ply + 3);
+            return mate_in(ply + 3);
         }
 
         let block4_count = |b: &Self, s: usize| -> u16 {
@@ -884,11 +965,11 @@ impl FastBoard {
                 + b.p4_count(s, Pattern4::EBlock4)
         };
 
-        if !RENJU || INF - (ply + 5) >= beta {
+        if !RENJU || mate_in(ply + 5) >= beta {
             let mut c_count = self.p4_count(self_side, Pattern4::CBlock4Flex3);
             if c_count > 0 {
                 if (!RENJU || self_side == FE_WHITE) && block4_count(self, opp_side) == 0 {
-                    return INF - (ply + 5);
+                    return mate_in(ply + 5);
                 }
                 let cands = self.empty_candidates();
                 let mut found_win = false;
@@ -924,14 +1005,14 @@ impl FastBoard {
                     }
                 }
                 if found_win {
-                    return INF - (ply + 5);
+                    return mate_in(ply + 5);
                 }
             }
 
             if self.p4_count(self_side, Pattern4::FFlex3x2) > 0
                 && self.p4_count(opp_side, Pattern4::BFlex4) + block4_count(self, opp_side) == 0
             {
-                return INF - (ply + 5);
+                return mate_in(ply + 5);
             }
         }
 
@@ -1324,10 +1405,10 @@ mod tests {
 
     #[test]
     fn fastboard_quick_win_check_and_defence_table() {
-        use crate::constants::INF;
         use crate::fast_engine::pattern::lookup_defence;
+        use crate::fast_engine::tt::{mate_in, mated_in, VALUE_INFINITE};
 
-        // 1. AFive -> INF - (ply + 1)
+        // 1. AFive -> mate_in(ply + 1)
         let mut fb = FastBoard::new(RuleSet::Renju, CandRange::Square3Line4);
         for &(x, y) in &[
             (4, 7),
@@ -1341,22 +1422,22 @@ mod tests {
         ] {
             fb.play(y * BOARD_SIZE + x);
         }
-        assert_eq!(fb.quick_win_check::<true>(2, INF), INF - 3);
+        assert_eq!(fb.quick_win_check::<true>(2, VALUE_INFINITE), mate_in(3));
 
-        // 2. BFlex4 (open three -> open four on next move) -> INF - (ply + 3)
+        // 2. BFlex4 (open three -> open four on next move) -> mate_in(ply + 3)
         let mut fb = FastBoard::new(RuleSet::Renju, CandRange::Square3Line4);
         for &(x, y) in &[(5, 7), (0, 0), (6, 7), (0, 2), (7, 7), (0, 4)] {
             fb.play(y * BOARD_SIZE + x);
         }
-        assert_eq!(fb.quick_win_check::<true>(0, INF), INF - 3);
+        assert_eq!(fb.quick_win_check::<true>(0, VALUE_INFINITE), mate_in(3));
 
-        // 3. Opponent double AFive -> -INF + (ply + 2)
+        // 3. Opponent double AFive -> mated_in(ply + 2)
         let mut fb = FastBoard::new(RuleSet::Renju, CandRange::Square3Line4);
         for &(x, y) in &[(5, 7), (0, 0), (6, 7), (0, 2), (7, 7), (0, 4), (8, 7)] {
             fb.play(y * BOARD_SIZE + x);
         }
         // White to move against Black's open four at (4,7) and (9,7).
-        assert_eq!(fb.quick_win_check::<true>(1, INF), -INF + 3);
+        assert_eq!(fb.quick_win_check::<true>(1, VALUE_INFINITE), mated_in(3));
 
         // 4. Defence lookup for F3 cell: two stones at (5,7) and (6,7), so (7,7) has F3.
         let mut fb = FastBoard::new(RuleSet::Renju, CandRange::Square3Line4);

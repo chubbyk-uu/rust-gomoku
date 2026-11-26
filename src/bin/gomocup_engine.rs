@@ -38,6 +38,7 @@ fn main() {
     };
     let mut protocol = GomocupProtocol::new(Some(config), search_limits);
     protocol.tt_bits = args.tt_bits;
+    protocol.fast_nnue = args.fast_nnue;
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -63,6 +64,7 @@ struct CliArgs {
     tt_bits: Option<u32>,
     threads: Option<usize>,
     nnue_dir: Option<String>,
+    fast_nnue: bool,
 }
 
 fn parse_args() -> Result<CliArgs, String> {
@@ -72,6 +74,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut tt_bits = None;
     let mut threads = None;
     let mut nnue_dir = None;
+    let mut fast_nnue = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -125,6 +128,9 @@ fn parse_args() -> Result<CliArgs, String> {
                 };
                 nnue_dir = Some(value);
             }
+            "--fast-nnue" => {
+                fast_nnue = true;
+            }
             "--profile" | "--fast-history-ordering" | "--no-fast-history-ordering" => {
                 return Err(format!("{arg} was removed with the Fast profile"));
             }
@@ -141,5 +147,6 @@ fn parse_args() -> Result<CliArgs, String> {
         tt_bits,
         threads,
         nnue_dir,
+        fast_nnue,
     })
 }

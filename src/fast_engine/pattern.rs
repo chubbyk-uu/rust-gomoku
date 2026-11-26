@@ -305,19 +305,30 @@ pub fn tables() -> &'static PatternTables {
 
 #[inline(always)]
 pub fn lookup_pattern<const RENJU: bool>(t: &PatternTables, key: u64) -> Pattern2x {
-    if RENJU {
-        t.pattern2x_renju[dense_key_renju(key)]
-    } else {
-        t.pattern2x_freestyle[dense_key_freestyle(key)]
+    // SAFETY: `HALF_CODE_LO_*[lo] + HALF_CODE_HI_*[hi]` is constructed at compile time
+    // to stay strictly within `0..DENSE_KEY_*`.
+    unsafe {
+        if RENJU {
+            *t.pattern2x_renju.get_unchecked(dense_key_renju(key))
+        } else {
+            *t.pattern2x_freestyle
+                .get_unchecked(dense_key_freestyle(key))
+        }
     }
 }
 
 #[inline(always)]
 pub fn lookup_defence<const RENJU: bool>(t: &PatternTables, key: u64, attacker: usize) -> u8 {
-    if RENJU {
-        t.defence_renju[dense_key_renju(key)][attacker]
-    } else {
-        t.defence_freestyle[dense_key_freestyle(key)][attacker]
+    unsafe {
+        if RENJU {
+            *t.defence_renju
+                .get_unchecked(dense_key_renju(key))
+                .get_unchecked(attacker)
+        } else {
+            *t.defence_freestyle
+                .get_unchecked(dense_key_freestyle(key))
+                .get_unchecked(attacker)
+        }
     }
 }
 

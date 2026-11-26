@@ -52,9 +52,13 @@ pub struct GomocupProtocol {
     pub time_left_ms: Option<f64>,
     pub node_limit: Option<usize>,
     pub tt_bits: Option<u32>,
+    pub fast_nnue: bool,
     pub ended: bool,
     pending_error: Option<PendingProtocolError>,
     searcher: Option<RootSearcher>,
+    fast_searcher: Option<Arc<crate::fast_engine::FastSearcher>>,
+    fast_evaluator: Option<(std::path::PathBuf, RuleSet, crate::nnue::Mix9svqEvaluator)>,
+    fast_tt_kb: usize,
     auto_tt_max_bits: u32,
     max_memory_tt_bits: Option<u32>,
     nnue_prewarm: Option<(std::path::PathBuf, RuleSet, Arc<(Mutex<u8>, Condvar)>)>,
@@ -78,9 +82,13 @@ impl GomocupProtocol {
             time_left_ms: None,
             node_limit: None,
             tt_bits: None,
+            fast_nnue: false,
             ended: false,
             pending_error: None,
             searcher: None,
+            fast_searcher: None,
+            fast_evaluator: None,
+            fast_tt_kb: 32 * 1024,
             auto_tt_max_bits: MAX_TT_BUCKET_BITS,
             max_memory_tt_bits: None,
             nnue_prewarm: None,
@@ -212,6 +220,9 @@ impl GomocupProtocol {
     fn reset_engine(&mut self) {
         self.board = Board::new();
         self.searcher = None;
+        if let Some(fs) = &self.fast_searcher {
+            fs.clear_tt();
+        }
         self.board_mode = false;
         self.board_lines.clear();
         self.pending_error = None;
@@ -446,6 +457,13 @@ impl GomocupProtocol {
             }
             "max_memory" => {
                 if let Some(parsed) = parse_one::<u64>(value) {
+                    if parsed > 0 {
+                        let kb = ((parsed / 1024) as usize).clamp(1024, 512 * 1024);
+                        if self.fast_tt_kb != kb {
+                            self.fast_tt_kb = kb;
+                            self.fast_searcher = None;
+                        }
+                    }
                     let new_cap = if parsed == 0 {
                         None
                     } else {
@@ -461,6 +479,11 @@ impl GomocupProtocol {
                         self.max_memory_tt_bits = new_cap;
                         self.searcher = None;
                     }
+                }
+            }
+            "fast_nnue" => {
+                if let Some(parsed) = parse_one::<i32>(value) {
+                    self.fast_nnue = parsed != 0;
                 }
             }
             "tt_bits" => {
@@ -715,6 +738,11 @@ impl GomocupProtocol {
         if self.board.winner() != 0 {
             return vec!["ERROR Board is terminal.".to_string()];
         }
+        if self.fast_nnue && self.config.runtime.use_nnue {
+            if let Some(responses) = self.try_search_move_fast_nnue(cmd_start) {
+                return responses;
+            }
+        }
         let mut limits = self.current_search_limits();
         let expected_auto_bits = self.tt_bits.is_none().then(|| {
             let effective_threads = if limits.node_limit.is_some() {
@@ -874,6 +902,103 @@ impl GomocupProtocol {
         if self.pending_error == Some(error) {
             self.pending_error = None;
         }
+    }
+
+    fn try_search_move_fast_nnue(&mut self, cmd_start: std::time::Instant) -> Option<Vec<String>> {
+        let dir = self.config.runtime.nnue_dir.as_deref()?;
+        let rule = self.config.rule_set;
+        let path = std::path::Path::new(dir);
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+        let needs_reload = match &self.fast_evaluator {
+            Some((d, r, _)) => d != &canonical || *r != rule,
+            None => true,
+        };
+        if needs_reload {
+            let loaded = crate::nnue::load_mix9svq_evaluator_for_rule(&canonical, rule).ok()?;
+            self.fast_evaluator = Some((canonical, rule, loaded));
+        }
+
+        let eval = &mut self.fast_evaluator.as_mut()?.2;
+        eval.sync_with_board(&self.board);
+
+        let searcher = self
+            .fast_searcher
+            .get_or_insert_with(|| Arc::new(crate::fast_engine::FastSearcher::new(self.fast_tt_kb)))
+            .clone();
+
+        let fb = crate::fast_engine::FastBoard::from_legacy_board(
+            &self.board,
+            rule,
+            crate::fast_engine::CandRange::Square3Line4,
+        );
+
+        let setup_ms = cmd_start.elapsed().as_secs_f64() * 1000.0;
+        let turn_ms = self
+            .timeout_turn_ms
+            .map(|t| (t - setup_ms).max(10.0) as u64);
+        let left_ms = self
+            .time_left_ms
+            .filter(|&l| l < 50_000_000.0)
+            .map(|l| (l - setup_ms).max(10.0) as u64);
+        let max_depth = self.default_limits.map(|l| l.max_depth).unwrap_or(99);
+        let num_threads = if self.node_limit.is_some() {
+            1
+        } else {
+            self.config.runtime.threads
+        };
+
+        let cfg = crate::fast_engine::FastSearchConfig {
+            max_depth,
+            max_nodes: self.node_limit.map(|n| n as u64),
+            time_limit_ms: turn_ms,
+            time_left_ms: left_ms,
+            num_threads,
+            cand_range: crate::fast_engine::CandRange::Square3Line4,
+        };
+
+        let res = searcher.search(&fb, eval, &cfg);
+        let mut move_ = res.best_move;
+        if !self
+            .board
+            .is_legal_move_for_rule(move_, self.board.side_to_move(), rule)
+        {
+            let fallback = (0..BOARD_AREA as u16).find(|&c| {
+                self.board
+                    .is_legal_move_for_rule(c, self.board.side_to_move(), rule)
+            })?;
+            move_ = fallback;
+        }
+        let (x, y) = move_to_xy(move_).ok()?;
+        let side = self.board.side_to_move();
+        self.play_xy(x, y, side).ok()?;
+
+        let mut responses = Vec::new();
+        if self.config.runtime.root_profile {
+            let nps = if res.elapsed_ms > 0.0 {
+                (res.nodes as f64 / (res.elapsed_ms / 1000.0)) as u64
+            } else {
+                0
+            };
+            let pv_str: Vec<String> = res
+                .pv
+                .iter()
+                .take(10)
+                .filter_map(|&m| move_to_xy(m).ok().map(|(px, py)| format!("({px},{py})")))
+                .collect();
+            responses.push(format!(
+                "MESSAGE fast_nnue depth={} seldepth={} score={} nodes={} time={:.1}ms nps={} pv={}",
+                res.depth,
+                res.sel_depth,
+                res.score,
+                res.nodes,
+                res.elapsed_ms,
+                nps,
+                pv_str.join(" ")
+            ));
+        }
+        responses.push(format!("{x},{y}"));
+        Some(responses)
     }
 }
 
