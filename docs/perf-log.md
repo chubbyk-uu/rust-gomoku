@@ -1286,3 +1286,45 @@ Verification & fair A/B vs Rapfi (`f53a0f2`, archived at `opponent/baselines/gom
 Decision:
 
 - Lock `f53a0f2` (`opponent/baselines/gomocup_nnue_p4_v2`) as the new NNUE baseline (clear gains over `p4_base` on both 1T and 4T, zero classical diff regression) and integrate it into Desktop GUI and Android for the next release before resuming search-strength tuning.
+
+### 2026-11-26: ARM64 NEON + DOTPROD SIMD & Bit-Exact NNUE `EvalCaches + movegen` Speedup (`7cf575d..98406c0`, `exp/neon-and-nnue-speed`)
+
+Hotspot evidence & target:
+
+- **Direction 1 (Android ARM64 NNUE SIMD)**: `src/nnue/simd.rs` and `src/nnue/mix9svq.rs` previously had x86_64 AVX2/AVX-VNNI kernels only, so Android `aarch64` builds fell back to scalar Mix9svq inference.
+- **Direction 2 (Classical `EvalCaches + movegen` CPU overhead in NNUE mode)**: Prior `perf record` showed classical `EvalCaches + movegen` consumed `30.2%` CPU on `c4_ply20` (`42.7%` on `vct_dense_ply78`), including unused classical `dgn` tracking, 608B `EvalSnapshot` copies (`368B` `empty_bucket_counts`), redundant QVCF coverage maintenance, per-node `Vec<Candidate>` allocations, redundant Renju `classify_forbidden_move` calls in movegen, and `LazyLock<Box<[[i32; 3969]; 2]>>` (`31.8 KiB`) atomic checks in `SHAPE_TABLE`.
+
+Modification scope & net-gain hypothesis:
+
+- **Direction 1 (`7cf575d`, `src/nnue/simd.rs`, `src/nnue/mix9svq.rs`)**:
+  - Implemented all 11 bit-exact `aarch64` NEON kernels (`mulhi_i16_neon`, `dot2_u7i8_neon`, `linear_i8_chunk4_neon`, `linear_i8_row4_neon`, `linear_i16_chunk2_prerelu_neon`, `policy_dot16_neon`, `avg_pool_2x2_u8_neon`, `update_point_neon`, `commit_conv_cell_neon`, `commit_vsum_neon`, `star_block_neon`) plus runtime-dispatched ARMv8.2 `dotprod` (`sdot`) variants (`is_aarch64_feature_detected!("dotprod")`, stable inline asm `sdot {acc:v}.4s, {a:v}.16b, {b:v}.16b`).
+  - Disassembly of release `librust_gomoku_android.so` confirmed `84 sdot`, `352 smull`, `124 smull2`, `380 sqxtn`, `348 sqxtn2`, `120 urhadd`, `135 uzp2`, `99 addp`, `80 sadalp`.
+- **Direction 2 (5 bit-exact atomic commits)**:
+  - **Item 2A (`4e7badb`)**: Monomorphized `value_wide_compute_for_rule_no_dgn` (`TRACK_DGN = false`) in `src/eval/local.rs` and wired NNUE search (`search_with_coverage`, `vcfsearch`, `vcfdefend`) to skip unused `dgn_cc`/`dgn_sum`/`blocked_neighbor_count` tracking (`+7.4%` KNPS alone).
+  - **Item 2B (`58aeb37`)**: Added 12B `threat_counts: [[u8; 6]; 2]` + lightweight `EvalSnapshotNnue` (`176B` vs `608B`, `-71%` snapshot copy) in `src/eval/caches.rs`, letting NNUE mode skip `empty_bucket_counts` and `nonzero_bucket_mask` updates (`+5.3%` additional KNPS).
+  - **Item 2C (`bcd74af`)**: Shrunk `CoverageTracker::counts` from `u16` to `u8` (`450B -> 225B`) and dropped unused `coverage` updates from `vcfsearch`/`vcfdefend`.
+  - **Item 2D (`a9233ab`)**: Added `AlphaBetaSearcher::candidate_pool` (zero per-node `Vec<Candidate>` heap alloc), single-pass `no_l4_l5` movegen, and `O(1)` Renju black legality via `caches.value_cache[0][x][y] != 0` in `src/search/movegen.rs`.
+  - **Item 2E (`98406c0`)**: Replaced `LazyLock<Box<[[i32; 3969]; 2]>>` (`31.8 KiB`) with compile-time `.rodata` `static SHAPE_TABLE: [[u8; 3969]; 2]` (`7.9 KiB`, `4x` smaller), compile-time `u8` `COVER_NEIGHBORS` (`14.4 KiB -> 7.2 KiB`), and compile-time `QVCF_NEIGHBOR_MASKS` (`+1.45%` additional KNPS).
+
+Stop-loss reverts (do not repeat):
+
+- Journaling `empty_bucket_counts` deltas into `bucket_log` was `-20.6%` slower (`581.8ms -> 732.6ms`) because 40–60 log pushes/pops cost far more than a 368B AVX2 memcpy -> reverted in favor of `threat_counts` + `EvalSnapshotNnue`.
+- Adding `covered_mask` bitboard branches inside `CoverageTracker::add_move`/`remove_move` added `+47ms` overhead across leaf/QVCF nodes -> reverted.
+- Inlining `SHAPE_DIR_TABLE` (`1 KiB`) into `update_bucket_attack` was neutral/slightly slower (`549.5ms -> 552.6ms`) due to code bloat -> reverted.
+- Passing `&mut Board` into `value_wide_compute_for_rule` for in-place forbidden checks regressed `vct_dense_ply78` by `+6.2%` due to aliasing inhibition -> reverted.
+
+Verification & benchmarks:
+
+- **Fixed-depth bit-exactness & P-core pinned 7-repeat interleaved A/B (`7cf575d` vs `98406c0`, 8 Renju+Freestyle cases, `276,472` nodes)**:
+  - **`0` move / score / depth / node mismatches** across all 8 cases.
+  - Aggregate alphabeta time: **`700.55ms -> 604.08ms` (`-13.77%` wall time, `+15.97%` KNPS: `394.7k -> 457.7k`)**, winning `+12.6% ~ +18.9%` KNPS on every case (`vct_dense_ply78 +18.67%`, `g7_case7 +18.85%`, `g2_case1 +14.56%`, `freestyle_g2 +13.18%`).
+- **Correctness gates**: `cargo fmt --check`, `git diff --check`, full `cargo test --locked` (all passing, 0 warnings), `android/rust_bridge` 7/7, `cargo ndk -t arm64-v8a build --release` (0 warnings), `./gradlew test lint assembleDebug`, and classical `scripts/run_diff.py --profile all --check-baselines --jobs 8` (**13/13 passed** in `31.5s`).
+- **Head-to-head 1T self-play (`dir2_1t` vs `p4_v2_1t`, 100g, Renju `1s/move`, 32 MiB TT, `j=8`, `--reuse-engine-state`)**:
+  - **`50-43-7` (`53.5% ± 4.79%`, `+24.36 Elo`, `WW=4, WD=2, WL/DD=41, LD=3, LL=0`)**, `0` errors / `0` timeouts; `dir2_1t` avg **`468.0 ms`** / median **`81.5 ms`** vs `p4_v2_1t` avg `497.1 ms` / median `422.0 ms`.
+- **Fair vs Rapfi (`Mix9svq`, 32 MiB TT, Renju `1s/move`, 100g, `--reuse-engine-state`)**:
+  - **1T (`j=10`)**: `32-65-3` (`33.5% ± 6.57%`, `-119.11 Elo`, `LL=15`, 1 ply-224 black-no-legal-move loss, 0 real errors / 0 timeouts; avg `524.1 ms` / p95 `1000.5 ms` / max `1001.0 ms`).
+  - **4T (`j=4`)**: `32-66-2` (`33.0% ± 6.69%`, `-123.02 Elo`, `LL=16`, 0 errors / 0 timeouts; avg **`489.9 ms`** / median **`279.7 ms`** / p95 `1000.9 ms` / max `1007.5 ms` vs `p4_v2_4t` avg `500.5 ms` / median `401.7 ms`).
+
+Decision:
+
+- Keep all 6 commits (`7cf575d..98406c0`) on `exp/neon-and-nnue-speed`: 100% search-tree equivalent in both classical and NNUE, `+15.97%` x86_64 KNPS, `+24.36 Elo` (`53.5%`, `0 LL`) in 1T self-play vs `p4_v2`, and full ARM64 NEON+DOTPROD SIMD ready for Android. Ready to merge into `master` upon user approval.
