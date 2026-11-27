@@ -30,7 +30,7 @@ use crate::nnue::simd::{
     avg_pool_2x2_u8_neon, commit_conv_cell_neon, commit_vsum_neon, crelu_i32_to_i16_neon,
     crelu_i32_to_i8_neon, dot2_u7i8_neon, linear_i16_chunk2_prerelu_neon, linear_i8_chunk4_neon,
     linear_i8_chunk4_neon_dotprod, linear_i8_row4_neon, linear_i8_row4_neon_dotprod,
-    policy_dot16_neon, update_point_neon,
+    policy_dot16_neon, policy_eval_batch4_neon, update_point_neon,
 };
 
 pub const SHAPE_NUM: usize = 442_503;
@@ -976,15 +976,17 @@ impl Mix9svqAccumulator {
                 _mm_prefetch(map_ptr.add(old_shape as usize) as *const i8, _MM_HINT_T0);
                 _mm_prefetch(map_ptr.add(new_shape as usize) as *const i8, _MM_HINT_T0);
 
-                pending.get_unchecked_mut(pending_count).write(PendingShape {
-                    x: xu as u8,
-                    y: yu as u8,
-                    mapping_idx: mapping_idx as u8,
-                    old_map_idx: old_map_idx as u16,
-                    new_map_idx: new_map_idx as u16,
-                    old_shape,
-                    new_shape,
-                });
+                pending
+                    .get_unchecked_mut(pending_count)
+                    .write(PendingShape {
+                        x: xu as u8,
+                        y: yu as u8,
+                        mapping_idx: mapping_idx as u8,
+                        old_map_idx: old_map_idx as u16,
+                        new_map_idx: new_map_idx as u16,
+                        old_shape,
+                        new_shape,
+                    });
                 pending_count += 1;
                 new_map_idx += 1;
             }
@@ -1400,17 +1402,25 @@ impl Mix9svqAccumulator {
             outer_next_base,
         );
 
-        // Allocate fresh delta rows in map_conv for the 13x13 affected window (1..=15)
+        // Allocate fresh delta rows in map_conv for the star-shaped affected window (1..=15)
         let x0 = (x + 1).saturating_sub(6).max(1);
         let y0 = (y + 1).saturating_sub(6).max(1);
         let x1 = (x + 7).min(BOARD_SIZE);
         let y1 = (y + 7).min(BOARD_SIZE);
         let mut new_map_conv_idx = change_num.outer as usize;
+        let x_plus_1 = x + 1;
+        let y_plus_1 = y + 1;
+        let x_lo_bit = x0 + 6 - x_plus_1;
+        let x_hi_bit = x1 + 6 - x_plus_1;
+        let clip_mask = ((1_u32 << (x_hi_bit - x_lo_bit + 1)) - 1) << x_lo_bit;
         for yi in y0..=y1 {
-            let outer_row = yi * OUTER_BOARD_SIZE;
-            for xi in x0..=x1 {
-                let outer_idx = outer_row + xi;
-                self.version_outer_index[outer_next_base + outer_idx] = new_map_conv_idx as u16;
+            let mut bits = (STAR_CONV_MASK[yi + 6 - y_plus_1] as u32) & clip_mask;
+            let outer_row = outer_next_base + yi * OUTER_BOARD_SIZE;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let xi = x_plus_1 + bit - 6;
+                self.version_outer_index[outer_row + xi] = new_map_conv_idx as u16;
                 self.map_conv[new_map_conv_idx] = AlignedRow::zeroed();
                 new_map_conv_idx += 1;
             }
@@ -1453,6 +1463,12 @@ impl Mix9svqAccumulator {
                 let old_cb_idx = w.mapping_index[mapping_idx][old_shape as usize] as usize;
                 let new_cb_idx = w.mapping_index[mapping_idx][new_shape as usize] as usize;
                 self.version_inner_index[inner_next_base + inner_idx] = new_map_idx as u16;
+
+                if old_cb_idx == new_cb_idx {
+                    self.map_sum[new_map_idx] = self.map_sum[old_map_idx];
+                    new_map_idx += 1;
+                    continue;
+                }
 
                 changes[change_count] = OnePointChange {
                     x: xu,
@@ -1587,12 +1603,15 @@ impl Mix9svqAccumulator {
         // Commit dwconv deltas into new map_conv cells & accumulate channels 0..32
         let mut commit_idx = change_num.outer as usize;
         for yi in y0..=y1 {
+            let mut bits = (STAR_CONV_MASK[yi + 6 - y_plus_1] as u32) & clip_mask;
             let gi = self.group_index[yi - 1];
-            let outer_row = yi * OUTER_BOARD_SIZE;
-            for xi in x0..=x1 {
+            let prev_row = outer_prev_base + yi * OUTER_BOARD_SIZE;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let xi = x_plus_1 + bit - 6;
                 let gj = self.group_index[xi - 1];
-                let old_conv_idx =
-                    self.version_outer_index[outer_prev_base + outer_row + xi] as usize;
+                let old_conv_idx = self.version_outer_index[prev_row + xi] as usize;
 
                 #[cfg(target_arch = "x86_64")]
                 if self.use_avx2 {
@@ -2559,6 +2578,70 @@ impl Mix9svqAccumulator {
 
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "neon")]
+    unsafe fn eval_policy_candidates_neon(
+        &self,
+        w: &Mix9svqWeight,
+        pw_w: &[i16; POLICY_PWCONV_DIM * POLICY_DIM],
+        pw_b: &[i32; POLICY_PWCONV_DIM],
+        moves: &[crate::types::Move],
+        out_scores: &mut [f32],
+    ) {
+        let b = &w.bucket;
+        let outer_ver_ptr = self
+            .version_outer_index
+            .as_ptr()
+            .add((self.current_version as usize) * OUTER_BOARD_AREA);
+        let map_conv_ptr = self.map_conv.as_ptr();
+        let mut p_i32 = [0_i32; POLICY_PWCONV_DIM];
+        let n = moves.len().min(out_scores.len());
+        let mut i = 0;
+        while i + 4 <= n {
+            let mc0 = *outer_ver_ptr
+                .add(*INNER_TO_OUTER.get_unchecked(*moves.get_unchecked(i) as usize) as usize)
+                as usize;
+            let mc1 = *outer_ver_ptr
+                .add(*INNER_TO_OUTER.get_unchecked(*moves.get_unchecked(i + 1) as usize) as usize)
+                as usize;
+            let mc2 = *outer_ver_ptr
+                .add(*INNER_TO_OUTER.get_unchecked(*moves.get_unchecked(i + 2) as usize) as usize)
+                as usize;
+            let mc3 = *outer_ver_ptr
+                .add(*INNER_TO_OUTER.get_unchecked(*moves.get_unchecked(i + 3) as usize) as usize)
+                as usize;
+            let s4 = policy_eval_batch4_neon(
+                &*map_conv_ptr.add(mc0),
+                &*map_conv_ptr.add(mc1),
+                &*map_conv_ptr.add(mc2),
+                &*map_conv_ptr.add(mc3),
+                pw_w,
+                pw_b,
+                &b.policy_output_weight,
+                b.policy_output_bias,
+            );
+            *out_scores.get_unchecked_mut(i) = s4[0];
+            *out_scores.get_unchecked_mut(i + 1) = s4[1];
+            *out_scores.get_unchecked_mut(i + 2) = s4[2];
+            *out_scores.get_unchecked_mut(i + 3) = s4[3];
+            i += 4;
+        }
+        while i < n {
+            let idx = *moves.get_unchecked(i) as usize;
+            let outer_idx = *INNER_TO_OUTER.get_unchecked(idx) as usize;
+            let mc_idx = *outer_ver_ptr.add(outer_idx) as usize;
+            linear_i16_chunk2_prerelu_neon::<POLICY_PWCONV_DIM, POLICY_DIM>(
+                &mut p_i32,
+                &(*map_conv_ptr.add(mc_idx)).0,
+                pw_w,
+                pw_b,
+            );
+            *out_scores.get_unchecked_mut(i) =
+                policy_dot16_neon(&p_i32, &b.policy_output_weight, b.policy_output_bias);
+            i += 1;
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
     unsafe fn evaluate_policy_moves_neon(
         &self,
         w: &Mix9svqWeight,
@@ -2598,22 +2681,7 @@ impl Mix9svqAccumulator {
             pw_b[i] = l2_i32[POLICY_PWCONV_DIM * POLICY_DIM + i] << 7;
         }
 
-        let outer_ver_base = (self.current_version as usize) * OUTER_BOARD_AREA;
-        let mut p_i32 = [0_i32; POLICY_PWCONV_DIM];
-        for (dst, &m) in out_scores.iter_mut().zip(moves.iter()) {
-            let idx = m as usize;
-            let y = idx / BOARD_SIZE;
-            let x = idx % BOARD_SIZE;
-            let outer_idx = (y + 1) * OUTER_BOARD_SIZE + (x + 1);
-            let mc_idx = self.version_outer_index[outer_ver_base + outer_idx] as usize;
-            linear_i16_chunk2_prerelu_neon::<POLICY_PWCONV_DIM, POLICY_DIM>(
-                &mut p_i32,
-                &self.map_conv[mc_idx].0,
-                &pw_w,
-                &pw_b,
-            );
-            *dst = policy_dot16_neon(&p_i32, &b.policy_output_weight, b.policy_output_bias);
-        }
+        self.eval_policy_candidates_neon(w, &pw_w, &pw_b, moves, out_scores);
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -2657,22 +2725,7 @@ impl Mix9svqAccumulator {
             pw_b[i] = l2_i32[POLICY_PWCONV_DIM * POLICY_DIM + i] << 7;
         }
 
-        let outer_ver_base = (self.current_version as usize) * OUTER_BOARD_AREA;
-        let mut p_i32 = [0_i32; POLICY_PWCONV_DIM];
-        for (dst, &m) in out_scores.iter_mut().zip(moves.iter()) {
-            let idx = m as usize;
-            let y = idx / BOARD_SIZE;
-            let x = idx % BOARD_SIZE;
-            let outer_idx = (y + 1) * OUTER_BOARD_SIZE + (x + 1);
-            let mc_idx = self.version_outer_index[outer_ver_base + outer_idx] as usize;
-            linear_i16_chunk2_prerelu_neon::<POLICY_PWCONV_DIM, POLICY_DIM>(
-                &mut p_i32,
-                &self.map_conv[mc_idx].0,
-                &pw_w,
-                &pw_b,
-            );
-            *dst = policy_dot16_neon(&p_i32, &b.policy_output_weight, b.policy_output_bias);
-        }
+        self.eval_policy_candidates_neon(w, &pw_w, &pw_b, moves, out_scores);
     }
 
     /// Compute policy logits for every cell where `compute_mask[y * 15 + x]` is `true`.

@@ -1603,6 +1603,114 @@ pub unsafe fn policy_dot16_neon(p_i32: &[i32; 16], w_f32: &[f32; 16], bias: f32)
     vaddvq_f32(vaddq_f32(acc0, acc1)) + bias
 }
 
+/// Fused 4-candidate NEON pointwise policy conv (`32 -> 16` pre-ReLU i16) +
+/// `policy_dot16_neon` output projection. Loads `pw_weight` once per 4 candidates
+/// (100% bit-exact with `linear_i16_chunk2_prerelu_neon` + `policy_dot16_neon`).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn policy_eval_batch4_neon(
+    in0: &[i16; 32],
+    in1: &[i16; 32],
+    in2: &[i16; 32],
+    in3: &[i16; 32],
+    pw_weight: &[i16; 512],
+    pw_bias: &[i32; 16],
+    out_weight: &[f32; 16],
+    out_bias: f32,
+) -> [f32; 4] {
+    let zero16 = vdupq_n_s16(0);
+    let zero32 = vdupq_n_s32(0);
+    let b0 = vld1q_s32(pw_bias.as_ptr());
+    let b1 = vld1q_s32(pw_bias.as_ptr().add(4));
+    let b2 = vld1q_s32(pw_bias.as_ptr().add(8));
+    let b3 = vld1q_s32(pw_bias.as_ptr().add(12));
+    let (mut a00, mut a01, mut a02, mut a03) = (b0, b1, b2, b3);
+    let (mut a10, mut a11, mut a12, mut a13) = (b0, b1, b2, b3);
+    let (mut a20, mut a21, mut a22, mut a23) = (b0, b1, b2, b3);
+    let (mut a30, mut a31, mut a32, mut a33) = (b0, b1, b2, b3);
+
+    let p0 = in0.as_ptr() as *const i32;
+    let p1 = in1.as_ptr() as *const i32;
+    let p2 = in2.as_ptr() as *const i32;
+    let p3 = in3.as_ptr() as *const i32;
+    let w_ptr = pw_weight.as_ptr();
+
+    for c in 0..16 {
+        let wc = w_ptr.add(c * 32);
+        let w0 = vld1q_s16(wc);
+        let w1 = vld1q_s16(wc.add(8));
+        let w2 = vld1q_s16(wc.add(16));
+        let w3 = vld1q_s16(wc.add(24));
+
+        macro_rules! accum_cand {
+            ($p:ident, $a0:ident, $a1:ident, $a2:ident, $a3:ident) => {{
+                let v = vmaxq_s16(
+                    vreinterpretq_s16_s32(vdupq_n_s32(std::ptr::read_unaligned($p.add(c)))),
+                    zero16,
+                );
+                let v_lo = vget_low_s16(v);
+                $a0 = vaddq_s32(
+                    $a0,
+                    vpaddq_s32(vmull_s16(v_lo, vget_low_s16(w0)), vmull_high_s16(v, w0)),
+                );
+                $a1 = vaddq_s32(
+                    $a1,
+                    vpaddq_s32(vmull_s16(v_lo, vget_low_s16(w1)), vmull_high_s16(v, w1)),
+                );
+                $a2 = vaddq_s32(
+                    $a2,
+                    vpaddq_s32(vmull_s16(v_lo, vget_low_s16(w2)), vmull_high_s16(v, w2)),
+                );
+                $a3 = vaddq_s32(
+                    $a3,
+                    vpaddq_s32(vmull_s16(v_lo, vget_low_s16(w3)), vmull_high_s16(v, w3)),
+                );
+            }};
+        }
+        accum_cand!(p0, a00, a01, a02, a03);
+        accum_cand!(p1, a10, a11, a12, a13);
+        accum_cand!(p2, a20, a21, a22, a23);
+        accum_cand!(p3, a30, a31, a32, a33);
+    }
+
+    let fw0 = vld1q_f32(out_weight.as_ptr());
+    let fw1 = vld1q_f32(out_weight.as_ptr().add(4));
+    let fw2 = vld1q_f32(out_weight.as_ptr().add(8));
+    let fw3 = vld1q_f32(out_weight.as_ptr().add(12));
+
+    #[inline(always)]
+    unsafe fn reduce16_neon(
+        a0: int32x4_t,
+        a1: int32x4_t,
+        a2: int32x4_t,
+        a3: int32x4_t,
+        zero32: int32x4_t,
+        fw0: float32x4_t,
+        fw1: float32x4_t,
+        fw2: float32x4_t,
+        fw3: float32x4_t,
+        bias: f32,
+    ) -> f32 {
+        let f0 = vcvtq_f32_s32(vmaxq_s32(a0, zero32));
+        let f1 = vcvtq_f32_s32(vmaxq_s32(a1, zero32));
+        let f2 = vcvtq_f32_s32(vmaxq_s32(a2, zero32));
+        let f3 = vcvtq_f32_s32(vmaxq_s32(a3, zero32));
+        let mut acc0 = vmulq_f32(f0, fw0);
+        let mut acc1 = vmulq_f32(f1, fw1);
+        acc0 = vfmaq_f32(acc0, f2, fw2);
+        acc1 = vfmaq_f32(acc1, f3, fw3);
+        vaddvq_f32(vaddq_f32(acc0, acc1)) + bias
+    }
+
+    [
+        reduce16_neon(a00, a01, a02, a03, zero32, fw0, fw1, fw2, fw3, out_bias),
+        reduce16_neon(a10, a11, a12, a13, zero32, fw0, fw1, fw2, fw3, out_bias),
+        reduce16_neon(a20, a21, a22, a23, zero32, fw0, fw1, fw2, fw3, out_bias),
+        reduce16_neon(a30, a31, a32, a33, zero32, fw0, fw1, fw2, fw3, out_bias),
+    ]
+}
+
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 pub unsafe fn avg_pool_2x2_u8_neon(

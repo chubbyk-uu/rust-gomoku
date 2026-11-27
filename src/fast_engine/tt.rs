@@ -10,7 +10,9 @@
 //!   any memory size, not just powers of two).
 //! - Integer ply depth range: `DEPTH_LOWER_BOUND (-20)..=DEPTH_UPPER_BOUND (235)`.
 
-use std::alloc::{alloc, alloc_zeroed, dealloc, Layout};
+#[cfg(target_os = "linux")]
+use std::alloc::alloc;
+use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 #[cfg(target_os = "linux")]
