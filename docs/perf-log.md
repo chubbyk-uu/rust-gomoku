@@ -98,6 +98,8 @@ Verification & timing (`fast_engine_component_timing`, release+LTO, 32 MiB TT):
 - `open4 1T 1s`: `333K (master)` → **`411.7K` NPS** (`+23.6%` vs `master`).
 - `open4 4T 1s`: `1,667K (master)` → **`2,131K` NPS** (`+27.8%` vs `master`).
 - Correctness: `mix9svq` bit-exact test + all `fast_engine` tests (`fast_tt_resize_kb_is_panic_safe_on_invalid_size` intact) passed.
+- Milestone match vs `pbrain-rapfi` (`rust_step1_1t` vs `rapfi_1t`, 100g Renju `1s/move`, 32 MiB TT, `center_50_prefixes.jsonl`, `--reuse-engine-state`): **`47-44-9` (`51.5% ± 4.47%`, `+10.43 Elo`, CI `[-20.65, +41.67]`, `WW=2, WD=4, WL/DD=39, LD=5, LL=0`)**, vs `master` (`v0.1.20`) `49.5%` (`+14 Elo` from pure bit-exact speedups alone). Timing: `rust_step1_1t` `avg 692.7ms / med 969.6ms / p95 974.7ms / max 980.4ms` (`0` Rust errors, `0` timeouts; 1 Rapfi ply-224 overline loss) vs `rapfi_1t` `694.8 / 970.2 / 974.3 / 1033.3 ms`. Move-time histogram showed `360 / 3238` moves (`11.1%`) stopped early between `873ms` and `960ms` due to `optimum_ms = 0.90 * max_ms`.
+- Evaluated & dropped LLVM PGO (`-C profile-generate` / `-C profile-use`, 7 Renju+Freestyle 1T/4T workloads): `mid10_d17` `521.1ms -> 507.4ms` (`-2.6%`), `open4_d16` `176.7ms -> 179.1ms` (`+1.3%`, PGO+native `522.3ms / 178.8ms`). Because fat LTO + explicit AVX2/AVX-VNNI kernels already dominate runtime, PGO yielded < 1–2% net gain and is not worth maintaining a platform-bound build pipeline.
 
 ## 2026-11-19 (3) — Incremental `dgn`, sparse `bucket_dot`, deferred rest-sort, and 4-line direct `value_wide_compute`
 
