@@ -109,6 +109,10 @@ Verification & timing (`fast_engine_component_timing`, release+LTO, 32 MiB TT):
   - 100% bit-exact (`mix9svq` test + identical fixed `d15` nodes `28,984` / `32,328`): `fixed d15 open4` `84.16ms -> 79.41ms` (`-5.6%`), `mid10 1T 1s` `517K -> 524.4K` NPS (`+28.8%` vs `master`, `1.14x` Rapfi), `mid10 4T 1s` `2,265K -> 2,360.5K` NPS (`+4.2%`, `1.08x` Rapfi).
 - **Step 3D-1 (kept) — Non-PV Cut-node IIR** (`!root_node && !pv_node && cut_node && depth >= 4.0 && depth < IID_DEPTH && tt_move == NONE_MOVE => depth -= 0.75`):
   - 200-game 1T Renju screen vs `gomocup_base3` (`renju_100pairs.jsonl`, `300ms/move`, 32 MiB TT, `--reuse-engine-state`): **`93-84-23` (`52.25% ± 4.08%`, `+15.65 Elo`, `WW=9, WD=7, WL/DD=72, LD=8, LL=4`)**, zero speed overhead (`avg 219.2ms` vs `219.1ms`), 0 real errors / 0 timeouts.
+- **Step 3D-2 (rejected & reverted) — Aggressive TT replacement aging (`depth8 - 8 * rel_age`)**:
+  - 200-game 1T Renju screen vs `gomocup_3d1` (`renju_100pairs.jsonl`, `300ms/move`, 8 MiB TT, `--reuse-engine-state`): `82-84-34` (`49.5% ± 3.59%`, `-3.47 Elo`, `WW=4, WD=9, LD=13, LL=3`). Penalizing `rel_age == 1` by 8 plies prematurely evicted useful previous-move PV entries; reverted cleanly.
+- **Step 3D-3 (kept) — Forward Futility Pruning in move loop** (`!pv_node && !mt.important && oppo4 == 0 && move_count > 1 && depth < 4.0 && eval != VALUE_NONE && eval + 90 + (75.0 * depth) as i32 <= alpha`):
+  - 200-game 1T Renju screen vs `gomocup_3d1` (`renju_100pairs.jsonl`, `300ms/move`, 32 MiB TT, `--reuse-engine-state`): **`93-80-27` (`53.25% ± 4.06%`, `+22.62 Elo`, `WW=8, WD=12, WL/DD=69, LD=7, LL=4`)**, `avg 222.5ms` vs `222.5ms`, `0` errors / `0` timeouts.
 
 ## 2026-11-19 (3) — Incremental `dgn`, sparse `bucket_dot`, deferred rest-sort, and 4-line direct `value_wide_compute`
 

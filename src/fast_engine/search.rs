@@ -1435,6 +1435,16 @@ impl<'a> SearchWorker<'a> {
                 if mt.trivial && depth < TRIVIAL_PRUN_DEPTH {
                     continue;
                 }
+                if !pv_node
+                    && !mt.important
+                    && oppo4 == 0
+                    && move_count > 1
+                    && depth < 4.0
+                    && eval != VALUE_NONE
+                    && eval + 90 + (75.0 * depth) as i32 <= alpha
+                {
+                    continue;
+                }
                 if mp.has_policy_score()
                     && (mp.cur_move_score() as i32) < policy_pruning_score::<RENJU>(depth)
                 {
