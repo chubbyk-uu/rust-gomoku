@@ -987,7 +987,7 @@ impl<'a> SearchWorker<'a> {
         let mut first_mate_depth = 0_i32;
         let mut first_singular_depth = 0_i32;
 
-        self.root_depth = 1;
+        self.root_depth = 2.min(max_depth);
         while self.root_depth <= max_depth && !self.shared.is_terminating() {
             for rm in &mut self.root_moves {
                 rm.previous_value = rm.value;

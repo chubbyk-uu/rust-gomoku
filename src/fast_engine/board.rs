@@ -181,6 +181,105 @@ const fn build_cand_stencils(square_r: isize, line_r: isize) -> [Bitboard225; BO
 static CAND_STENCIL_S2L3: [Bitboard225; BOARD_AREA] = build_cand_stencils(2, 3);
 static CAND_STENCIL_S3L4: [Bitboard225; BOARD_AREA] = build_cand_stencils(3, 4);
 
+const fn build_col_masks() -> [[Bitboard225; BOARD_SIZE]; BOARD_SIZE] {
+    let mut table = [[Bitboard225::empty(); BOARD_SIZE]; BOARD_SIZE];
+    let mut x0 = 0_usize;
+    while x0 < BOARD_SIZE {
+        let mut x1 = x0;
+        while x1 < BOARD_SIZE {
+            let mut words = [0_u64; 4];
+            let mut y = 0_usize;
+            while y < BOARD_SIZE {
+                let mut x = x0;
+                while x <= x1 {
+                    let idx = y * BOARD_SIZE + x;
+                    words[idx >> 6] |= 1_u64 << (idx & 63);
+                    x += 1;
+                }
+                y += 1;
+            }
+            table[x0][x1] = Bitboard225 { words };
+            x1 += 1;
+        }
+        x0 += 1;
+    }
+    table
+}
+
+const fn build_row_masks() -> [[Bitboard225; BOARD_SIZE]; BOARD_SIZE] {
+    let mut table = [[Bitboard225::empty(); BOARD_SIZE]; BOARD_SIZE];
+    let mut y0 = 0_usize;
+    while y0 < BOARD_SIZE {
+        let mut y1 = y0;
+        while y1 < BOARD_SIZE {
+            let mut words = [0_u64; 4];
+            let mut y = y0;
+            while y <= y1 {
+                let mut x = 0_usize;
+                while x < BOARD_SIZE {
+                    let idx = y * BOARD_SIZE + x;
+                    words[idx >> 6] |= 1_u64 << (idx & 63);
+                    x += 1;
+                }
+                y += 1;
+            }
+            table[y0][y1] = Bitboard225 { words };
+            y1 += 1;
+        }
+        y0 += 1;
+    }
+    table
+}
+
+static CAND_COL_MASK: [[Bitboard225; BOARD_SIZE]; BOARD_SIZE] = build_col_masks();
+static CAND_ROW_MASK: [[Bitboard225; BOARD_SIZE]; BOARD_SIZE] = build_row_masks();
+
+/// Axis-aligned candidate bounding box matching Rapfi `CandArea` (`game/candarea.h`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CandArea {
+    x0: u8,
+    y0: u8,
+    x1: u8,
+    y1: u8,
+}
+
+impl Default for CandArea {
+    fn default() -> Self {
+        Self {
+            x0: BOARD_SIZE as u8,
+            y0: BOARD_SIZE as u8,
+            x1: 0,
+            y1: 0,
+        }
+    }
+}
+
+impl CandArea {
+    #[inline(always)]
+    fn is_empty(self) -> bool {
+        self.x0 >= BOARD_SIZE as u8
+    }
+
+    #[inline(always)]
+    fn expand(&mut self, x: usize, y: usize, dist: usize) {
+        let nx0 = x.saturating_sub(dist) as u8;
+        let ny0 = y.saturating_sub(dist) as u8;
+        let nx1 = (x + dist).min(BOARD_SIZE - 1) as u8;
+        let ny1 = (y + dist).min(BOARD_SIZE - 1) as u8;
+        if self.is_empty() {
+            self.x0 = nx0;
+            self.y0 = ny0;
+            self.x1 = nx1;
+            self.y1 = ny1;
+        } else {
+            self.x0 = self.x0.min(nx0);
+            self.y0 = self.y0.min(ny0);
+            self.x1 = self.x1.max(nx1);
+            self.y1 = self.y1.max(ny1);
+        }
+    }
+}
+
 struct ZobristKeys {
     piece: [[u64; BOARD_AREA]; 2],
     side_to_move: u64,
@@ -220,6 +319,7 @@ struct CandJournalEntry {
 #[derive(Clone, Copy, Debug)]
 struct StateInfo {
     journal_start: u16,
+    cand_area: CandArea,
     last_move: u16,
     last_actual_move: [u16; 2],
     last_flex4_attack: [u16; 2],
@@ -233,6 +333,7 @@ impl Default for StateInfo {
     fn default() -> Self {
         Self {
             journal_start: 0,
+            cand_area: CandArea::default(),
             last_move: NONE_MOVE,
             last_actual_move: [NONE_MOVE; 2],
             last_flex4_attack: [NONE_MOVE; 2],
@@ -632,7 +733,20 @@ impl FastBoard {
 
     #[inline(always)]
     pub fn empty_candidates(&self) -> Bitboard225 {
-        self.candidates_bb.and(&self.empty_bb)
+        let area = self.state_infos[self.move_count].cand_area;
+        if area.is_empty() {
+            return Bitboard225::empty();
+        }
+        let col = &CAND_COL_MASK[area.x0 as usize][area.x1 as usize];
+        let row = &CAND_ROW_MASK[area.y0 as usize][area.y1 as usize];
+        Bitboard225 {
+            words: [
+                self.candidates_bb.words[0] & self.empty_bb.words[0] & col.words[0] & row.words[0],
+                self.candidates_bb.words[1] & self.empty_bb.words[1] & col.words[1] & row.words[1],
+                self.candidates_bb.words[2] & self.empty_bb.words[2] & col.words[2] & row.words[2],
+                self.candidates_bb.words[3] & self.empty_bb.words[3] & col.words[3] & row.words[3],
+            ],
+        }
     }
 
     #[inline(always)]
@@ -728,6 +842,7 @@ impl FastBoard {
         st.last_move = pos as u16;
         st.last_actual_move[side] = pos as u16;
         st.journal_start = self.journal_top as u16;
+        st.cand_area.expand(pos % BOARD_SIZE, pos / BOARD_SIZE, 3);
 
         self.zobrist_key ^= ZOBRIST.piece[side][pos];
         if FLIP_SIDE {
