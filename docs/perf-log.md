@@ -111,8 +111,10 @@ Verification & timing (`fast_engine_component_timing`, release+LTO, 32 MiB TT):
   - 200-game 1T Renju screen vs `gomocup_base3` (`renju_100pairs.jsonl`, `300ms/move`, 32 MiB TT, `--reuse-engine-state`): **`93-84-23` (`52.25% ± 4.08%`, `+15.65 Elo`, `WW=9, WD=7, WL/DD=72, LD=8, LL=4`)**, zero speed overhead (`avg 219.2ms` vs `219.1ms`), 0 real errors / 0 timeouts.
 - **Step 3D-2 (rejected & reverted) — Aggressive TT replacement aging (`depth8 - 8 * rel_age`)**:
   - 200-game 1T Renju screen vs `gomocup_3d1` (`renju_100pairs.jsonl`, `300ms/move`, 8 MiB TT, `--reuse-engine-state`): `82-84-34` (`49.5% ± 3.59%`, `-3.47 Elo`, `WW=4, WD=9, LD=13, LL=3`). Penalizing `rel_age == 1` by 8 plies prematurely evicted useful previous-move PV entries; reverted cleanly.
-- **Step 3D-3 (kept) — Forward Futility Pruning in move loop** (`!pv_node && !mt.important && oppo4 == 0 && move_count > 1 && depth < 4.0 && eval != VALUE_NONE && eval + 90 + (75.0 * depth) as i32 <= alpha`):
+- **Step 3D-3 (kept, `4d2430d`) — Forward Futility Pruning in move loop** (`!pv_node && !mt.important && oppo4 == 0 && move_count > 1 && depth < 4.0 && eval != VALUE_NONE && eval + 90 + (75.0 * depth) as i32 <= alpha`):
   - 200-game 1T Renju screen vs `gomocup_3d1` (`renju_100pairs.jsonl`, `300ms/move`, 32 MiB TT, `--reuse-engine-state`): **`93-80-27` (`53.25% ± 4.06%`, `+22.62 Elo`, `WW=8, WD=12, WL/DD=69, LD=7, LL=4`)**, `avg 222.5ms` vs `222.5ms`, `0` errors / `0` timeouts.
+- **Step 3C (rejected & reverted) — 4T Helper LMR Delta** (`HELPER_LMR_DELTA = [0.0, 0.20, -0.20, 0.10]` for `tid > 0`):
+  - 100-game 4T Renju screen vs `gomocup_3d3` (`center_50_prefixes.jsonl`, `300ms/move`, 32 MiB TT, `--reuse-engine-state`, `--jobs 3`): `41-40-19` (`50.5% ± 4.68%`, `+3.47 Elo`, `WW=0, WD=9, LD=6, LL=1`), `0` timeouts (1 ply-224 full-board `ERROR No legal move.` on `rust_3d3_4t`). Below the `>= 51.0%` retention gate; cleanly reverted.
 
 ## 2026-11-19 (3) — Incremental `dgn`, sparse `bucket_dot`, deferred rest-sort, and 4-line direct `value_wide_compute`
 
