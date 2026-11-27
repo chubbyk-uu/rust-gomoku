@@ -1330,6 +1330,15 @@ impl<'a> SearchWorker<'a> {
             if !root_node && pv_node && tt_move == NONE_MOVE {
                 depth -= IIR_REDUCTION_PV[rs];
             }
+            if !root_node
+                && !pv_node
+                && cut_node
+                && depth >= 4.0
+                && depth < IID_DEPTH
+                && tt_move == NONE_MOVE
+            {
+                depth -= 0.75;
+            }
             if pv_node && depth > 1.0 && tt_move != NONE_MOVE {
                 depth -= ((depth - tt_depth as f32) * IIR_REDUCTION_TT[rs])
                     .clamp(0.0, IIR_REDUCTION_TT_MAX[rs]);

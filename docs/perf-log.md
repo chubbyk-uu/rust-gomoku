@@ -107,6 +107,8 @@ Verification & timing (`fast_engine_component_timing`, release+LTO, 32 MiB TT):
 - **Bit-exact `Mix9svq` 64B cache-line alignment + 2-pass `mapping_index` prefetch (`src/nnue/mix9svq.rs`)**:
   - Wrapped `map_sum` (`128B`) and `map_conv` (`64B`) in `#[repr(C, align(64))] struct AlignedRow<N>` (eliminating 3/4-probability cache-line splits across 522 `map_conv` + 41 `map_sum` ops/move and enabling aligned AVX2 loads/stores), plus 2-pass `mapping_index` prefetching in `play_move_avx2`.
   - 100% bit-exact (`mix9svq` test + identical fixed `d15` nodes `28,984` / `32,328`): `fixed d15 open4` `84.16ms -> 79.41ms` (`-5.6%`), `mid10 1T 1s` `517K -> 524.4K` NPS (`+28.8%` vs `master`, `1.14x` Rapfi), `mid10 4T 1s` `2,265K -> 2,360.5K` NPS (`+4.2%`, `1.08x` Rapfi).
+- **Step 3D-1 (kept) — Non-PV Cut-node IIR** (`!root_node && !pv_node && cut_node && depth >= 4.0 && depth < IID_DEPTH && tt_move == NONE_MOVE => depth -= 0.75`):
+  - 200-game 1T Renju screen vs `gomocup_base3` (`renju_100pairs.jsonl`, `300ms/move`, 32 MiB TT, `--reuse-engine-state`): **`93-84-23` (`52.25% ± 4.08%`, `+15.65 Elo`, `WW=9, WD=7, WL/DD=72, LD=8, LL=4`)**, zero speed overhead (`avg 219.2ms` vs `219.1ms`), 0 real errors / 0 timeouts.
 
 ## 2026-11-19 (3) — Incremental `dgn`, sparse `bucket_dot`, deferred rest-sort, and 4-line direct `value_wide_compute`
 
