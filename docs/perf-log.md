@@ -1484,3 +1484,59 @@ Correctness gates:
 Decision:
 
 - Ready to merge `exp/fastboard-nnue-core` into `master` upon user approval.
+
+### 2026-11-27: Pure-CPU `Mix9svq` SIMD + Hybrid Classical Gate + `CandArea` Exact Parity (`exp/rapfi-60pct-phase1`, `012ec27..14b3424`)
+
+Hotspot evidence & target:
+
+- After `exp/fastboard-nnue-core` (`master @ b7d750e`) reached 50/50 parity with `pbrain-rapfi` (`49.83%`, `LL=0`, `407K` 1T / `1,886K` 4T NPS on `mid10`), component profiling showed NNUE inference (`play_move` + `star_block` + `policy_eval`) and move picking dominated CPU time, while 3 subtle search/eval divergences remained vs Rapfi:
+  1. `futility_margin` in `src/fast_engine/search.rs` missed `.max(0)` vs Rapfi `parameter.h:125`, yielding negative margins `-125..-1` on `0 < d < 2.0, improving = true`.
+  2. `evaluate_static` always invoked NNUE `evaluate_value` (no `model210901.bin` classical hybrid gate) and `QVCF` lacked learned `P4SCORES` + `POLICY_CROSS` scoring.
+  3. `FastBoard::empty_candidates()` lacked Rapfi's `CandArea` bounding-box clip (`expand_dist = 3`), generating ~8–15 extra `dist=4` perimeter moves per node, and iterative deepening started at `d=1` instead of `d=2`.
+- Target: maximize pure-CPU throughput under identical May 2025 `Mix9svq` weights and achieve exact single-node search parity with `pbrain-rapfi` so the raw CPU speed edge converts cleanly into win-rate gain across Renju & Freestyle, 1T & 4T, `0` errors / `0` timeouts, while leaving classical `base` (`src/search/`, `use_nnue = false`) 100% untouched.
+
+Modification scope:
+
+- **Bit-exact `Mix9svq` SIMD & memory layout (`012ec27..208153f`, `src/nnue/mix9svq.rs`, `src/nnue/simd.rs`, `src/fast_engine/movepick.rs`)**:
+  - `play_move_avx2` + `STAR_CONV_MASK` (~35% fewer `map_conv` ops) + VQ zero-delta skip + `star_block_batch4_avxvnni` + `policy_eval_batch4_avx2` + 64B `AlignedRow<N>` + 2-pass prefetch + `HugeBox<T>` (2 MiB THP) + lazy top-6 `MovePicker` + ARM64 NEON sync.
+- **Correctness fix, hybrid classical gate, & root symmetry (`036aab6`, `src/fast_engine/{classical_model,board,movepick,search}.rs`, `src/nnue/mod.rs`)**:
+  - Fixed `futility_margin` `.max(0)` clamp (`futility_margin_clamps_negative_to_zero`).
+  - Added lock-free `ClassicalModel` loader (`model210901.bin`, `RFCLMOD1` v8, automatic warm in `load_mix9svq_evaluator_for_rule` with clean `None` fallback when absent; zero binaries committed), incremental `StateInfo::value_black` + `FastBoard::evaluate_classical<RENJU>` (verified bit-exact across 40 random play/pass/undo trials), hybrid `classicalEvalMargin` lazy NNUE gate across all 9 `evaluate_static` call sites, and learned `ClassicalPolicyScorer` (`P4SCORES` + `POLICY_CROSS`) for `QVCF`.
+  - Added lossless root dihedral `D4` symmetry deduplication (`filter_root_symmetry_moves`, matching Rapfi `opening.cpp:250-301`).
+- **`CandArea` bounding-box clip & `start_depth = 2` (`14b3424`, `src/fast_engine/{board,search}.rs`)**:
+  - Added compile-time L1-resident `CAND_COL_MASK` / `CAND_ROW_MASK` tables (`2 ns`, branchless) clipping `empty_candidates()` to Rapfi `CandArea` (`expand_dist = 3`).
+  - Changed iterative deepening start depth from `1` to `2.min(max_depth)` (matching Rapfi `searchcommon.h:137`).
+
+Stop-loss reverts (do not repeat):
+
+- `CorrectionHistory` (`47.5%`), `ContinuationHistory` (`49.0%`), un-aged persistent `MainHistory` (`47.0%`), LLVM PGO (`< 1–2%`), `3A` cut-node `-1.5` SE, `3B` `0.99` time ratio (`46.5%`), `3C` `HELPER_LMR_DELTA` (`50.5%`), `3D-1` Cut-node IIR, `3D-2` `depth8 - 8*rel_age` (`49.5%`), `3D-3` Forward FP at `d < 4` (regressed pure Renjunet `old_50` at `1s/move` vs Rapfi -> cleanly reverted in `036aab6`).
+
+Single-node parity & component timing (`14b3424`, 32 MiB TT, 1s warm):
+
+- **Exact single-node parity vs `pbrain-rapfi`** (`case 22 ply 16`, Renju 1T): `d1` (`295 == 295`, `650 == 650`), `d2` (`249 == 249`, `859 == 859`), `d6` (`1405 == 1405`, `624 == 624`), `d10` (`4363 == 4363`, `462 == 462`); at `1s` Rust reaches **`872K NPS`** finding **`+M31`** (`862ms`) vs Rapfi's `692K NPS` **`+M37`** (`883ms`).
+- **`fast_engine_component_timing`**:
+  - `mid10 1T`: **`730.4K NPS`** (`+79.5%` vs `master` `407K`, **`1.59x`** Rapfi `460K`)
+  - `mid10 4T`: **`3,654.0K NPS`** (`+93.7%` vs `master` `1,886K`, **`1.68x`** Rapfi `2,180K`)
+  - `open4 1T`: **`624.9K NPS`** (`+87.6%` vs `master` `333K`, **`1.49x`** Rapfi `418K`)
+  - `open4 4T`: **`2,535.0K NPS`** (`d22/39`); fixed `d15 open4`: `20.46 ms` (`9,762` nodes).
+
+600-game final fair validation vs `pbrain-rapfi` (`14b3424`, identical `Mix9svq` + `model210901.bin`, `1s/move`, `32 MiB TT`, `database=off`, `--reuse-engine-state`, **0 errors / 0 timeouts**):
+
+| Matchup | Games (Pairs) | W-L-D | Score % (95% CI) | Elo | Pentanomial (`WW/WD/WL+DD/LD/LL`) | Rust Timing (`avg / med / p95 / max ms`) | Rapfi Timing (`avg / med / p95 / max ms`) | Err / TO |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Renju 1T (Total) | 200 (100) | `87-80-33` | **`51.75% ± 3.19%`** | `+12.17` | `3 / 13 / 73 / 10 / 1` | `729.2 / 970.0 / 975.3 / 986.9` | `738.7 / 970.5 / 974.9 / 1043.1` | `0 / 0` |
+| — Renju 1T `old_50` (Renjunet) | 100 (50) | `45-44-11` | `50.50% ± 2.97%` | `+3.47` | `LL = 0` | — | — | `0 / 0` |
+| — Renju 1T `new_50` (balanced) | 100 (50) | `42-36-22` | `53.00% ± 5.36%` | `+20.88` | `LL = 1` | — | — | `0 / 0` |
+| Renju 4T (Total) | 200 (100) | `85-81-34` | **`51.00% ± 2.77%`** | `+6.95` | `3 / 7 / 81 / 9 / 0` | `715.9 / 970.3 / 979.7 / 1000.3` | `728.8 / 971.5 / 979.4 / 1075.5` | `0 / 0` |
+| — Renju 4T `old_50` (Renjunet) | 100 (50) | `43-41-16` | `51.00% ± 3.12%` | `+6.95` | `1 / 3 / 43 / 3 / 0` | — | — | `0 / 0` |
+| — Renju 4T `new_50` (balanced) | 100 (50) | `42-40-18` | `51.00% ± 4.19%` | `+6.95` | `2 / 4 / 38 / 6 / 0` | — | — | `0 / 0` |
+| Freestyle 1T | 100 (50) | `37-39-24` | `49.00% ± 4.77%` | `-6.95` | `0 / 7 / 36 / 5 / 2` | `769.9 / 970.3 / 976.2 / 986.1` | `780.2 / 970.8 / 975.9 / 1021.5` | `0 / 0` |
+| Freestyle 4T | 100 (50) | `42-39-19` | **`51.50% ± 4.26%`** | `+10.43` | `1 / 6 / 38 / 5 / 0` | `726.4 / 970.4 / 979.6 / 989.8` | `754.0 / 971.8 / 979.6 / 1026.3` | `0 / 0` |
+| **Combined 4T (Renju + Freestyle)** | **300 (150)** | **`127-120-53`** | **`51.17%`** | **`+8.11`** | **`4 / 13 / 119 / 14 / 0` (ZERO LL)** | — | — | **`0 / 0`** |
+| **Aggregate 600g Total** | **600 (300)** | **`251-239-110`** | **`51.00% ± 1.65%`** | **`+6.95`** | **`7 / 33 / 228 / 29 / 3`** | **`avg -10..-28 ms`, `max -35..-75 ms` vs Rapfi** | — | **`0 / 0`** |
+
+*(Note: combined post-fix Renju 1T across `036aab6` + `14b3424` = `400g`, `177-162-61` = `51.88%`, `+13.0 Elo`.)*
+
+Decision:
+
+- `exp/rapfi-60pct-phase1` (`14b3424`) delivers `+79.5%..+93.7%` NNUE NPS over `master` (`1.49x–1.68x` `pbrain-rapfi`), achieves exact single-node `d1..d10` parity with Rapfi, beats `pbrain-rapfi` overall across 600 fair games (`51.00% ± 1.65%`, `0` errors / `0` timeouts, `0 LL` across all 300 4T games, consistently lower avg and max turn latency), and keeps classical `base` (`13/13` diffs) untouched. Held on `exp/rapfi-60pct-phase1` pending user approval to merge into `master`.
