@@ -21,8 +21,8 @@ use crate::types::Side;
 use crate::nnue::simd::{
     avg_pool_2x2_u8_avx2, commit_conv_cell_avx2, commit_vsum_avx2, crelu_i32_to_i16_avx2,
     crelu_i32_to_i8_avx2, dot2_u7i8_avx2, linear_i16_chunk2_prerelu_avx2, linear_i8_chunk4_avx2,
-    linear_i8_chunk4_avxvnni, linear_i8_row4_avx2, linear_i8_row4_avxvnni, policy_dot16_avx2,
-    update_point_avx2,
+    linear_i8_chunk4_avxvnni, linear_i8_chunk4_batch4_avxvnni, linear_i8_row4_avx2,
+    linear_i8_row4_avxvnni, policy_dot16_avx2, update_point_avx2,
 };
 
 #[cfg(target_arch = "aarch64")]
@@ -59,6 +59,52 @@ const DY: [isize; 4] = [0, 1, -1, 1];
 const POWER3: [u32; 12] = [
     1, 3, 9, 27, 81, 243, 729, 2_187, 6_561, 19_683, 59_049, 177_147,
 ];
+
+/// Precomputed mapping from inner board cell `y * 15 + x` to padded outer cell
+/// `(y + 1) * 17 + (x + 1)`, eliminating integer div/mod per candidate in policy head.
+const INNER_TO_OUTER: [u16; BOARD_AREA] = {
+    let mut lut = [0_u16; BOARD_AREA];
+    let mut y = 0;
+    while y < BOARD_SIZE {
+        let mut x = 0;
+        while x < BOARD_SIZE {
+            lut[y * BOARD_SIZE + x] = ((y + 1) * OUTER_BOARD_SIZE + (x + 1)) as u16;
+            x += 1;
+        }
+        y += 1;
+    }
+    lut
+};
+
+/// Exact 13x13 bitmask of outer cells touched by the 3x3 depthwise convolution
+/// around the 4 star rays of radius 5 (`-5..=5`). Cells outside this mask always
+/// have zero `map_conv` delta and can safely reuse their previous version slot
+/// (~35% fewer `map_conv` zero/commit ops per move, 100% bit-exact).
+const STAR_CONV_MASK: [u16; 13] = {
+    let mut mask = [0_u16; 13];
+    let mut dir = 0;
+    while dir < 4 {
+        let mut dist = -5_isize;
+        while dist <= 5 {
+            let cx = 6 + dist * DX[dir];
+            let cy = 6 + dist * DY[dir];
+            let mut dy = -1_isize;
+            while dy <= 1 {
+                let mut dx = -1_isize;
+                while dx <= 1 {
+                    let rx = (cx + dx) as usize;
+                    let ry = (cy + dy) as usize;
+                    mask[ry] |= 1_u16 << rx;
+                    dx += 1;
+                }
+                dy += 1;
+            }
+            dist += 1;
+        }
+        dir += 1;
+    }
+    mask
+};
 
 /// Rapfi's default value scaling factor (matches `Evaluation::ScalingFactor = 200.0f`).
 pub const NNUE_SCALING_FACTOR: f32 = 200.0;
@@ -700,6 +746,498 @@ impl Mix9svqAccumulator {
     /// at `(x, y)`.
     pub fn play_move(&mut self, w: &Mix9svqWeight, piece_color: u8, x: usize, y: usize) {
         debug_assert!(piece_color <= 1);
+        #[cfg(target_arch = "x86_64")]
+        if self.use_avx2 {
+            // SAFETY: `self.use_avx2` verified AVX2 support at construction.
+            unsafe { self.play_move_avx2(w, piece_color, x, y) };
+            return;
+        }
+        #[cfg(target_arch = "aarch64")]
+        if self.use_neon {
+            // SAFETY: `self.use_neon` verified NEON support at construction.
+            unsafe { self.play_move_neon(w, piece_color, x, y) };
+            return;
+        }
+        self.play_move_scalar(w, piece_color, x, y);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn play_move_avx2(&mut self, w: &Mix9svqWeight, piece_color: u8, x: usize, y: usize) {
+        use std::arch::x86_64::*;
+
+        #[derive(Clone, Copy)]
+        struct OnePointChange {
+            x: u8,
+            y: u8,
+            mapping_idx: u8,
+            old_map_idx: u16,
+            new_map_idx: u16,
+            old_cb_idx: u16,
+            new_cb_idx: u16,
+        }
+
+        #[repr(align(32))]
+        struct AlignedVSum([[[i32; FEATURE_DIM]; 3]; 3]);
+
+        let ver = self.current_version as usize;
+        let inner_prev_base = ver * BOARD_AREA;
+        let inner_next_base = inner_prev_base + BOARD_AREA;
+        let outer_prev_base = ver * OUTER_BOARD_AREA;
+        let outer_next_base = outer_prev_base + OUTER_BOARD_AREA;
+        let change_num = *self.version_change_num.get_unchecked(ver);
+
+        let vi_ptr = self.version_inner_index.as_mut_ptr();
+        std::ptr::copy_nonoverlapping(
+            vi_ptr.add(inner_prev_base),
+            vi_ptr.add(inner_next_base),
+            BOARD_AREA,
+        );
+        let vo_ptr = self.version_outer_index.as_mut_ptr();
+        std::ptr::copy_nonoverlapping(
+            vo_ptr.add(outer_prev_base),
+            vo_ptr.add(outer_next_base),
+            OUTER_BOARD_AREA,
+        );
+
+        let zero = _mm256_setzero_si256();
+        let x0 = (x + 1).saturating_sub(6).max(1);
+        let y0 = (y + 1).saturating_sub(6).max(1);
+        let x1 = (x + 7).min(BOARD_SIZE);
+        let y1 = (y + 7).min(BOARD_SIZE);
+
+        let map_conv_ptr = self.map_conv.as_mut_ptr();
+        let mut new_map_conv_idx = change_num.outer as usize;
+        let x_plus_1 = x + 1;
+        let y_plus_1 = y + 1;
+        let x_lo_bit = x0 + 6 - x_plus_1;
+        let x_hi_bit = x1 + 6 - x_plus_1;
+        let clip_mask = ((1_u32 << (x_hi_bit - x_lo_bit + 1)) - 1) << x_lo_bit;
+        for yi in y0..=y1 {
+            let mut bits = (*STAR_CONV_MASK.get_unchecked(yi + 6 - y_plus_1) as u32) & clip_mask;
+            let outer_row = outer_next_base + yi * OUTER_BOARD_SIZE;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let xi = x_plus_1 + bit - 6;
+                *vo_ptr.add(outer_row + xi) = new_map_conv_idx as u16;
+                let dst = map_conv_ptr.add(new_map_conv_idx) as *mut __m256i;
+                _mm256_storeu_si256(dst, zero);
+                _mm256_storeu_si256(dst.add(1), zero);
+                new_map_conv_idx += 1;
+            }
+        }
+
+        let mut changes = [std::mem::MaybeUninit::<OnePointChange>::uninit(); 40];
+        let mut change_count = 0_usize;
+        let d_pow3 = (piece_color as u32) + 1;
+        let idx_tbl_ptr = self.index_table.as_mut_ptr();
+        let map_idx_ptrs = [w.mapping_index[0].as_ptr(), w.mapping_index[1].as_ptr()];
+        let mut new_map_idx = change_num.inner as usize;
+        const BS_SUB1: isize = (BOARD_SIZE - 1) as isize;
+        let x_i = x as isize;
+        let y_i = y as isize;
+
+        // Fuse the 4 `dist == 0` updates at the newly placed cell `(x, y)` into
+        // a single telescoping update (41 changes instead of 44, 100% bit-exact).
+        let center_slot = vi_ptr.add(inner_next_base + y * BOARD_SIZE + x);
+        let center_old_map_idx = *center_slot as usize;
+        let center_new_map_idx = new_map_idx;
+        let mut center_shapes = *idx_tbl_ptr.add(center_old_map_idx);
+        let mut center_old_cb = [0_u16; 4];
+        let mut center_new_cb = [0_u16; 4];
+        let center_delta = d_pow3 * POWER3[5];
+        for dir in 0..4 {
+            let map_ptr = map_idx_ptrs[dir >> 1];
+            let old_shape = center_shapes[dir];
+            let new_shape = old_shape + center_delta;
+            debug_assert!((new_shape as usize) < SHAPE_NUM);
+            center_shapes[dir] = new_shape;
+            center_old_cb[dir] = *map_ptr.add(old_shape as usize);
+            center_new_cb[dir] = *map_ptr.add(new_shape as usize);
+        }
+        *idx_tbl_ptr.add(center_new_map_idx) = center_shapes;
+        *center_slot = center_new_map_idx as u16;
+        new_map_idx += 1;
+
+        for dir in 0..4 {
+            let mapping_idx = dir >> 1;
+            let map_ptr = map_idx_ptrs[mapping_idx];
+            let dx_dir = DX[dir];
+            let dy_dir = DY[dir];
+            for dist in [-5_isize, -4, -3, -2, -1, 1, 2, 3, 4, 5] {
+                let xi = x_i + dist * dx_dir;
+                let yi = y_i + dist * dy_dir;
+                if (xi | (BS_SUB1 - xi) | yi | (BS_SUB1 - yi)) < 0 {
+                    continue;
+                }
+                let xu = xi as usize;
+                let yu = yi as usize;
+                let inner_slot = vi_ptr.add(inner_next_base + yu * BOARD_SIZE + xu);
+                let old_map_idx = *inner_slot as usize;
+                let mut next_shapes = *idx_tbl_ptr.add(old_map_idx);
+                let old_shape = next_shapes[dir];
+                let new_shape = old_shape + d_pow3 * POWER3[(dist + 5) as usize];
+                debug_assert!((new_shape as usize) < SHAPE_NUM);
+                next_shapes[dir] = new_shape;
+                *idx_tbl_ptr.add(new_map_idx) = next_shapes;
+
+                let old_cb_idx = *map_ptr.add(old_shape as usize);
+                let new_cb_idx = *map_ptr.add(new_shape as usize);
+                *inner_slot = new_map_idx as u16;
+
+                changes
+                    .get_unchecked_mut(change_count)
+                    .write(OnePointChange {
+                        x: xu as u8,
+                        y: yu as u8,
+                        mapping_idx: mapping_idx as u8,
+                        old_map_idx: old_map_idx as u16,
+                        new_map_idx: new_map_idx as u16,
+                        old_cb_idx,
+                        new_cb_idx,
+                    });
+                change_count += 1;
+                new_map_idx += 1;
+            }
+        }
+
+        // Zero aligned vsum_group via inline AVX2 stores (no glibc memset).
+        let mut vsum_aligned = std::mem::MaybeUninit::<AlignedVSum>::uninit();
+        let vsum_raw = vsum_aligned.as_mut_ptr() as *mut __m256i;
+        for i in 0..(9 * FEATURE_DIM / 8) {
+            _mm256_store_si256(vsum_raw.add(i), zero);
+        }
+        let vsum_group = &mut (*vsum_aligned.as_mut_ptr()).0;
+
+        let map_sum_ptr = self.map_sum.as_mut_ptr();
+        let cb_ptrs = [w.codebook[0].as_ptr(), w.codebook[1].as_ptr()];
+        let dw_weight_ptr = w.feature_dwconv_weight.as_ptr();
+
+        // Apply fused 4-direction update for center cell `(x, y)`.
+        {
+            let old_s_ptr = map_sum_ptr.add(center_old_map_idx) as *const __m256i;
+            let new_s_ptr = map_sum_ptr.add(center_new_map_idx) as *mut __m256i;
+            let old_s0 = _mm256_loadu_si256(old_s_ptr);
+            let old_s1 = _mm256_loadu_si256(old_s_ptr.add(1));
+            let old_s2 = _mm256_loadu_si256(old_s_ptr.add(2));
+            let old_s3 = _mm256_loadu_si256(old_s_ptr.add(3));
+            let (mut new_s0, mut new_s1, mut new_s2, mut new_s3) = (old_s0, old_s1, old_s2, old_s3);
+            for dir in 0..4 {
+                let cb_base = cb_ptrs[dir >> 1];
+                let old_cb_ptr = cb_base.add(center_old_cb[dir] as usize) as *const __m256i;
+                let new_cb_ptr = cb_base.add(center_new_cb[dir] as usize) as *const __m256i;
+                new_s0 = _mm256_add_epi16(
+                    _mm256_sub_epi16(new_s0, _mm256_loadu_si256(old_cb_ptr)),
+                    _mm256_loadu_si256(new_cb_ptr),
+                );
+                new_s1 = _mm256_add_epi16(
+                    _mm256_sub_epi16(new_s1, _mm256_loadu_si256(old_cb_ptr.add(1))),
+                    _mm256_loadu_si256(new_cb_ptr.add(1)),
+                );
+                new_s2 = _mm256_add_epi16(
+                    _mm256_sub_epi16(new_s2, _mm256_loadu_si256(old_cb_ptr.add(2))),
+                    _mm256_loadu_si256(new_cb_ptr.add(2)),
+                );
+                new_s3 = _mm256_add_epi16(
+                    _mm256_sub_epi16(new_s3, _mm256_loadu_si256(old_cb_ptr.add(3))),
+                    _mm256_loadu_si256(new_cb_ptr.add(3)),
+                );
+            }
+            _mm256_storeu_si256(new_s_ptr, new_s0);
+            _mm256_storeu_si256(new_s_ptr.add(1), new_s1);
+            _mm256_storeu_si256(new_s_ptr.add(2), new_s2);
+            _mm256_storeu_si256(new_s_ptr.add(3), new_s3);
+
+            let old_c0 = _mm256_slli_epi16(_mm256_max_epi16(old_s0, zero), 2);
+            let old_c1 = _mm256_slli_epi16(_mm256_max_epi16(old_s1, zero), 2);
+            let new_c0 = _mm256_slli_epi16(_mm256_max_epi16(new_s0, zero), 2);
+            let new_c1 = _mm256_slli_epi16(_mm256_max_epi16(new_s1, zero), 2);
+
+            let mut outer_row = outer_next_base + y * OUTER_BOARD_SIZE + x;
+            let mut k = 0;
+            for _dy in 0..=2 {
+                for dx in 0..=2 {
+                    let mc_idx = *vo_ptr.add(outer_row + dx) as usize;
+                    let dst = map_conv_ptr.add(mc_idx) as *mut __m256i;
+                    let w_row = (*dw_weight_ptr.add(8 - k)).as_ptr() as *const __m256i;
+                    let dw0 = _mm256_loadu_si256(w_row);
+                    let dw1 = _mm256_loadu_si256(w_row.add(1));
+                    let d0 = _mm256_sub_epi16(
+                        _mm256_mulhi_epi16(dw0, new_c0),
+                        _mm256_mulhi_epi16(dw0, old_c0),
+                    );
+                    let d1 = _mm256_sub_epi16(
+                        _mm256_mulhi_epi16(dw1, new_c1),
+                        _mm256_mulhi_epi16(dw1, old_c1),
+                    );
+                    _mm256_storeu_si256(dst, _mm256_add_epi16(_mm256_loadu_si256(dst), d0));
+                    _mm256_storeu_si256(
+                        dst.add(1),
+                        _mm256_add_epi16(_mm256_loadu_si256(dst.add(1)), d1),
+                    );
+                    k += 1;
+                }
+                outer_row += OUTER_BOARD_SIZE;
+            }
+
+            let gi = *self.group_index.get_unchecked(y);
+            let gj = *self.group_index.get_unchecked(x);
+            let vg_ptr = vsum_group
+                .get_unchecked_mut(gi)
+                .get_unchecked_mut(gj)
+                .as_mut_ptr() as *mut __m256i;
+            let diff2 = _mm256_sub_epi16(
+                _mm256_max_epi16(new_s2, zero),
+                _mm256_max_epi16(old_s2, zero),
+            );
+            let diff3 = _mm256_sub_epi16(
+                _mm256_max_epi16(new_s3, zero),
+                _mm256_max_epi16(old_s3, zero),
+            );
+            let lo2 = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(diff2));
+            let hi2 = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(diff2, 1));
+            let lo3 = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(diff3));
+            let hi3 = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(diff3, 1));
+            _mm256_store_si256(
+                vg_ptr.add(4),
+                _mm256_add_epi32(_mm256_load_si256(vg_ptr.add(4)), lo2),
+            );
+            _mm256_store_si256(
+                vg_ptr.add(5),
+                _mm256_add_epi32(_mm256_load_si256(vg_ptr.add(5)), hi2),
+            );
+            _mm256_store_si256(
+                vg_ptr.add(6),
+                _mm256_add_epi32(_mm256_load_si256(vg_ptr.add(6)), lo3),
+            );
+            _mm256_store_si256(
+                vg_ptr.add(7),
+                _mm256_add_epi32(_mm256_load_si256(vg_ptr.add(7)), hi3),
+            );
+        }
+
+        for i in 0..change_count {
+            let c = changes.get_unchecked(i).assume_init();
+            if i + 2 < change_count {
+                let cnext = changes.get_unchecked(i + 2).assume_init();
+                let cb_next = cb_ptrs[cnext.mapping_idx as usize];
+                let p_old = cb_next.add(cnext.old_cb_idx as usize) as *const i8;
+                let p_new = cb_next.add(cnext.new_cb_idx as usize) as *const i8;
+                _mm_prefetch(p_old, _MM_HINT_T0);
+                _mm_prefetch(p_old.add(64), _MM_HINT_T0);
+                _mm_prefetch(p_new, _MM_HINT_T0);
+                _mm_prefetch(p_new.add(64), _MM_HINT_T0);
+            }
+
+            let cb_base = cb_ptrs[c.mapping_idx as usize];
+            let old_cb_ptr = cb_base.add(c.old_cb_idx as usize) as *const __m256i;
+            let new_cb_ptr = cb_base.add(c.new_cb_idx as usize) as *const __m256i;
+            let old_s_ptr = map_sum_ptr.add(c.old_map_idx as usize) as *const __m256i;
+            let new_s_ptr = map_sum_ptr.add(c.new_map_idx as usize) as *mut __m256i;
+
+            let old_s0 = _mm256_loadu_si256(old_s_ptr);
+            let old_s1 = _mm256_loadu_si256(old_s_ptr.add(1));
+            let old_s2 = _mm256_loadu_si256(old_s_ptr.add(2));
+            let old_s3 = _mm256_loadu_si256(old_s_ptr.add(3));
+
+            let new_s0 = _mm256_add_epi16(
+                _mm256_sub_epi16(old_s0, _mm256_loadu_si256(old_cb_ptr)),
+                _mm256_loadu_si256(new_cb_ptr),
+            );
+            let new_s1 = _mm256_add_epi16(
+                _mm256_sub_epi16(old_s1, _mm256_loadu_si256(old_cb_ptr.add(1))),
+                _mm256_loadu_si256(new_cb_ptr.add(1)),
+            );
+            let new_s2 = _mm256_add_epi16(
+                _mm256_sub_epi16(old_s2, _mm256_loadu_si256(old_cb_ptr.add(2))),
+                _mm256_loadu_si256(new_cb_ptr.add(2)),
+            );
+            let new_s3 = _mm256_add_epi16(
+                _mm256_sub_epi16(old_s3, _mm256_loadu_si256(old_cb_ptr.add(3))),
+                _mm256_loadu_si256(new_cb_ptr.add(3)),
+            );
+
+            _mm256_storeu_si256(new_s_ptr, new_s0);
+            _mm256_storeu_si256(new_s_ptr.add(1), new_s1);
+            _mm256_storeu_si256(new_s_ptr.add(2), new_s2);
+            _mm256_storeu_si256(new_s_ptr.add(3), new_s3);
+
+            let old_c0 = _mm256_slli_epi16(_mm256_max_epi16(old_s0, zero), 2);
+            let old_c1 = _mm256_slli_epi16(_mm256_max_epi16(old_s1, zero), 2);
+            let new_c0 = _mm256_slli_epi16(_mm256_max_epi16(new_s0, zero), 2);
+            let new_c1 = _mm256_slli_epi16(_mm256_max_epi16(new_s1, zero), 2);
+
+            let cy = c.y as usize;
+            let cx = c.x as usize;
+            let mut outer_row = outer_next_base + cy * OUTER_BOARD_SIZE + cx;
+            let mut k = 0;
+            for _dy in 0..=2 {
+                for dx in 0..=2 {
+                    let mc_idx = *vo_ptr.add(outer_row + dx) as usize;
+                    let dst = map_conv_ptr.add(mc_idx) as *mut __m256i;
+                    let w_row = (*dw_weight_ptr.add(8 - k)).as_ptr() as *const __m256i;
+                    let dw0 = _mm256_loadu_si256(w_row);
+                    let dw1 = _mm256_loadu_si256(w_row.add(1));
+                    let d0 = _mm256_sub_epi16(
+                        _mm256_mulhi_epi16(dw0, new_c0),
+                        _mm256_mulhi_epi16(dw0, old_c0),
+                    );
+                    let d1 = _mm256_sub_epi16(
+                        _mm256_mulhi_epi16(dw1, new_c1),
+                        _mm256_mulhi_epi16(dw1, old_c1),
+                    );
+                    _mm256_storeu_si256(dst, _mm256_add_epi16(_mm256_loadu_si256(dst), d0));
+                    _mm256_storeu_si256(
+                        dst.add(1),
+                        _mm256_add_epi16(_mm256_loadu_si256(dst.add(1)), d1),
+                    );
+                    k += 1;
+                }
+                outer_row += OUTER_BOARD_SIZE;
+            }
+
+            let gi = *self.group_index.get_unchecked(cy);
+            let gj = *self.group_index.get_unchecked(cx);
+            let vg_ptr = vsum_group
+                .get_unchecked_mut(gi)
+                .get_unchecked_mut(gj)
+                .as_mut_ptr() as *mut __m256i;
+            let diff2 = _mm256_sub_epi16(
+                _mm256_max_epi16(new_s2, zero),
+                _mm256_max_epi16(old_s2, zero),
+            );
+            let diff3 = _mm256_sub_epi16(
+                _mm256_max_epi16(new_s3, zero),
+                _mm256_max_epi16(old_s3, zero),
+            );
+            let lo2 = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(diff2));
+            let hi2 = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(diff2, 1));
+            let lo3 = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(diff3));
+            let hi3 = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(diff3, 1));
+            _mm256_store_si256(
+                vg_ptr.add(4),
+                _mm256_add_epi32(_mm256_load_si256(vg_ptr.add(4)), lo2),
+            );
+            _mm256_store_si256(
+                vg_ptr.add(5),
+                _mm256_add_epi32(_mm256_load_si256(vg_ptr.add(5)), hi2),
+            );
+            _mm256_store_si256(
+                vg_ptr.add(6),
+                _mm256_add_epi32(_mm256_load_si256(vg_ptr.add(6)), lo3),
+            );
+            _mm256_store_si256(
+                vg_ptr.add(7),
+                _mm256_add_epi32(_mm256_load_si256(vg_ptr.add(7)), hi3),
+            );
+        }
+
+        // Commit dwconv deltas into new map_conv cells & accumulate channels 0..32
+        let mut commit_idx = change_num.outer as usize;
+        for yi in y0..=y1 {
+            let mut bits = (*STAR_CONV_MASK.get_unchecked(yi + 6 - y_plus_1) as u32) & clip_mask;
+            let gi = *self.group_index.get_unchecked(yi - 1);
+            let prev_row = outer_prev_base + yi * OUTER_BOARD_SIZE;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let xi = x_plus_1 + bit - 6;
+                let gj = *self.group_index.get_unchecked(xi - 1);
+                let old_conv_idx = *vo_ptr.add(prev_row + xi) as usize;
+                let old_ptr = map_conv_ptr.add(old_conv_idx) as *const __m256i;
+                let new_ptr = map_conv_ptr.add(commit_idx) as *mut __m256i;
+                let vg_ptr = vsum_group
+                    .get_unchecked_mut(gi)
+                    .get_unchecked_mut(gj)
+                    .as_mut_ptr() as *mut __m256i;
+
+                let old_v0 = _mm256_loadu_si256(old_ptr);
+                let new_v0 = _mm256_add_epi16(old_v0, _mm256_loadu_si256(new_ptr));
+                _mm256_storeu_si256(new_ptr, new_v0);
+                let diff0 = _mm256_sub_epi16(
+                    _mm256_max_epi16(new_v0, zero),
+                    _mm256_max_epi16(old_v0, zero),
+                );
+                let lo0 = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(diff0));
+                let hi0 = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(diff0, 1));
+                _mm256_store_si256(vg_ptr, _mm256_add_epi32(_mm256_load_si256(vg_ptr), lo0));
+                _mm256_store_si256(
+                    vg_ptr.add(1),
+                    _mm256_add_epi32(_mm256_load_si256(vg_ptr.add(1)), hi0),
+                );
+
+                let old_v1 = _mm256_loadu_si256(old_ptr.add(1));
+                let new_v1 = _mm256_add_epi16(old_v1, _mm256_loadu_si256(new_ptr.add(1)));
+                _mm256_storeu_si256(new_ptr.add(1), new_v1);
+                let diff1 = _mm256_sub_epi16(
+                    _mm256_max_epi16(new_v1, zero),
+                    _mm256_max_epi16(old_v1, zero),
+                );
+                let lo1 = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(diff1));
+                let hi1 = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(diff1, 1));
+                _mm256_store_si256(
+                    vg_ptr.add(2),
+                    _mm256_add_epi32(_mm256_load_si256(vg_ptr.add(2)), lo1),
+                );
+                _mm256_store_si256(
+                    vg_ptr.add(3),
+                    _mm256_add_epi32(_mm256_load_si256(vg_ptr.add(3)), hi1),
+                );
+
+                commit_idx += 1;
+            }
+        }
+
+        self.current_version += 1;
+        let next_ver = self.current_version as usize;
+        *self.version_change_num.get_unchecked_mut(next_ver) = ChangeNum {
+            inner: new_map_idx as u16,
+            outer: commit_idx as u16,
+        };
+
+        let vs_ptr = self.value_sum_table.as_mut_ptr();
+        let prev_vs = &*vs_ptr.add(ver);
+        let next_vs = &mut *vs_ptr.add(next_ver);
+        for b in 0..8 {
+            let off = b * 8;
+            let mut g_acc = zero;
+            for i in 0..3 {
+                for j in 0..3 {
+                    let old_v =
+                        _mm256_loadu_si256(prev_vs.group[i][j].as_ptr().add(off) as *const __m256i);
+                    let del_v =
+                        _mm256_load_si256(vsum_group[i][j].as_ptr().add(off) as *const __m256i);
+                    let new_v = _mm256_add_epi32(old_v, del_v);
+                    _mm256_storeu_si256(
+                        next_vs.group[i][j].as_mut_ptr().add(off) as *mut __m256i,
+                        new_v,
+                    );
+                    g_acc = _mm256_add_epi32(g_acc, new_v);
+                }
+            }
+            _mm256_storeu_si256(next_vs.global.as_mut_ptr().add(off) as *mut __m256i, g_acc);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn play_move_neon(&mut self, w: &Mix9svqWeight, piece_color: u8, x: usize, y: usize) {
+        self.play_move_scalar_or_neon(w, piece_color, x, y, true);
+    }
+
+    fn play_move_scalar(&mut self, w: &Mix9svqWeight, piece_color: u8, x: usize, y: usize) {
+        self.play_move_scalar_or_neon(w, piece_color, x, y, false);
+    }
+
+    fn play_move_scalar_or_neon(
+        &mut self,
+        w: &Mix9svqWeight,
+        piece_color: u8,
+        x: usize,
+        y: usize,
+        _use_neon: bool,
+    ) {
         let ver = self.current_version as usize;
         let inner_prev_base = ver * BOARD_AREA;
         let inner_next_base = inner_prev_base + BOARD_AREA;
@@ -1118,88 +1656,121 @@ impl Mix9svqAccumulator {
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
     unsafe fn evaluate_value_logits_avx2(&self, w: &Mix9svqWeight) -> ([i32; 4], (f32, f32, f32)) {
-        let value_sum = &self.value_sum_table[self.current_version as usize];
+        use std::mem::MaybeUninit;
+        let value_sum = self
+            .value_sum_table
+            .get_unchecked(self.current_version as usize);
         let b = &w.bucket;
 
-        let mut layer0 = [0_i8; FEATURE_DIM + VALUE_DIM * 4];
-        let mut global_i8 = [0_i8; FEATURE_DIM];
-        crelu_i32_to_i8_avx2::<FEATURE_DIM, 8, true>(&mut global_i8, &value_sum.global);
-        layer0[..FEATURE_DIM].copy_from_slice(&global_i8);
+        let mut layer0 = MaybeUninit::<[i8; FEATURE_DIM + VALUE_DIM * 4]>::uninit();
+        let layer0_ptr = layer0.as_mut_ptr() as *mut i8;
+        crelu_i32_to_i8_avx2::<FEATURE_DIM, 8, true>(
+            &mut *(layer0_ptr as *mut [i8; FEATURE_DIM]),
+            &value_sum.global,
+        );
 
-        let mut group0 = [[[0_i8; FEATURE_DIM]; 3]; 3];
+        let mut group0 = MaybeUninit::<[[[i8; FEATURE_DIM]; 3]; 3]>::uninit();
+        let group0_mut = &mut *group0.as_mut_ptr();
         for i in 0..3 {
             for j in 0..3 {
                 crelu_i32_to_i8_avx2::<FEATURE_DIM, 5, true>(
-                    &mut group0[i][j],
+                    &mut group0_mut[i][j],
                     &value_sum.group[i][j],
                 );
             }
         }
+        let group0_ref = &*group0.as_ptr();
 
-        let mut group1 = [[[0_i8; VALUE_DIM]; 3]; 3];
-        star_block_avx2(&mut group1[0][0], &group0[0][0], &b.value_corner);
-        star_block_avx2(&mut group1[0][2], &group0[0][2], &b.value_corner);
-        star_block_avx2(&mut group1[2][0], &group0[2][0], &b.value_corner);
-        star_block_avx2(&mut group1[2][2], &group0[2][2], &b.value_corner);
+        let mut group1 = MaybeUninit::<[[[i8; VALUE_DIM]; 3]; 3]>::uninit();
+        let group1_mut = &mut *group1.as_mut_ptr();
+        star_block_avx2(&mut group1_mut[0][0], &group0_ref[0][0], &b.value_corner);
+        star_block_avx2(&mut group1_mut[0][2], &group0_ref[0][2], &b.value_corner);
+        star_block_avx2(&mut group1_mut[2][0], &group0_ref[2][0], &b.value_corner);
+        star_block_avx2(&mut group1_mut[2][2], &group0_ref[2][2], &b.value_corner);
 
-        star_block_avx2(&mut group1[0][1], &group0[0][1], &b.value_edge);
-        star_block_avx2(&mut group1[1][0], &group0[1][0], &b.value_edge);
-        star_block_avx2(&mut group1[1][2], &group0[1][2], &b.value_edge);
-        star_block_avx2(&mut group1[2][1], &group0[2][1], &b.value_edge);
+        star_block_avx2(&mut group1_mut[0][1], &group0_ref[0][1], &b.value_edge);
+        star_block_avx2(&mut group1_mut[1][0], &group0_ref[1][0], &b.value_edge);
+        star_block_avx2(&mut group1_mut[1][2], &group0_ref[1][2], &b.value_edge);
+        star_block_avx2(&mut group1_mut[2][1], &group0_ref[2][1], &b.value_edge);
 
-        star_block_avx2(&mut group1[1][1], &group0[1][1], &b.value_center);
+        star_block_avx2(&mut group1_mut[1][1], &group0_ref[1][1], &b.value_center);
+        let group1_ref = &*group1.as_ptr();
 
-        let mut q00 = [0_i8; VALUE_DIM];
-        let mut q01 = [0_i8; VALUE_DIM];
-        let mut q10 = [0_i8; VALUE_DIM];
-        let mut q11 = [0_i8; VALUE_DIM];
-        avg_pool_2x2_u8_avx2(&mut q00, &mut q01, &mut q10, &mut q11, &group1);
+        let mut q00 = MaybeUninit::<[i8; VALUE_DIM]>::uninit();
+        let mut q01 = MaybeUninit::<[i8; VALUE_DIM]>::uninit();
+        let mut q10 = MaybeUninit::<[i8; VALUE_DIM]>::uninit();
+        let mut q11 = MaybeUninit::<[i8; VALUE_DIM]>::uninit();
+        avg_pool_2x2_u8_avx2(
+            &mut *q00.as_mut_ptr(),
+            &mut *q01.as_mut_ptr(),
+            &mut *q10.as_mut_ptr(),
+            &mut *q11.as_mut_ptr(),
+            group1_ref,
+        );
 
-        let mut quad_out = [[0_i8; VALUE_DIM]; 4];
-        star_block_avx2(&mut quad_out[0], &q00, &b.value_quad);
-        star_block_avx2(&mut quad_out[1], &q01, &b.value_quad);
-        star_block_avx2(&mut quad_out[2], &q10, &b.value_quad);
-        star_block_avx2(&mut quad_out[3], &q11, &b.value_quad);
-        for q in 0..4 {
-            let off = FEATURE_DIM + q * VALUE_DIM;
-            layer0[off..off + VALUE_DIM].copy_from_slice(&quad_out[q]);
-        }
+        star_block_avx2(
+            &mut *(layer0_ptr.add(FEATURE_DIM) as *mut [i8; VALUE_DIM]),
+            &*q00.as_ptr(),
+            &b.value_quad,
+        );
+        star_block_avx2(
+            &mut *(layer0_ptr.add(FEATURE_DIM + VALUE_DIM) as *mut [i8; VALUE_DIM]),
+            &*q01.as_ptr(),
+            &b.value_quad,
+        );
+        star_block_avx2(
+            &mut *(layer0_ptr.add(FEATURE_DIM + 2 * VALUE_DIM) as *mut [i8; VALUE_DIM]),
+            &*q10.as_ptr(),
+            &b.value_quad,
+        );
+        star_block_avx2(
+            &mut *(layer0_ptr.add(FEATURE_DIM + 3 * VALUE_DIM) as *mut [i8; VALUE_DIM]),
+            &*q11.as_ptr(),
+            &b.value_quad,
+        );
+        let layer0_ref = &*layer0.as_ptr();
 
-        let mut l1_i32 = [0_i32; VALUE_DIM];
-        let mut l1 = [0_i8; VALUE_DIM];
+        let mut l1_i32 = MaybeUninit::<[i32; VALUE_DIM]>::uninit();
+        let mut l1 = MaybeUninit::<[i8; VALUE_DIM]>::uninit();
         linear_i8_chunk4_avx2::<VALUE_DIM, { FEATURE_DIM + VALUE_DIM * 4 }, false>(
-            &mut l1_i32,
-            &layer0,
+            &mut *l1_i32.as_mut_ptr(),
+            layer0_ref,
             &b.value_l1.weight,
             &b.value_l1.bias,
         );
-        crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(&mut l1, &l1_i32);
+        crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(&mut *l1.as_mut_ptr(), &*l1_i32.as_ptr());
 
-        let mut l2_i32 = [0_i32; VALUE_DIM];
-        let mut l2 = [0_i8; VALUE_DIM];
+        let mut l2_i32 = MaybeUninit::<[i32; VALUE_DIM]>::uninit();
+        let mut l2 = MaybeUninit::<[i8; VALUE_DIM]>::uninit();
         linear_i8_chunk4_avx2::<VALUE_DIM, VALUE_DIM, false>(
-            &mut l2_i32,
-            &l1,
+            &mut *l2_i32.as_mut_ptr(),
+            &*l1.as_ptr(),
             &b.value_l2.weight,
             &b.value_l2.bias,
         );
-        crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(&mut l2, &l2_i32);
+        crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(&mut *l2.as_mut_ptr(), &*l2_i32.as_ptr());
 
-        let mut l3_i32 = [0_i32; 4];
+        let mut l3_i32 = MaybeUninit::<[i32; 4]>::uninit();
         let l3_bias: [i32; 4] = [
             b.value_l3.bias[0],
             b.value_l3.bias[1],
             b.value_l3.bias[2],
             b.value_l3.bias[3],
         ];
-        linear_i8_row4_avx2::<VALUE_DIM>(&mut l3_i32, &l2, &b.value_l3.weight, &l3_bias);
+        linear_i8_row4_avx2::<VALUE_DIM>(
+            &mut *l3_i32.as_mut_ptr(),
+            &*l2.as_ptr(),
+            &b.value_l3.weight,
+            &l3_bias,
+        );
+        let l3 = l3_i32.assume_init();
         let scale = 1.0_f32 / (128.0 * 128.0);
         (
-            l3_i32,
+            l3,
             (
-                l3_i32[0] as f32 * scale,
-                l3_i32[1] as f32 * scale,
-                l3_i32[2] as f32 * scale,
+                l3[0] as f32 * scale,
+                l3[1] as f32 * scale,
+                l3[2] as f32 * scale,
             ),
         )
     }
@@ -1210,88 +1781,125 @@ impl Mix9svqAccumulator {
         &self,
         w: &Mix9svqWeight,
     ) -> ([i32; 4], (f32, f32, f32)) {
-        let value_sum = &self.value_sum_table[self.current_version as usize];
+        use std::mem::MaybeUninit;
+        let value_sum = self
+            .value_sum_table
+            .get_unchecked(self.current_version as usize);
         let b = &w.bucket;
 
-        let mut layer0 = [0_i8; FEATURE_DIM + VALUE_DIM * 4];
-        let mut global_i8 = [0_i8; FEATURE_DIM];
-        crelu_i32_to_i8_avx2::<FEATURE_DIM, 8, true>(&mut global_i8, &value_sum.global);
-        layer0[..FEATURE_DIM].copy_from_slice(&global_i8);
+        let mut layer0 = MaybeUninit::<[i8; FEATURE_DIM + VALUE_DIM * 4]>::uninit();
+        let layer0_ptr = layer0.as_mut_ptr() as *mut i8;
+        crelu_i32_to_i8_avx2::<FEATURE_DIM, 8, true>(
+            &mut *(layer0_ptr as *mut [i8; FEATURE_DIM]),
+            &value_sum.global,
+        );
 
-        let mut group0 = [[[0_i8; FEATURE_DIM]; 3]; 3];
+        let mut group0 = MaybeUninit::<[[[i8; FEATURE_DIM]; 3]; 3]>::uninit();
+        let group0_mut = &mut *group0.as_mut_ptr();
         for i in 0..3 {
             for j in 0..3 {
                 crelu_i32_to_i8_avx2::<FEATURE_DIM, 5, true>(
-                    &mut group0[i][j],
+                    &mut group0_mut[i][j],
                     &value_sum.group[i][j],
                 );
             }
         }
+        let group0_ref = &*group0.as_ptr();
 
-        let mut group1 = [[[0_i8; VALUE_DIM]; 3]; 3];
-        star_block_avxvnni(&mut group1[0][0], &group0[0][0], &b.value_corner);
-        star_block_avxvnni(&mut group1[0][2], &group0[0][2], &b.value_corner);
-        star_block_avxvnni(&mut group1[2][0], &group0[2][0], &b.value_corner);
-        star_block_avxvnni(&mut group1[2][2], &group0[2][2], &b.value_corner);
+        let mut group1 = MaybeUninit::<[[[i8; VALUE_DIM]; 3]; 3]>::uninit();
+        let g1_ptr = group1.as_mut_ptr() as *mut [i8; VALUE_DIM];
+        // Batch-4 shared-weight star_blocks for the 4 corners and 4 edges (4x lower weight traffic).
+        star_block_batch4_avxvnni(
+            &mut *g1_ptr.add(0),
+            &mut *g1_ptr.add(2),
+            &mut *g1_ptr.add(6),
+            &mut *g1_ptr.add(8),
+            &group0_ref[0][0],
+            &group0_ref[0][2],
+            &group0_ref[2][0],
+            &group0_ref[2][2],
+            &b.value_corner,
+        );
+        star_block_batch4_avxvnni(
+            &mut *g1_ptr.add(1),
+            &mut *g1_ptr.add(3),
+            &mut *g1_ptr.add(5),
+            &mut *g1_ptr.add(7),
+            &group0_ref[0][1],
+            &group0_ref[1][0],
+            &group0_ref[1][2],
+            &group0_ref[2][1],
+            &b.value_edge,
+        );
+        star_block_avxvnni(&mut *g1_ptr.add(4), &group0_ref[1][1], &b.value_center);
+        let group1_ref = &*group1.as_ptr();
 
-        star_block_avxvnni(&mut group1[0][1], &group0[0][1], &b.value_edge);
-        star_block_avxvnni(&mut group1[1][0], &group0[1][0], &b.value_edge);
-        star_block_avxvnni(&mut group1[1][2], &group0[1][2], &b.value_edge);
-        star_block_avxvnni(&mut group1[2][1], &group0[2][1], &b.value_edge);
+        let mut q00 = MaybeUninit::<[i8; VALUE_DIM]>::uninit();
+        let mut q01 = MaybeUninit::<[i8; VALUE_DIM]>::uninit();
+        let mut q10 = MaybeUninit::<[i8; VALUE_DIM]>::uninit();
+        let mut q11 = MaybeUninit::<[i8; VALUE_DIM]>::uninit();
+        avg_pool_2x2_u8_avx2(
+            &mut *q00.as_mut_ptr(),
+            &mut *q01.as_mut_ptr(),
+            &mut *q10.as_mut_ptr(),
+            &mut *q11.as_mut_ptr(),
+            group1_ref,
+        );
 
-        star_block_avxvnni(&mut group1[1][1], &group0[1][1], &b.value_center);
+        star_block_batch4_avxvnni(
+            &mut *(layer0_ptr.add(FEATURE_DIM) as *mut [i8; VALUE_DIM]),
+            &mut *(layer0_ptr.add(FEATURE_DIM + VALUE_DIM) as *mut [i8; VALUE_DIM]),
+            &mut *(layer0_ptr.add(FEATURE_DIM + 2 * VALUE_DIM) as *mut [i8; VALUE_DIM]),
+            &mut *(layer0_ptr.add(FEATURE_DIM + 3 * VALUE_DIM) as *mut [i8; VALUE_DIM]),
+            &*q00.as_ptr(),
+            &*q01.as_ptr(),
+            &*q10.as_ptr(),
+            &*q11.as_ptr(),
+            &b.value_quad,
+        );
+        let layer0_ref = &*layer0.as_ptr();
 
-        let mut q00 = [0_i8; VALUE_DIM];
-        let mut q01 = [0_i8; VALUE_DIM];
-        let mut q10 = [0_i8; VALUE_DIM];
-        let mut q11 = [0_i8; VALUE_DIM];
-        avg_pool_2x2_u8_avx2(&mut q00, &mut q01, &mut q10, &mut q11, &group1);
-
-        let mut quad_out = [[0_i8; VALUE_DIM]; 4];
-        star_block_avxvnni(&mut quad_out[0], &q00, &b.value_quad);
-        star_block_avxvnni(&mut quad_out[1], &q01, &b.value_quad);
-        star_block_avxvnni(&mut quad_out[2], &q10, &b.value_quad);
-        star_block_avxvnni(&mut quad_out[3], &q11, &b.value_quad);
-        for q in 0..4 {
-            let off = FEATURE_DIM + q * VALUE_DIM;
-            layer0[off..off + VALUE_DIM].copy_from_slice(&quad_out[q]);
-        }
-
-        let mut l1_i32 = [0_i32; VALUE_DIM];
-        let mut l1 = [0_i8; VALUE_DIM];
+        let mut l1_i32 = MaybeUninit::<[i32; VALUE_DIM]>::uninit();
+        let mut l1 = MaybeUninit::<[i8; VALUE_DIM]>::uninit();
         linear_i8_chunk4_avxvnni::<VALUE_DIM, { FEATURE_DIM + VALUE_DIM * 4 }, false>(
-            &mut l1_i32,
-            &layer0,
+            &mut *l1_i32.as_mut_ptr(),
+            layer0_ref,
             &b.value_l1.weight,
             &b.value_l1.bias,
         );
-        crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(&mut l1, &l1_i32);
+        crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(&mut *l1.as_mut_ptr(), &*l1_i32.as_ptr());
 
-        let mut l2_i32 = [0_i32; VALUE_DIM];
-        let mut l2 = [0_i8; VALUE_DIM];
+        let mut l2_i32 = MaybeUninit::<[i32; VALUE_DIM]>::uninit();
+        let mut l2 = MaybeUninit::<[i8; VALUE_DIM]>::uninit();
         linear_i8_chunk4_avxvnni::<VALUE_DIM, VALUE_DIM, false>(
-            &mut l2_i32,
-            &l1,
+            &mut *l2_i32.as_mut_ptr(),
+            &*l1.as_ptr(),
             &b.value_l2.weight,
             &b.value_l2.bias,
         );
-        crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(&mut l2, &l2_i32);
+        crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(&mut *l2.as_mut_ptr(), &*l2_i32.as_ptr());
 
-        let mut l3_i32 = [0_i32; 4];
+        let mut l3_i32 = MaybeUninit::<[i32; 4]>::uninit();
         let l3_bias: [i32; 4] = [
             b.value_l3.bias[0],
             b.value_l3.bias[1],
             b.value_l3.bias[2],
             b.value_l3.bias[3],
         ];
-        linear_i8_row4_avxvnni::<VALUE_DIM>(&mut l3_i32, &l2, &b.value_l3.weight, &l3_bias);
+        linear_i8_row4_avxvnni::<VALUE_DIM>(
+            &mut *l3_i32.as_mut_ptr(),
+            &*l2.as_ptr(),
+            &b.value_l3.weight,
+            &l3_bias,
+        );
+        let l3 = l3_i32.assume_init();
         let scale = 1.0_f32 / (128.0 * 128.0);
         (
-            l3_i32,
+            l3,
             (
-                l3_i32[0] as f32 * scale,
-                l3_i32[1] as f32 * scale,
-                l3_i32[2] as f32 * scale,
+                l3[0] as f32 * scale,
+                l3[1] as f32 * scale,
+                l3[2] as f32 * scale,
             ),
         )
     }
@@ -1586,54 +2194,72 @@ impl Mix9svqAccumulator {
         moves: &[crate::types::Move],
         out_scores: &mut [f32],
     ) {
-        let value_sum = &self.value_sum_table[self.current_version as usize];
+        use std::mem::MaybeUninit;
+        let value_sum = self
+            .value_sum_table
+            .get_unchecked(self.current_version as usize);
         let b = &w.bucket;
 
-        let mut layer0 = [0_i8; FEATURE_DIM];
-        crelu_i32_to_i8_avx2::<FEATURE_DIM, 8, true>(&mut layer0, &value_sum.global);
+        let mut layer0 = MaybeUninit::<[i8; FEATURE_DIM]>::uninit();
+        crelu_i32_to_i8_avx2::<FEATURE_DIM, 8, true>(&mut *layer0.as_mut_ptr(), &value_sum.global);
 
-        let mut l1_i32 = [0_i32; POLICY_DIM * 2];
-        let mut l1 = [0_i8; POLICY_DIM * 2];
+        let mut l1_i32 = MaybeUninit::<[i32; POLICY_DIM * 2]>::uninit();
+        let mut l1 = MaybeUninit::<[i8; POLICY_DIM * 2]>::uninit();
         linear_i8_chunk4_avxvnni::<{ POLICY_DIM * 2 }, FEATURE_DIM, false>(
-            &mut l1_i32,
-            &layer0,
+            &mut *l1_i32.as_mut_ptr(),
+            &*layer0.as_ptr(),
             &b.policy_pwconv_l1.weight,
             &b.policy_pwconv_l1.bias,
         );
-        crelu_i32_to_i8_avx2::<{ POLICY_DIM * 2 }, 7, false>(&mut l1, &l1_i32);
+        crelu_i32_to_i8_avx2::<{ POLICY_DIM * 2 }, 7, false>(
+            &mut *l1.as_mut_ptr(),
+            &*l1_i32.as_ptr(),
+        );
 
         const L2_OUT: usize = POLICY_PWCONV_DIM * POLICY_DIM + POLICY_PWCONV_DIM;
-        let mut l2_i32 = [0_i32; L2_OUT];
+        let mut l2_i32 = MaybeUninit::<[i32; L2_OUT]>::uninit();
         linear_i8_chunk4_avxvnni::<L2_OUT, { POLICY_DIM * 2 }, false>(
-            &mut l2_i32,
-            &l1,
+            &mut *l2_i32.as_mut_ptr(),
+            &*l1.as_ptr(),
             &b.policy_pwconv_l2.weight,
             &b.policy_pwconv_l2.bias,
         );
-        let mut pw_w = [0_i16; POLICY_PWCONV_DIM * POLICY_DIM];
-        let l2_head: &[i32; POLICY_PWCONV_DIM * POLICY_DIM] =
-            l2_i32[..POLICY_PWCONV_DIM * POLICY_DIM].try_into().unwrap();
-        crelu_i32_to_i16_avx2::<{ POLICY_PWCONV_DIM * POLICY_DIM }, 0, true>(&mut pw_w, l2_head);
-        let mut pw_b = [0_i32; POLICY_PWCONV_DIM];
+        let l2_ptr = l2_i32.as_ptr() as *const i32;
+        let mut pw_w = MaybeUninit::<[i16; POLICY_PWCONV_DIM * POLICY_DIM]>::uninit();
+        crelu_i32_to_i16_avx2::<{ POLICY_PWCONV_DIM * POLICY_DIM }, 0, true>(
+            &mut *pw_w.as_mut_ptr(),
+            &*(l2_ptr as *const [i32; POLICY_PWCONV_DIM * POLICY_DIM]),
+        );
+        let pw_w_ref = &*pw_w.as_ptr();
+        let mut pw_b = MaybeUninit::<[i32; POLICY_PWCONV_DIM]>::uninit();
+        let pw_b_ptr = pw_b.as_mut_ptr() as *mut i32;
         for i in 0..POLICY_PWCONV_DIM {
-            pw_b[i] = l2_i32[POLICY_PWCONV_DIM * POLICY_DIM + i] << 7;
+            *pw_b_ptr.add(i) = *l2_ptr.add(POLICY_PWCONV_DIM * POLICY_DIM + i) << 7;
         }
+        let pw_b_ref = &*pw_b.as_ptr();
 
-        let outer_ver_base = (self.current_version as usize) * OUTER_BOARD_AREA;
-        let mut p_i32 = [0_i32; POLICY_PWCONV_DIM];
-        for (dst, &m) in out_scores.iter_mut().zip(moves.iter()) {
-            let idx = m as usize;
-            let y = idx / BOARD_SIZE;
-            let x = idx % BOARD_SIZE;
-            let outer_idx = (y + 1) * OUTER_BOARD_SIZE + (x + 1);
-            let mc_idx = self.version_outer_index[outer_ver_base + outer_idx] as usize;
+        let outer_ver_ptr = self
+            .version_outer_index
+            .as_ptr()
+            .add((self.current_version as usize) * OUTER_BOARD_AREA);
+        let map_conv_ptr = self.map_conv.as_ptr();
+        let mut p_i32 = MaybeUninit::<[i32; POLICY_PWCONV_DIM]>::uninit();
+        let n = moves.len().min(out_scores.len());
+        for i in 0..n {
+            let idx = *moves.get_unchecked(i) as usize;
+            let outer_idx = *INNER_TO_OUTER.get_unchecked(idx) as usize;
+            let mc_idx = *outer_ver_ptr.add(outer_idx) as usize;
             linear_i16_chunk2_prerelu_avx2::<POLICY_PWCONV_DIM, POLICY_DIM>(
-                &mut p_i32,
-                &self.map_conv[mc_idx],
-                &pw_w,
-                &pw_b,
+                &mut *p_i32.as_mut_ptr(),
+                &*map_conv_ptr.add(mc_idx),
+                pw_w_ref,
+                pw_b_ref,
             );
-            *dst = policy_dot16_avx2(&p_i32, &b.policy_output_weight, b.policy_output_bias);
+            *out_scores.get_unchecked_mut(i) = policy_dot16_avx2(
+                &*p_i32.as_ptr(),
+                &b.policy_output_weight,
+                b.policy_output_bias,
+            );
         }
     }
 
@@ -1645,54 +2271,72 @@ impl Mix9svqAccumulator {
         moves: &[crate::types::Move],
         out_scores: &mut [f32],
     ) {
-        let value_sum = &self.value_sum_table[self.current_version as usize];
+        use std::mem::MaybeUninit;
+        let value_sum = self
+            .value_sum_table
+            .get_unchecked(self.current_version as usize);
         let b = &w.bucket;
 
-        let mut layer0 = [0_i8; FEATURE_DIM];
-        crelu_i32_to_i8_avx2::<FEATURE_DIM, 8, true>(&mut layer0, &value_sum.global);
+        let mut layer0 = MaybeUninit::<[i8; FEATURE_DIM]>::uninit();
+        crelu_i32_to_i8_avx2::<FEATURE_DIM, 8, true>(&mut *layer0.as_mut_ptr(), &value_sum.global);
 
-        let mut l1_i32 = [0_i32; POLICY_DIM * 2];
-        let mut l1 = [0_i8; POLICY_DIM * 2];
+        let mut l1_i32 = MaybeUninit::<[i32; POLICY_DIM * 2]>::uninit();
+        let mut l1 = MaybeUninit::<[i8; POLICY_DIM * 2]>::uninit();
         linear_i8_chunk4_avx2::<{ POLICY_DIM * 2 }, FEATURE_DIM, false>(
-            &mut l1_i32,
-            &layer0,
+            &mut *l1_i32.as_mut_ptr(),
+            &*layer0.as_ptr(),
             &b.policy_pwconv_l1.weight,
             &b.policy_pwconv_l1.bias,
         );
-        crelu_i32_to_i8_avx2::<{ POLICY_DIM * 2 }, 7, false>(&mut l1, &l1_i32);
+        crelu_i32_to_i8_avx2::<{ POLICY_DIM * 2 }, 7, false>(
+            &mut *l1.as_mut_ptr(),
+            &*l1_i32.as_ptr(),
+        );
 
         const L2_OUT: usize = POLICY_PWCONV_DIM * POLICY_DIM + POLICY_PWCONV_DIM;
-        let mut l2_i32 = [0_i32; L2_OUT];
+        let mut l2_i32 = MaybeUninit::<[i32; L2_OUT]>::uninit();
         linear_i8_chunk4_avx2::<L2_OUT, { POLICY_DIM * 2 }, false>(
-            &mut l2_i32,
-            &l1,
+            &mut *l2_i32.as_mut_ptr(),
+            &*l1.as_ptr(),
             &b.policy_pwconv_l2.weight,
             &b.policy_pwconv_l2.bias,
         );
-        let mut pw_w = [0_i16; POLICY_PWCONV_DIM * POLICY_DIM];
-        let l2_head: &[i32; POLICY_PWCONV_DIM * POLICY_DIM] =
-            l2_i32[..POLICY_PWCONV_DIM * POLICY_DIM].try_into().unwrap();
-        crelu_i32_to_i16_avx2::<{ POLICY_PWCONV_DIM * POLICY_DIM }, 0, true>(&mut pw_w, l2_head);
-        let mut pw_b = [0_i32; POLICY_PWCONV_DIM];
+        let l2_ptr = l2_i32.as_ptr() as *const i32;
+        let mut pw_w = MaybeUninit::<[i16; POLICY_PWCONV_DIM * POLICY_DIM]>::uninit();
+        crelu_i32_to_i16_avx2::<{ POLICY_PWCONV_DIM * POLICY_DIM }, 0, true>(
+            &mut *pw_w.as_mut_ptr(),
+            &*(l2_ptr as *const [i32; POLICY_PWCONV_DIM * POLICY_DIM]),
+        );
+        let pw_w_ref = &*pw_w.as_ptr();
+        let mut pw_b = MaybeUninit::<[i32; POLICY_PWCONV_DIM]>::uninit();
+        let pw_b_ptr = pw_b.as_mut_ptr() as *mut i32;
         for i in 0..POLICY_PWCONV_DIM {
-            pw_b[i] = l2_i32[POLICY_PWCONV_DIM * POLICY_DIM + i] << 7;
+            *pw_b_ptr.add(i) = *l2_ptr.add(POLICY_PWCONV_DIM * POLICY_DIM + i) << 7;
         }
+        let pw_b_ref = &*pw_b.as_ptr();
 
-        let outer_ver_base = (self.current_version as usize) * OUTER_BOARD_AREA;
-        let mut p_i32 = [0_i32; POLICY_PWCONV_DIM];
-        for (dst, &m) in out_scores.iter_mut().zip(moves.iter()) {
-            let idx = m as usize;
-            let y = idx / BOARD_SIZE;
-            let x = idx % BOARD_SIZE;
-            let outer_idx = (y + 1) * OUTER_BOARD_SIZE + (x + 1);
-            let mc_idx = self.version_outer_index[outer_ver_base + outer_idx] as usize;
+        let outer_ver_ptr = self
+            .version_outer_index
+            .as_ptr()
+            .add((self.current_version as usize) * OUTER_BOARD_AREA);
+        let map_conv_ptr = self.map_conv.as_ptr();
+        let mut p_i32 = MaybeUninit::<[i32; POLICY_PWCONV_DIM]>::uninit();
+        let n = moves.len().min(out_scores.len());
+        for i in 0..n {
+            let idx = *moves.get_unchecked(i) as usize;
+            let outer_idx = *INNER_TO_OUTER.get_unchecked(idx) as usize;
+            let mc_idx = *outer_ver_ptr.add(outer_idx) as usize;
             linear_i16_chunk2_prerelu_avx2::<POLICY_PWCONV_DIM, POLICY_DIM>(
-                &mut p_i32,
-                &self.map_conv[mc_idx],
-                &pw_w,
-                &pw_b,
+                &mut *p_i32.as_mut_ptr(),
+                &*map_conv_ptr.add(mc_idx),
+                pw_w_ref,
+                pw_b_ref,
             );
-            *dst = policy_dot16_avx2(&p_i32, &b.policy_output_weight, b.policy_output_bias);
+            *out_scores.get_unchecked_mut(i) = policy_dot16_avx2(
+                &*p_i32.as_ptr(),
+                &b.policy_output_weight,
+                b.policy_output_bias,
+            );
         }
     }
 
@@ -2148,37 +2792,38 @@ unsafe fn star_block_avx2(
     input: &[i8; FEATURE_DIM],
     w: &StarBlockWeight<VALUE_DIM, FEATURE_DIM>,
 ) {
-    let mut up_i32 = [0_i32; VALUE_DIM * 2];
-    let mut up1 = [0_i8; VALUE_DIM * 2];
-    let mut up2 = [0_i8; VALUE_DIM * 2];
+    use std::mem::MaybeUninit;
+    let mut up_i32 = MaybeUninit::<[i32; VALUE_DIM * 2]>::uninit();
+    let mut up1 = MaybeUninit::<[i8; VALUE_DIM * 2]>::uninit();
+    let mut up2 = MaybeUninit::<[i8; VALUE_DIM * 2]>::uninit();
 
     linear_i8_chunk4_avx2::<{ VALUE_DIM * 2 }, FEATURE_DIM, false>(
-        &mut up_i32,
+        &mut *up_i32.as_mut_ptr(),
         input,
         &w.up1.weight,
         &w.up1.bias,
     );
-    crelu_i32_to_i8_avx2::<{ VALUE_DIM * 2 }, 7, false>(&mut up1, &up_i32);
+    crelu_i32_to_i8_avx2::<{ VALUE_DIM * 2 }, 7, false>(&mut *up1.as_mut_ptr(), &*up_i32.as_ptr());
 
     linear_i8_chunk4_avx2::<{ VALUE_DIM * 2 }, FEATURE_DIM, false>(
-        &mut up_i32,
+        &mut *up_i32.as_mut_ptr(),
         input,
         &w.up2.weight,
         &w.up2.bias,
     );
-    crelu_i32_to_i8_avx2::<{ VALUE_DIM * 2 }, 7, true>(&mut up2, &up_i32);
+    crelu_i32_to_i8_avx2::<{ VALUE_DIM * 2 }, 7, true>(&mut *up2.as_mut_ptr(), &*up_i32.as_ptr());
 
-    let mut dotsum = [0_i8; VALUE_DIM];
-    dot2_u7i8_avx2::<VALUE_DIM, 7>(&mut dotsum, &up1, &up2);
+    let mut dotsum = MaybeUninit::<[i8; VALUE_DIM]>::uninit();
+    dot2_u7i8_avx2::<VALUE_DIM, 7>(&mut *dotsum.as_mut_ptr(), &*up1.as_ptr(), &*up2.as_ptr());
 
-    let mut out_i32 = [0_i32; VALUE_DIM];
+    let mut out_i32 = MaybeUninit::<[i32; VALUE_DIM]>::uninit();
     linear_i8_chunk4_avx2::<VALUE_DIM, VALUE_DIM, true>(
-        &mut out_i32,
-        &dotsum,
+        &mut *out_i32.as_mut_ptr(),
+        &*dotsum.as_ptr(),
         &w.down.weight,
         &w.down.bias,
     );
-    crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(output, &out_i32);
+    crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(output, &*out_i32.as_ptr());
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -2188,37 +2833,124 @@ unsafe fn star_block_avxvnni(
     input: &[i8; FEATURE_DIM],
     w: &StarBlockWeight<VALUE_DIM, FEATURE_DIM>,
 ) {
-    let mut up_i32 = [0_i32; VALUE_DIM * 2];
-    let mut up1 = [0_i8; VALUE_DIM * 2];
-    let mut up2 = [0_i8; VALUE_DIM * 2];
+    use std::mem::MaybeUninit;
+    let mut up_i32 = MaybeUninit::<[i32; VALUE_DIM * 2]>::uninit();
+    let mut up1 = MaybeUninit::<[i8; VALUE_DIM * 2]>::uninit();
+    let mut up2 = MaybeUninit::<[i8; VALUE_DIM * 2]>::uninit();
 
     linear_i8_chunk4_avxvnni::<{ VALUE_DIM * 2 }, FEATURE_DIM, false>(
-        &mut up_i32,
+        &mut *up_i32.as_mut_ptr(),
         input,
         &w.up1.weight,
         &w.up1.bias,
     );
-    crelu_i32_to_i8_avx2::<{ VALUE_DIM * 2 }, 7, false>(&mut up1, &up_i32);
+    crelu_i32_to_i8_avx2::<{ VALUE_DIM * 2 }, 7, false>(&mut *up1.as_mut_ptr(), &*up_i32.as_ptr());
 
     linear_i8_chunk4_avxvnni::<{ VALUE_DIM * 2 }, FEATURE_DIM, false>(
-        &mut up_i32,
+        &mut *up_i32.as_mut_ptr(),
         input,
         &w.up2.weight,
         &w.up2.bias,
     );
-    crelu_i32_to_i8_avx2::<{ VALUE_DIM * 2 }, 7, true>(&mut up2, &up_i32);
+    crelu_i32_to_i8_avx2::<{ VALUE_DIM * 2 }, 7, true>(&mut *up2.as_mut_ptr(), &*up_i32.as_ptr());
 
-    let mut dotsum = [0_i8; VALUE_DIM];
-    dot2_u7i8_avx2::<VALUE_DIM, 7>(&mut dotsum, &up1, &up2);
+    let mut dotsum = MaybeUninit::<[i8; VALUE_DIM]>::uninit();
+    dot2_u7i8_avx2::<VALUE_DIM, 7>(&mut *dotsum.as_mut_ptr(), &*up1.as_ptr(), &*up2.as_ptr());
 
-    let mut out_i32 = [0_i32; VALUE_DIM];
+    let mut out_i32 = MaybeUninit::<[i32; VALUE_DIM]>::uninit();
     linear_i8_chunk4_avxvnni::<VALUE_DIM, VALUE_DIM, true>(
-        &mut out_i32,
-        &dotsum,
+        &mut *out_i32.as_mut_ptr(),
+        &*dotsum.as_ptr(),
         &w.down.weight,
         &w.down.signed_bias,
     );
-    crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(output, &out_i32);
+    crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(output, &*out_i32.as_ptr());
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,avxvnni")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn star_block_batch4_avxvnni(
+    out0: &mut [i8; VALUE_DIM],
+    out1: &mut [i8; VALUE_DIM],
+    out2: &mut [i8; VALUE_DIM],
+    out3: &mut [i8; VALUE_DIM],
+    in0: &[i8; FEATURE_DIM],
+    in1: &[i8; FEATURE_DIM],
+    in2: &[i8; FEATURE_DIM],
+    in3: &[i8; FEATURE_DIM],
+    w: &StarBlockWeight<VALUE_DIM, FEATURE_DIM>,
+) {
+    use std::mem::MaybeUninit;
+    let mut up_i32 = MaybeUninit::<[[i32; VALUE_DIM * 2]; 4]>::uninit();
+    let up_i32_ptr = up_i32.as_mut_ptr() as *mut [i32; VALUE_DIM * 2];
+    let mut up1 = MaybeUninit::<[[i8; VALUE_DIM * 2]; 4]>::uninit();
+    let up1_ptr = up1.as_mut_ptr() as *mut [i8; VALUE_DIM * 2];
+    let mut up2 = MaybeUninit::<[[i8; VALUE_DIM * 2]; 4]>::uninit();
+    let up2_ptr = up2.as_mut_ptr() as *mut [i8; VALUE_DIM * 2];
+
+    linear_i8_chunk4_batch4_avxvnni::<{ VALUE_DIM * 2 }, FEATURE_DIM, false>(
+        &mut *up_i32_ptr.add(0),
+        &mut *up_i32_ptr.add(1),
+        &mut *up_i32_ptr.add(2),
+        &mut *up_i32_ptr.add(3),
+        in0,
+        in1,
+        in2,
+        in3,
+        &w.up1.weight,
+        &w.up1.bias,
+    );
+    for k in 0..4 {
+        crelu_i32_to_i8_avx2::<{ VALUE_DIM * 2 }, 7, false>(
+            &mut *up1_ptr.add(k),
+            &*up_i32_ptr.add(k),
+        );
+    }
+
+    linear_i8_chunk4_batch4_avxvnni::<{ VALUE_DIM * 2 }, FEATURE_DIM, false>(
+        &mut *up_i32_ptr.add(0),
+        &mut *up_i32_ptr.add(1),
+        &mut *up_i32_ptr.add(2),
+        &mut *up_i32_ptr.add(3),
+        in0,
+        in1,
+        in2,
+        in3,
+        &w.up2.weight,
+        &w.up2.bias,
+    );
+    for k in 0..4 {
+        crelu_i32_to_i8_avx2::<{ VALUE_DIM * 2 }, 7, true>(
+            &mut *up2_ptr.add(k),
+            &*up_i32_ptr.add(k),
+        );
+    }
+
+    let mut dotsum = MaybeUninit::<[[i8; VALUE_DIM]; 4]>::uninit();
+    let ds_ptr = dotsum.as_mut_ptr() as *mut [i8; VALUE_DIM];
+    for k in 0..4 {
+        dot2_u7i8_avx2::<VALUE_DIM, 7>(&mut *ds_ptr.add(k), &*up1_ptr.add(k), &*up2_ptr.add(k));
+    }
+
+    let mut out_i32 = MaybeUninit::<[[i32; VALUE_DIM]; 4]>::uninit();
+    let oi_ptr = out_i32.as_mut_ptr() as *mut [i32; VALUE_DIM];
+    linear_i8_chunk4_batch4_avxvnni::<VALUE_DIM, VALUE_DIM, true>(
+        &mut *oi_ptr.add(0),
+        &mut *oi_ptr.add(1),
+        &mut *oi_ptr.add(2),
+        &mut *oi_ptr.add(3),
+        &*ds_ptr.add(0),
+        &*ds_ptr.add(1),
+        &*ds_ptr.add(2),
+        &*ds_ptr.add(3),
+        &w.down.weight,
+        &w.down.signed_bias,
+    );
+    crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(out0, &*oi_ptr.add(0));
+    crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(out1, &*oi_ptr.add(1));
+    crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(out2, &*oi_ptr.add(2));
+    crelu_i32_to_i8_avx2::<VALUE_DIM, 7, false>(out3, &*oi_ptr.add(3));
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -2509,12 +3241,15 @@ impl Mix9svqEvaluator {
 
     fn flush_move_cache(&mut self, slot: usize) {
         let cache = &mut self.move_cache[slot];
-        if cache.is_empty() {
+        let len = cache.len();
+        if len == 0 {
             return;
         }
         let acc = &mut self.accumulator[slot];
         let w = &self.weight[slot];
-        for entry in cache.drain(..) {
+        for i in 0..len {
+            // SAFETY: `i < len == cache.len()`, and `cache` is not mutated in the loop.
+            let entry = unsafe { *cache.get_unchecked(i) };
             if entry.old_color == COLOR_EMPTY {
                 let piece = if slot == 1 {
                     1 - entry.new_color
@@ -2526,6 +3261,7 @@ impl Mix9svqEvaluator {
                 acc.undo();
             }
         }
+        cache.clear();
     }
 
     /// Evaluate the current position from `side_to_move`'s perspective, returning

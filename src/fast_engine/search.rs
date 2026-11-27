@@ -2338,4 +2338,136 @@ mod tests {
             r_5ms.elapsed_ms
         );
     }
+
+    #[test]
+    #[ignore]
+    fn fast_engine_component_timing() {
+        let dir = Path::new("opponent/rapfi-networks/mix9svq");
+        if !dir.exists() {
+            return;
+        }
+        let mut eval = load_mix9svq_evaluator_for_rule(dir, RuleSet::Renju).expect("load mix9svq");
+        let mut legacy = Board::new();
+        let mut fb = FastBoard::new(RuleSet::Renju, CandRange::Square3Line4);
+        for &(x, y) in &[
+            (7, 7),
+            (7, 6),
+            (8, 6),
+            (6, 8),
+            (6, 6),
+            (8, 7),
+            (7, 5),
+            (7, 8),
+            (8, 5),
+            (6, 5),
+        ] {
+            let m = xy_to_move(x, y).unwrap();
+            legacy.play_for_rule(m, None, RuleSet::Renju).unwrap();
+            fb.play(m as usize);
+        }
+        eval.sync_with_board(&legacy);
+        let _ = eval.evaluate_value(BLACK);
+        let _ = eval.evaluate_value(WHITE);
+
+        // 1. Measure evaluator.clone() cost (1x and 4x)
+        let t0 = Instant::now();
+        for _ in 0..10 {
+            let c = eval.clone();
+            std::hint::black_box(&c);
+        }
+        let clone_ms = t0.elapsed().as_secs_f64() * 1000.0 / 10.0;
+
+        // 2. Measure play_move + undo (flushed)
+        let n_pm = 20_000;
+        let t1 = Instant::now();
+        for _ in 0..n_pm {
+            eval.before_move(BLACK, 9, 8);
+            let v = eval.evaluate_value(WHITE);
+            std::hint::black_box(v);
+            eval.after_undo(BLACK, 9, 8);
+            let _ = eval.evaluate_value(WHITE);
+        }
+        let pm_val_ns = t1.elapsed().as_nanos() as f64 / n_pm as f64;
+
+        // 3. Measure pure evaluate_value (already flushed)
+        let n_ev = 50_000;
+        let t2 = Instant::now();
+        for _ in 0..n_ev {
+            let v = eval.evaluate_value(BLACK);
+            std::hint::black_box(v);
+        }
+        let val_ns = t2.elapsed().as_nanos() as f64 / n_ev as f64;
+
+        // 4. Measure pure evaluate_policy_moves (30 candidates, already flushed)
+        let mut cands = Vec::new();
+        for pos in 0..BOARD_AREA {
+            if fb.is_empty(pos) && cands.len() < 30 {
+                cands.push(pos as u16);
+            }
+        }
+        let mut scores = [0.0_f32; 30];
+        let n_pol = 20_000;
+        let t3 = Instant::now();
+        for _ in 0..n_pol {
+            eval.evaluate_policy_moves(BLACK, &cands, &mut scores);
+            std::hint::black_box(&scores);
+        }
+        let pol_ns = t3.elapsed().as_nanos() as f64 / n_pol as f64;
+
+        // 5. Measure FastBoard play + undo
+        let n_fb = 200_000;
+        let t4 = Instant::now();
+        let mv_pos = 8 * BOARD_SIZE + 9;
+        for _ in 0..n_fb {
+            fb.play_typed::<true, true>(mv_pos);
+            fb.undo_typed::<true, true>();
+        }
+        let fb_ns = t4.elapsed().as_nanos() as f64 / n_fb as f64;
+
+        // 6. Measure full 1T and 4T search on mid10
+        let searcher = FastSearcher::new(32 * 1024);
+        let r1 = searcher.search(
+            &fb,
+            &eval,
+            &FastSearchConfig {
+                max_depth: 99,
+                time_limit_ms: Some(1000),
+                num_threads: 1,
+                ..Default::default()
+            },
+        );
+        searcher.clear_tt();
+        let r4 = searcher.search(
+            &fb,
+            &eval,
+            &FastSearchConfig {
+                max_depth: 99,
+                time_limit_ms: Some(1000),
+                num_threads: 4,
+                ..Default::default()
+            },
+        );
+        eprintln!(
+            "=== COMPONENT TIMING ===\n\
+             eval.clone()       : {clone_ms:.2} ms (4x = {:.2} ms)\n\
+             eval_value (pure)  : {val_ns:.0} ns\n\
+             play_move+val+undo : {pm_val_ns:.0} ns (implied play_move ~ {:.0} ns)\n\
+             eval_policy (30mv) : {pol_ns:.0} ns\n\
+             FastBoard play+undo: {fb_ns:.0} ns\n\
+             mid10 1T 1s        : d{}/{} nodes={} time={:.1}ms nps={:.0}\n\
+             mid10 4T 1s        : d{}/{} nodes={} time={:.1}ms nps={:.0}",
+            clone_ms * 4.0,
+            pm_val_ns - 2.0 * val_ns,
+            r1.depth,
+            r1.sel_depth,
+            r1.nodes,
+            r1.elapsed_ms,
+            r1.nodes as f64 / (r1.elapsed_ms / 1000.0),
+            r4.depth,
+            r4.sel_depth,
+            r4.nodes,
+            r4.elapsed_ms,
+            r4.nodes as f64 / (r4.elapsed_ms / 1000.0),
+        );
+    }
 }

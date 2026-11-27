@@ -952,6 +952,94 @@ pub unsafe fn linear_i8_row4_avxvnni<const IN: usize>(
     _mm_storeu_si128(output.as_mut_ptr() as *mut __m128i, _mm_add_epi32(total, b));
 }
 
+/// Batched 4-input AVX-VNNI chunk-4 i8 affine layer sharing a single weight matrix.
+/// Streams each 32-byte weight vector once for all 4 inputs (4x lower L1/L2 traffic
+/// and 4x higher compute-to-load ratio than 4 separate calls).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,avxvnni")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn linear_i8_chunk4_batch4_avxvnni<
+    const OUT: usize,
+    const IN: usize,
+    const SIGNED_INPUT: bool,
+>(
+    out0: &mut [i32; OUT],
+    out1: &mut [i32; OUT],
+    out2: &mut [i32; OUT],
+    out3: &mut [i32; OUT],
+    in0: &[i8; IN],
+    in1: &[i8; IN],
+    in2: &[i8; IN],
+    in3: &[i8; IN],
+    weight: &[i8],
+    bias: &[i32],
+) {
+    debug_assert_eq!(OUT % 16, 0);
+    debug_assert_eq!(IN % 4, 0);
+    let num_batches = OUT / 8;
+    let num_chunks = IN / 4;
+    let sign_flip = _mm256_set1_epi8(-128_i8);
+    let p0 = in0.as_ptr() as *const i32;
+    let p1 = in1.as_ptr() as *const i32;
+    let p2 = in2.as_ptr() as *const i32;
+    let p3 = in3.as_ptr() as *const i32;
+    let w_ptr = weight.as_ptr();
+    let b_ptr = bias.as_ptr();
+    let o0_ptr = out0.as_mut_ptr();
+    let o1_ptr = out1.as_mut_ptr();
+    let o2_ptr = out2.as_mut_ptr();
+    let o3_ptr = out3.as_mut_ptr();
+    let stride = OUT * 4;
+
+    let mut out_batch = 0;
+    while out_batch < num_batches {
+        let boff = out_batch * 8;
+        let b0 = _mm256_loadu_si256(b_ptr.add(boff) as *const __m256i);
+        let b1 = _mm256_loadu_si256(b_ptr.add(boff + 8) as *const __m256i);
+        let (mut a00, mut a01) = (b0, b1);
+        let (mut a10, mut a11) = (b0, b1);
+        let (mut a20, mut a21) = (b0, b1);
+        let (mut a30, mut a31) = (b0, b1);
+
+        let w_base = w_ptr.add(out_batch * 32);
+        for c in 0..num_chunks {
+            let wc = w_base.add(c * stride);
+            let w0 = _mm256_loadu_si256(wc as *const __m256i);
+            let w1 = _mm256_loadu_si256(wc.add(32) as *const __m256i);
+
+            let mut v0 = _mm256_set1_epi32(std::ptr::read_unaligned(p0.add(c)));
+            let mut v1 = _mm256_set1_epi32(std::ptr::read_unaligned(p1.add(c)));
+            let mut v2 = _mm256_set1_epi32(std::ptr::read_unaligned(p2.add(c)));
+            let mut v3 = _mm256_set1_epi32(std::ptr::read_unaligned(p3.add(c)));
+            if SIGNED_INPUT {
+                v0 = _mm256_xor_si256(v0, sign_flip);
+                v1 = _mm256_xor_si256(v1, sign_flip);
+                v2 = _mm256_xor_si256(v2, sign_flip);
+                v3 = _mm256_xor_si256(v3, sign_flip);
+            }
+
+            a00 = _mm256_dpbusd_avx_epi32(a00, v0, w0);
+            a01 = _mm256_dpbusd_avx_epi32(a01, v0, w1);
+            a10 = _mm256_dpbusd_avx_epi32(a10, v1, w0);
+            a11 = _mm256_dpbusd_avx_epi32(a11, v1, w1);
+            a20 = _mm256_dpbusd_avx_epi32(a20, v2, w0);
+            a21 = _mm256_dpbusd_avx_epi32(a21, v2, w1);
+            a30 = _mm256_dpbusd_avx_epi32(a30, v3, w0);
+            a31 = _mm256_dpbusd_avx_epi32(a31, v3, w1);
+        }
+
+        _mm256_storeu_si256(o0_ptr.add(boff) as *mut __m256i, a00);
+        _mm256_storeu_si256(o0_ptr.add(boff + 8) as *mut __m256i, a01);
+        _mm256_storeu_si256(o1_ptr.add(boff) as *mut __m256i, a10);
+        _mm256_storeu_si256(o1_ptr.add(boff + 8) as *mut __m256i, a11);
+        _mm256_storeu_si256(o2_ptr.add(boff) as *mut __m256i, a20);
+        _mm256_storeu_si256(o2_ptr.add(boff + 8) as *mut __m256i, a21);
+        _mm256_storeu_si256(o3_ptr.add(boff) as *mut __m256i, a30);
+        _mm256_storeu_si256(o3_ptr.add(boff + 8) as *mut __m256i, a31);
+        out_batch += 2;
+    }
+}
+
 // ============================================================================
 // ARM64 NEON & NEON-DOTPROD SIMD Kernels (aarch64)
 // ============================================================================

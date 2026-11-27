@@ -30,6 +30,35 @@ Current active target:
     2. **Route B (behavior-equivalent speedup — DONE on `feat/threat-pattern4-bitboard`)**: replaced `ThreatBoardView` board scans and quiet trial plays with a Rapfi-style incremental 4-direction `Pattern4` bitboard/LUT (`6.65x–9.33x` VCT6 speedup across dense Renju cases; see 2026-11-21 entry below).
     3. **Route C (experimental branch)**: upgrade `VCTSearcher` from IDDFS to `df-pn` (proof-number search with TT), validated for zero Renju false positives.
 
+## 2026-11-27 — `exp/rapfi-60pct-phase1` Phase 1: Bit-exact `Mix9svq` AVX2/AVX-VNNI speedup (`+11%` 1T NPS, `+12%–14%` 4T NPS)
+
+Context:
+
+- Goal: close the raw NPS gap against `pbrain-rapfi` (`Mix9svq`, 32 MiB TT, 1s/move, Renju) before starting Phase 2 search-heuristic upgrades on `exp/rapfi-60pct-phase1`.
+- Baseline (`master @ b7d750e`, i7-13700F AVX-VNNI, 32 MiB TT):
+  - `mid10` 1T 1s: `407K` NPS (vs Rapfi `460K` NPS); 4T 1s: `1,886K` NPS (vs Rapfi `2,180K` NPS).
+  - `open4` 1T 1s: `333K` NPS (vs Rapfi `418K` NPS); 4T 1s: `1,667K` NPS (vs Rapfi `2,516K` NPS).
+- Component micro-benchmark (`fast_engine_component_timing`) confirmed `eval_value` (`~1,748 ns`) and `play_move` (`~1,466 ns` post-1.1) dominate; `eval.clone()` (`0.26 ms`) and `FastBoard play+undo` (`184 ns`) are negligible.
+
+Kept optimizations (100% bit-exact vs scalar `Mix9svq`, zero move/score/node change on fixed depth):
+
+- `src/nnue/mix9svq.rs`:
+  - Unified `#[target_feature(enable = "avx2")] unsafe fn play_move_avx2` eliminating 214 cross-ABI AVX2 calls / `vzeroupper`s per move, with `MaybeUninit` `OnePointChange` and `AlignedVSum` stack buffers.
+  - Precomputed `INNER_TO_OUTER: [u16; 225]` LUT in `evaluate_policy_moves_avx2/avxvnni`; `MaybeUninit` scratch buffers eliminating stack `memset`s in `evaluate_value_logits`, `evaluate_policy_moves`, and `star_block`; index loop + `clear()` replacing `Vec::drain(..)` in `flush_move_cache`.
+  - Exact 13x13 `STAR_CONV_MASK` with branchless `trailing_zeros()` bit-scan skipping ~35.5% untouched `map_conv` cells, plus 4-direction telescoping fusion for center cell `(x, y)` (`41` updates instead of `44`).
+  - Batched 4-input `star_block_batch4_avxvnni` (`src/nnue/simd.rs::linear_i8_chunk4_batch4_avxvnni`) sharing weight loads across the 4 corners, 4 edges, and 4 quads.
+- Rejected micro-experiment (reverted):
+  - Port-balanced AVX-VNNI + AVX2 `pmaddubsw/pmaddwd` hybrid on 2/8 lanes: only `-1.2%` (`1,680 -> 1,659 ns`, within noise) because `vpdpbusd` already shares execution ports cleanly on Raptor Cove; reverted to pure `vpdpbusd`.
+
+Verification & timing:
+
+- Bit-exactness: `mix9svq_avx2_matches_scalar_bit_exact_on_renju_and_freestyle` passed; full `cargo test --locked` passed (`0` failures); fixed `d15 1T` node counts 100% identical (`open4`: `36,808` nodes `113.8ms -> 103.4ms`; `mid10`: `10,619` nodes `28.1ms -> 25.5ms`).
+- Release component & 1s warm benchmark (`fast_engine_component_timing`):
+  - `eval_value (pure)`: `1,748 ns -> 1,676 ns` (at ~99% of Raptor Lake `vpdpbusd` throughput ceiling for 9,096 `vpdpbusd` ops).
+  - `play_move (pure)`: `~1,600+ ns -> 1,244–1,278 ns`.
+  - `mid10 1T 1s`: `407K -> 451.6K` NPS (`+11.0%`, `d19/29`, `440K` nodes; 98.2% of Rapfi `460K` `d18/37`).
+  - `mid10 4T 1s`: `1,886K -> 1,937K–2,156K` NPS (`d21/33–37`, matching Rapfi `2,180K` `d18/49`).
+
 ## 2026-11-19 (3) — Incremental `dgn`, sparse `bucket_dot`, deferred rest-sort, and 4-line direct `value_wide_compute`
 
 Context:
