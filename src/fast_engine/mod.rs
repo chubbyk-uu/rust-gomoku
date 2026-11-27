@@ -1,6 +1,7 @@
 //! Native Rapfi-aligned NNUE engine core (isolated from classical `pygomoku` base).
 
 pub mod board;
+pub mod classical_model;
 pub mod history;
 pub mod movegen;
 pub mod movepick;

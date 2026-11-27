@@ -5,10 +5,14 @@
 use std::sync::LazyLock;
 
 use crate::constants::{BOARD_AREA, BOARD_SIZE};
+use crate::fast_engine::classical_model::{
+    classical_model, table_index, ClassicalModel, CLASSICAL_VALUE_BLEND_WEIGHTS,
+};
 use crate::fast_engine::pattern::{
     lookup_pattern, pcode_table_for, tables, Pattern, Pattern2x, Pattern4, PatternTables, FE_BLACK,
     FE_WHITE, HALF_LEN_FREESTYLE, HALF_LEN_RENJU, PATTERN4_NB,
 };
+use crate::fast_engine::tt::{VALUE_EVAL_MAX, VALUE_EVAL_MIN};
 use crate::rules::RuleSet;
 
 /// Sentinel move representing a pass (used for Null Move Pruning).
@@ -222,6 +226,7 @@ struct StateInfo {
     /// Most recent empty cell reaching `[CBlock4Flex3, BFlex4, AFive]` per side.
     last_p4_move: [[u16; 3]; 2],
     p4_count: [[u16; PATTERN4_NB]; 2],
+    value_black: i32,
 }
 
 impl Default for StateInfo {
@@ -233,6 +238,7 @@ impl Default for StateInfo {
             last_flex4_attack: [NONE_MOVE; 2],
             last_p4_move: [[NONE_MOVE; 3]; 2],
             p4_count: [[0; PATTERN4_NB]; 2],
+            value_black: 0,
         }
     }
 }
@@ -292,6 +298,7 @@ pub struct FastBoard {
     rule: RuleSet,
     cand_range: CandRange,
     tables: &'static PatternTables,
+    classical: Option<&'static ClassicalModel>,
     bit_key0: [u64; BOARD_SIZE],
     bit_key1: [u64; BOARD_SIZE],
     bit_key2: [u64; 2 * BOARD_SIZE - 1],
@@ -320,6 +327,7 @@ impl FastBoard {
             rule,
             cand_range,
             tables: tables(),
+            classical: classical_model(),
             bit_key0: [0; BOARD_SIZE],
             bit_key1: [0; BOARD_SIZE],
             bit_key2: [0; 2 * BOARD_SIZE - 1],
@@ -343,6 +351,7 @@ impl FastBoard {
 
     pub fn reset(&mut self, rule: RuleSet) {
         self.rule = rule;
+        self.classical = classical_model();
         self.bit_key0 = [0; BOARD_SIZE];
         self.bit_key1 = [0; BOARD_SIZE];
         self.bit_key2 = [0; 2 * BOARD_SIZE - 1];
@@ -379,6 +388,7 @@ impl FastBoard {
         let t = self.tables;
         let pc_b = pcode_table_for::<RENJU>(t, FE_BLACK);
         let pc_w = pcode_table_for::<RENJU>(t, FE_WHITE);
+        let mut value_black = 0_i32;
 
         for pos in 0..BOARD_AREA {
             let mut p2x = [Pattern2x::default(); 4];
@@ -395,12 +405,18 @@ impl FastBoard {
                 | (p2x[1].white_raw() << 8)
                 | (p2x[2].white_raw() << 4)
                 | p2x[3].white_raw();
-            let p4_b = pc_b[idx_b].pattern4_raw();
-            let p4_w = pc_w[idx_w].pattern4_raw();
+            let cp_b = pc_b[idx_b];
+            let cp_w = pc_w[idx_w];
+            let p4_b = cp_b.pattern4_raw();
+            let p4_w = cp_w.pattern4_raw();
             self.pattern4x2[pos] = pack_p4_pair(p4_b, p4_w);
             st.p4_count[FE_BLACK][p4_b as usize] += 1;
             st.p4_count[FE_WHITE][p4_w as usize] += 1;
+            if let Some(cm) = self.classical {
+                value_black += cm.get_value_black::<RENJU>(cp_b.pcode(), cp_w.pcode());
+            }
         }
+        st.value_black = value_black;
         self.state_infos[0] = st;
     }
 
@@ -512,6 +528,64 @@ impl FastBoard {
     #[inline(always)]
     pub fn tables(&self) -> &'static PatternTables {
         self.tables
+    }
+
+    #[inline(always)]
+    pub fn classical(&self) -> Option<&'static ClassicalModel> {
+        self.classical
+    }
+
+    /// Compute Rapfi's blended classical evaluation in `[-6000, 6000]` from
+    /// incremental `value_black` and 11-bit threat mask (`eval/eval.cpp:34-255`).
+    #[inline]
+    pub fn evaluate_classical<const RENJU: bool>(&self) -> Option<i32> {
+        let cm = self.classical?;
+        let self_side = self.current_side;
+        let oppo = self_side ^ 1;
+        let st0 = &self.state_infos[self.move_count];
+        let st1 = &self.state_infos[self.move_count.saturating_sub(1)];
+
+        let cur_basic = if self_side == FE_BLACK {
+            st0.value_black
+        } else {
+            -st0.value_black
+        };
+        let prev_basic = if self_side == FE_BLACK {
+            st1.value_black
+        } else {
+            -st1.value_black
+        };
+
+        let p4_s = &st0.p4_count[self_side];
+        let p4_o = &st0.p4_count[oppo];
+        let mut mask = 0_usize;
+        mask |= usize::from(p4_o[Pattern4::AFive as usize] != 0);
+        mask |= usize::from(p4_s[Pattern4::BFlex4 as usize] != 0) << 1;
+        mask |= usize::from(p4_o[Pattern4::BFlex4 as usize] != 0) << 2;
+        mask |= usize::from(
+            p4_s[Pattern4::DBlock4Plus as usize] + p4_s[Pattern4::CBlock4Flex3 as usize] != 0,
+        ) << 3;
+        mask |= usize::from(p4_s[Pattern4::EBlock4 as usize] != 0) << 4;
+        mask |= usize::from(
+            p4_s[Pattern4::GFlex3Plus as usize] + p4_s[Pattern4::FFlex3x2 as usize] != 0,
+        ) << 5;
+        mask |= usize::from(p4_s[Pattern4::HFlex3 as usize] != 0) << 6;
+        mask |= usize::from(
+            p4_o[Pattern4::DBlock4Plus as usize] + p4_o[Pattern4::CBlock4Flex3 as usize] != 0,
+        ) << 7;
+        mask |= usize::from(p4_o[Pattern4::EBlock4 as usize] != 0) << 8;
+        mask |= usize::from(
+            p4_o[Pattern4::GFlex3Plus as usize] + p4_o[Pattern4::FFlex3x2 as usize] != 0,
+        ) << 9;
+        mask |= usize::from(p4_o[Pattern4::HFlex3 as usize] != 0) << 10;
+
+        let t_idx = table_index::<RENJU>(self_side);
+        let cur_threat = cm.evals_threat[t_idx][mask] as i32;
+        let w = &CLASSICAL_VALUE_BLEND_WEIGHTS[t_idx];
+        let weighted = (w[0] as i64) * (cur_basic as i64)
+            + (w[1] as i64) * (prev_basic as i64)
+            + (w[2] as i64) * (cur_threat as i64);
+        Some(((weighted / 256) as i32).clamp(VALUE_EVAL_MIN, VALUE_EVAL_MAX))
     }
 
     /// Check whether `pos` is a legal non-pass move for `side_to_move()`.
@@ -681,6 +755,8 @@ impl FastBoard {
         let t = self.tables;
         let pc_b = pcode_table_for::<RENJU>(t, FE_BLACK);
         let pc_w = pcode_table_for::<RENJU>(t, FE_WHITE);
+        let classical = self.classical;
+        let mut delta_value_black = 0_i32;
         let mut restore_idx = 0_usize;
 
         let mut i = -l;
@@ -741,8 +817,21 @@ impl FastBoard {
                         | (row[1].white_raw() << 8)
                         | (row[2].white_raw() << 4)
                         | row[3].white_raw();
-                    let p4_b = pc_b.get_unchecked(idx_b).pattern4_raw();
-                    let p4_w = pc_w.get_unchecked(idx_w).pattern4_raw();
+                    let cp_b = *pc_b.get_unchecked(idx_b);
+                    let cp_w = *pc_w.get_unchecked(idx_w);
+                    if let Some(cm) = classical {
+                        let shift = (3 - dir) * 4;
+                        let old_idx_b = (idx_b & !(0xF << shift)) | (old_p2x.black_raw() << shift);
+                        let old_idx_w = (idx_w & !(0xF << shift)) | (old_p2x.white_raw() << shift);
+                        delta_value_black += cm
+                            .get_value_black::<RENJU>(cp_b.pcode(), cp_w.pcode())
+                            - cm.get_value_black::<RENJU>(
+                                pc_b.get_unchecked(old_idx_b).pcode(),
+                                pc_w.get_unchecked(old_idx_w).pcode(),
+                            );
+                    }
+                    let p4_b = cp_b.pattern4_raw();
+                    let p4_w = cp_w.pattern4_raw();
 
                     *st.p4_count[FE_BLACK].get_unchecked_mut((p4_pair & 0x0F) as usize) -= 1;
                     *st.p4_count[FE_WHITE].get_unchecked_mut((p4_pair >> 4) as usize) -= 1;
@@ -773,6 +862,10 @@ impl FastBoard {
         self.move_restores[restore_slot].len = restore_idx as u8;
 
         // Drop the placed cell's own frozen p4 contribution (cell is no longer empty).
+        if let Some(cm) = classical {
+            let (pb, pw) = self.pcode_pair(pos);
+            st.value_black += delta_value_black - cm.get_value_black::<RENJU>(pb, pw);
+        }
         let self_pair = self.pattern4x2[pos];
         st.p4_count[FE_BLACK][(self_pair & 0x0F) as usize] -= 1;
         st.p4_count[FE_WHITE][(self_pair >> 4) as usize] -= 1;
@@ -1045,6 +1138,7 @@ impl FastBoard {
             &t.pcode
         };
         let pc_w = &t.pcode;
+        let mut expected_value_black = 0_i32;
 
         for pos in 0..BOARD_AREA {
             let empty = self.empty_bb.test(pos);
@@ -1081,8 +1175,10 @@ impl FastBoard {
                 | (row[1].white_raw() << 8)
                 | (row[2].white_raw() << 4)
                 | row[3].white_raw();
-            let exp_b = pc_b[idx_b].pattern4_raw();
-            let exp_w = pc_w[idx_w].pattern4_raw();
+            let cp_b = pc_b[idx_b];
+            let cp_w = pc_w[idx_w];
+            let exp_b = cp_b.pattern4_raw();
+            let exp_w = cp_w.pattern4_raw();
             assert_eq!(
                 self.pattern4x2[pos],
                 pack_p4_pair(exp_b, exp_w),
@@ -1090,12 +1186,26 @@ impl FastBoard {
             );
             expected_p4[FE_BLACK][exp_b as usize] += 1;
             expected_p4[FE_WHITE][exp_w as usize] += 1;
+            if let Some(cm) = self.classical {
+                expected_value_black += if renju {
+                    cm.get_value_black::<true>(cp_b.pcode(), cp_w.pcode())
+                } else {
+                    cm.get_value_black::<false>(cp_b.pcode(), cp_w.pcode())
+                };
+            }
         }
         assert_eq!(
             self.state_infos[self.move_count].p4_count, expected_p4,
             "p4_count mismatch at move_count={}",
             self.move_count
         );
+        if self.classical.is_some() {
+            assert_eq!(
+                self.state_infos[self.move_count].value_black, expected_value_black,
+                "value_black mismatch at move_count={}",
+                self.move_count
+            );
+        }
     }
 }
 

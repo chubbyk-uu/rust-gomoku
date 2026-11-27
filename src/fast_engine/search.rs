@@ -118,7 +118,7 @@ fn futility_margin<const RENJU: bool>(d: f32, no_tt_cut_node: bool, improving: b
     const PENALTY: [i32; 3] = [16, 13, 13];
     let r = rule_slot::<RENJU>();
     let coeff = SCALE[r] - PENALTY[r] * (no_tt_cut_node as i32);
-    ((coeff as f32) * (d - (improving as i32 as f32))) as i32
+    (((coeff as f32) * (d - (improving as i32 as f32))) as i32).max(0)
 }
 
 #[inline(always)]
@@ -940,7 +940,15 @@ impl<'a> SearchWorker<'a> {
     }
 
     #[inline(always)]
-    fn evaluate_static(&mut self) -> i32 {
+    fn evaluate_static<const RENJU: bool>(&mut self, alpha: i32, beta: i32) -> i32 {
+        if let Some(cm) = self.board.classical() {
+            if let Some(classical_eval) = self.board.evaluate_classical::<RENJU>() {
+                let margin = cm.margin::<RENJU>(classical_eval);
+                if classical_eval < alpha - margin || classical_eval > beta + margin {
+                    return classical_eval;
+                }
+            }
+        }
         let side_val = if self.board.side_to_move() == FE_BLACK {
             BLACK
         } else {
@@ -1126,7 +1134,7 @@ impl<'a> SearchWorker<'a> {
                 return VALUE_DRAW;
             }
             if ply as usize >= MAX_PLY {
-                return self.evaluate_static();
+                return self.evaluate_static::<RENJU>(alpha, beta);
             }
             let qw = self.board.quick_win_check::<RENJU>(ply, beta);
             if qw != VALUE_ZERO {
@@ -1211,7 +1219,7 @@ impl<'a> SearchWorker<'a> {
             if tt_hit {
                 let mut e = tt_eval;
                 if e == VALUE_NONE {
-                    e = self.evaluate_static();
+                    e = self.evaluate_static::<RENJU>(alpha, beta);
                 }
                 self.stack[ss].static_eval = e;
                 eval = e;
@@ -1227,7 +1235,7 @@ impl<'a> SearchWorker<'a> {
                     eval = tt_value;
                 }
             } else {
-                let e = self.evaluate_static();
+                let e = self.evaluate_static::<RENJU>(alpha, beta);
                 self.stack[ss].static_eval = e;
                 eval = e;
                 if skip_move == NONE_MOVE {
@@ -1330,15 +1338,6 @@ impl<'a> SearchWorker<'a> {
             if !root_node && pv_node && tt_move == NONE_MOVE {
                 depth -= IIR_REDUCTION_PV[rs];
             }
-            if !root_node
-                && !pv_node
-                && cut_node
-                && depth >= 4.0
-                && depth < IID_DEPTH
-                && tt_move == NONE_MOVE
-            {
-                depth -= 0.75;
-            }
             if pv_node && depth > 1.0 && tt_move != NONE_MOVE {
                 depth -= ((depth - tt_depth as f32) * IIR_REDUCTION_TT[rs])
                     .clamp(0.0, IIR_REDUCTION_TT_MAX[rs]);
@@ -1435,16 +1434,6 @@ impl<'a> SearchWorker<'a> {
                 if mt.trivial && depth < TRIVIAL_PRUN_DEPTH {
                     continue;
                 }
-                if !pv_node
-                    && !mt.important
-                    && oppo4 == 0
-                    && move_count > 1
-                    && depth < 4.0
-                    && eval != VALUE_NONE
-                    && eval + 90 + (75.0 * depth) as i32 <= alpha
-                {
-                    continue;
-                }
                 if mp.has_policy_score()
                     && (mp.cur_move_score() as i32) < policy_pruning_score::<RENJU>(depth)
                 {
@@ -1505,8 +1494,6 @@ impl<'a> SearchWorker<'a> {
                     return beta;
                 } else if tt_value >= beta {
                     extension = -SE_REDUCTION_FH;
-                } else if cut_node {
-                    extension = -1.5;
                 }
             } else if mv == tt_move {
                 extension = if pv_node {
@@ -1842,7 +1829,7 @@ impl<'a> SearchWorker<'a> {
             return VALUE_DRAW;
         }
         if ply as usize >= MAX_PLY {
-            return self.evaluate_static();
+            return self.evaluate_static::<RENJU>(alpha, beta);
         }
         let qw = self.board.quick_win_check::<RENJU>(ply, beta);
         if qw != VALUE_ZERO {
@@ -1882,7 +1869,7 @@ impl<'a> SearchWorker<'a> {
         let mut best_value = if tt_hit {
             let mut e = tt_eval;
             if e == VALUE_NONE {
-                e = self.evaluate_static();
+                e = self.evaluate_static::<RENJU>(alpha, beta);
             }
             self.stack[ss].static_eval = e;
             if tt_value != VALUE_NONE
@@ -1902,7 +1889,7 @@ impl<'a> SearchWorker<'a> {
             let e = if self.stack[ss - 1].current_move == PASS_MOVE {
                 -self.stack[ss - 1].static_eval
             } else {
-                self.evaluate_static()
+                self.evaluate_static::<RENJU>(alpha, beta)
             };
             self.stack[ss].static_eval = e;
             e
@@ -2037,18 +2024,18 @@ impl<'a> SearchWorker<'a> {
         let oppo5 = self.board.p4_count(oppo, Pattern4::AFive);
 
         if oppo5 == 0 {
-            return self.evaluate_static();
+            return self.evaluate_static::<RENJU>(alpha, beta);
         }
         if self.board.moves_left() == 0 {
             return VALUE_DRAW;
         }
         if ply as usize >= MAX_PLY {
-            return self.evaluate_static();
+            return self.evaluate_static::<RENJU>(alpha, beta);
         }
 
         let mv = find_p4_pos(&self.board, oppo, Pattern4::AFive);
         if (mv as usize) >= BOARD_AREA {
-            return self.evaluate_static();
+            return self.evaluate_static::<RENJU>(alpha, beta);
         }
 
         if RENJU && self_side == FE_BLACK && self.board.check_forbidden_point(mv as usize) {
@@ -2096,6 +2083,13 @@ mod tests {
     use crate::board::{xy_to_move, Board};
     use crate::nnue::load_mix9svq_evaluator_for_rule;
     use std::path::Path;
+
+    #[test]
+    fn futility_margin_clamps_negative_to_zero() {
+        assert_eq!(futility_margin::<true>(-0.5, false, true), 0);
+        assert_eq!(futility_margin::<false>(0.5, true, true), 0);
+        assert_eq!(futility_margin::<true>(2.0, false, true), 63);
+    }
 
     #[test]
     fn fast_search_smoke_finds_tactical_win_and_runs_1t_and_4t() {

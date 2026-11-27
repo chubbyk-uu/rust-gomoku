@@ -11,8 +11,9 @@
 //! with `MainHistory` (`HIST_ATTACK` / `HIST_QUIET`) and `CounterMoveHistory`,
 //! using fast `Pattern4`-based classical scoring for `QVCF`.
 
-use crate::constants::{BLACK, BOARD_AREA, WHITE};
+use crate::constants::{BLACK, BOARD_AREA, BOARD_SIZE, WHITE};
 use crate::fast_engine::board::{FastBoard, NONE_MOVE, PASS_MOVE};
+use crate::fast_engine::classical_model::ClassicalPolicyScorer;
 use crate::fast_engine::history::{
     move_history_weights, CounterMoveHistory, MainHistory, HIST_ATTACK, HIST_QUIET, WEIGHT_SCALE,
 };
@@ -167,7 +168,9 @@ impl MovePicker {
             return vec![(7 * 15 + 7) as u16];
         }
 
-        buf[..legal_len].iter().map(|m| m.pos).collect()
+        let mut out: Vec<u16> = buf[..legal_len].iter().map(|m| m.pos).collect();
+        filter_root_symmetry_moves(board, &mut out);
+        out
     }
 
     /// Construct a `MAIN` search `MovePicker` (matching `MovePicker::MovePicker<MAIN>`).
@@ -346,19 +349,30 @@ impl MovePicker {
             None
         };
 
+        let classical_scorer = if !used_nnue {
+            board
+                .classical()
+                .map(|cm| ClassicalPolicyScorer::new(cm, board))
+        } else {
+            None
+        };
+
         for i in 0..n {
             let m = &mut slice[i];
             let pos = m.pos as usize;
+            let self_p4 = board.pattern4(pos, self_side);
             let raw = if used_nnue {
                 let p = unsafe { raw_policy[i].assume_init() };
                 clamp_move_score((p * POLICY_SCORE_SCALE) as i32)
+            } else if let Some(ref scorer) = classical_scorer {
+                let (pb, pw) = board.pcode_pair(pos);
+                scorer.score(pb, pw, self_p4, board.pattern4(pos, oppo))
             } else {
                 classical_move_score(board, pos, self_side)
             };
             m.raw_score = raw;
 
             let mut total = raw as i32;
-            let self_p4 = board.pattern4(pos, self_side);
 
             if USE_MAIN_HIST {
                 if let Some(mh) = main_hist {
@@ -535,5 +549,121 @@ impl MovePicker {
                 }
             }
         }
+    }
+}
+
+#[inline(always)]
+fn transform_pos(pos: usize, sym: usize) -> usize {
+    let mut x = pos % BOARD_SIZE;
+    let mut y = pos / BOARD_SIZE;
+    if (sym & 1) != 0 {
+        x = BOARD_SIZE - 1 - x;
+    }
+    if (sym & 2) != 0 {
+        y = BOARD_SIZE - 1 - y;
+    }
+    if (sym & 4) != 0 {
+        std::mem::swap(&mut x, &mut y);
+    }
+    y * BOARD_SIZE + x
+}
+
+fn uf_find(parent: &mut [u16; BOARD_AREA], mut x: usize) -> usize {
+    while parent[x] as usize != x {
+        let p = parent[x] as usize;
+        parent[x] = parent[p];
+        x = p;
+    }
+    x
+}
+
+fn uf_union(parent: &mut [u16; BOARD_AREA], a: usize, b: usize) {
+    let ra = uf_find(parent, a);
+    let rb = uf_find(parent, b);
+    if ra != rb {
+        if ra < rb {
+            parent[rb] = ra as u16;
+        } else {
+            parent[ra] = rb as u16;
+        }
+    }
+}
+
+/// Deduplicate root candidate moves under the board's exact dihedral symmetries
+/// (`opponent/rapfi/Rapfi/search/opening.cpp:250-301`), preserving the
+/// highest-ranked policy move from each symmetry orbit.
+pub fn filter_root_symmetry_moves(board: &FastBoard, moves: &mut Vec<u16>) {
+    if moves.len() <= 1 {
+        return;
+    }
+
+    let mut active_mask = 0_u8;
+    for sym in 1..8_usize {
+        if (0..BOARD_AREA).all(|p| board.cell_bits(p) == board.cell_bits(transform_pos(p, sym))) {
+            active_mask |= 1_u8 << sym;
+        }
+    }
+    if active_mask == 0 {
+        return;
+    }
+
+    let mut parent = [0_u16; BOARD_AREA];
+    for i in 0..BOARD_AREA {
+        parent[i] = i as u16;
+    }
+    for sym in 1..8_usize {
+        if (active_mask & (1_u8 << sym)) == 0 {
+            continue;
+        }
+        for pos in 0..BOARD_AREA {
+            if board.is_empty(pos) {
+                uf_union(&mut parent, pos, transform_pos(pos, sym));
+            }
+        }
+    }
+
+    let mut seen_orbit = [false; BOARD_AREA];
+    moves.retain(|&mv| {
+        let root = uf_find(&mut parent, mv as usize);
+        if seen_orbit[root] {
+            false
+        } else {
+            seen_orbit[root] = true;
+            true
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fast_engine::board::CandRange;
+
+    #[test]
+    fn root_symmetry_filter_collapses_symmetric_and_keeps_asymmetric() {
+        let mut fb = FastBoard::new(RuleSet::Renju, CandRange::Square3Line4);
+        fb.play(7 * BOARD_SIZE + 7);
+        let mut cands = Vec::new();
+        fb.empty_candidates().for_each_bit(|p| cands.push(p as u16));
+        let raw_len = cands.len();
+        filter_root_symmetry_moves(&fb, &mut cands);
+        // 7x7 square around center collapses to (1..=3)*(2..=4)/2 + diagonal = 9 orbits;
+        // plus 4 axis-ray dist-4 cells collapsing to 1 orbit => 10 unique orbits.
+        assert!(
+            cands.len() < raw_len / 4,
+            "symmetric board should collapse orbits: {raw_len} -> {}",
+            cands.len()
+        );
+
+        let mut asym = FastBoard::new(RuleSet::Renju, CandRange::Square3Line4);
+        asym.play(7 * BOARD_SIZE + 7);
+        asym.play(6 * BOARD_SIZE + 7);
+        asym.play(8 * BOARD_SIZE + 6);
+        let mut asym_cands = Vec::new();
+        asym.empty_candidates()
+            .for_each_bit(|p| asym_cands.push(p as u16));
+        let expected = asym_cands.clone();
+        filter_root_symmetry_moves(&asym, &mut asym_cands);
+        assert_eq!(asym_cands, expected);
     }
 }

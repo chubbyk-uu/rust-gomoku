@@ -170,6 +170,7 @@ pub fn is_mix9svq_cached_for_rule(dir: &Path, rule: RuleSet) -> bool {
 /// - `RuleSet::Renju`: `mix9svqrenju_bs15_black.bin.lz4` and
 ///   `mix9svqrenju_bs15_white.bin.lz4`
 pub fn load_mix9svq_evaluator_for_rule(dir: &Path, rule: RuleSet) -> io::Result<Mix9svqEvaluator> {
+    let _ = crate::fast_engine::classical_model::warm_classical_model(Some(dir));
     match rule {
         RuleSet::Freestyle => {
             let w = load_cached_weight(&dir.join("mix9svqfreestyle_bsmix.bin.lz4"), rule)?;
