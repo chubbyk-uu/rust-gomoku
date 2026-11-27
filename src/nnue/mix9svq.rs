@@ -598,6 +598,32 @@ impl Default for ValueSum {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+#[repr(C, align(64))]
+struct AlignedRow<const N: usize>([i16; N]);
+
+impl<const N: usize> AlignedRow<N> {
+    #[inline(always)]
+    const fn zeroed() -> Self {
+        Self([0; N])
+    }
+}
+
+impl<const N: usize> std::ops::Deref for AlignedRow<N> {
+    type Target = [i16; N];
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<const N: usize> std::ops::DerefMut for AlignedRow<N> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 /// Version-stacked incremental accumulator for a single perspective (Black or White).
 #[derive(Clone, Debug)]
 pub struct Mix9svqAccumulator {
@@ -606,8 +632,8 @@ pub struct Mix9svqAccumulator {
     version_inner_index: Vec<u16>,
     version_outer_index: Vec<u16>,
     index_table: Vec<[u32; 4]>,
-    map_sum: Vec<[i16; FEATURE_DIM]>,
-    map_conv: Vec<[i16; FEAT_DWCONV_DIM]>,
+    map_sum: Vec<AlignedRow<FEATURE_DIM>>,
+    map_conv: Vec<AlignedRow<FEAT_DWCONV_DIM>>,
     current_version: i32,
     group_index: [usize; BOARD_SIZE],
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
@@ -700,8 +726,8 @@ impl Mix9svqAccumulator {
             version_inner_index,
             version_outer_index,
             index_table,
-            map_sum: vec![[0_i16; FEATURE_DIM]; MAX_INNER_CHANGES_15],
-            map_conv: vec![[0_i16; FEAT_DWCONV_DIM]; MAX_OUTER_CHANGES_15],
+            map_sum: vec![AlignedRow::zeroed(); MAX_INNER_CHANGES_15],
+            map_conv: vec![AlignedRow::zeroed(); MAX_OUTER_CHANGES_15],
             current_version: -1,
             group_index,
             use_avx2: has_avx2(),
@@ -714,7 +740,7 @@ impl Mix9svqAccumulator {
     pub fn clear(&mut self, w: &Mix9svqWeight) {
         if self.current_version == -1 {
             for i in 0..OUTER_BOARD_AREA {
-                self.map_conv[i] = w.feature_dwconv_bias;
+                self.map_conv[i].0 = w.feature_dwconv_bias;
             }
             let value_sum = &mut self.value_sum_table[0];
             *value_sum = ValueSum::default();
@@ -732,7 +758,7 @@ impl Mix9svqAccumulator {
                             sum[c] = sum[c].wrapping_add(cb[c]);
                         }
                     }
-                    self.map_sum[inner_idx] = sum;
+                    self.map_sum[inner_idx].0 = sum;
 
                     // Depthwise 3x3 conv contribution for channels 0..32
                     let mut conv_in = [0_i16; FEAT_DWCONV_DIM];
@@ -867,12 +893,25 @@ impl Mix9svqAccumulator {
                 let xi = x_plus_1 + bit - 6;
                 *vo_ptr.add(outer_row + xi) = new_map_conv_idx as u16;
                 let dst = map_conv_ptr.add(new_map_conv_idx) as *mut __m256i;
-                _mm256_storeu_si256(dst, zero);
-                _mm256_storeu_si256(dst.add(1), zero);
+                _mm256_store_si256(dst, zero);
+                _mm256_store_si256(dst.add(1), zero);
                 new_map_conv_idx += 1;
             }
         }
 
+        #[derive(Clone, Copy)]
+        struct PendingShape {
+            x: u8,
+            y: u8,
+            mapping_idx: u8,
+            old_map_idx: u16,
+            new_map_idx: u16,
+            old_shape: u32,
+            new_shape: u32,
+        }
+
+        let mut pending = [std::mem::MaybeUninit::<PendingShape>::uninit(); 40];
+        let mut pending_count = 0_usize;
         let mut changes = [std::mem::MaybeUninit::<OnePointChange>::uninit(); 40];
         let mut change_count = 0_usize;
         let d_pow3 = (piece_color as u32) + 1;
@@ -893,33 +932,24 @@ impl Mix9svqAccumulator {
         let center_old_map_idx = *center_slot as usize;
         let center_new_map_idx = new_map_idx;
         let mut center_shapes = *idx_tbl_ptr.add(center_old_map_idx);
-        let mut center_old_cb = [0_u16; 4];
-        let mut center_new_cb = [0_u16; 4];
+        let mut center_old_shapes = [0_u32; 4];
         let center_delta = d_pow3 * POWER3[5];
         for dir in 0..4 {
             let map_ptr = map_idx_ptrs[dir >> 1];
             let old_shape = center_shapes[dir];
             let new_shape = old_shape + center_delta;
             debug_assert!((new_shape as usize) < SHAPE_NUM);
+            center_old_shapes[dir] = old_shape;
             center_shapes[dir] = new_shape;
-            let ocb = *map_ptr.add(old_shape as usize);
-            let ncb = *map_ptr.add(new_shape as usize);
-            center_old_cb[dir] = ocb;
-            center_new_cb[dir] = ncb;
-            if ocb != ncb {
-                let cb_base = cb_ptrs[dir >> 1];
-                let p_old = cb_base.add(ocb as usize) as *const i8;
-                let p_new = cb_base.add(ncb as usize) as *const i8;
-                _mm_prefetch(p_old, _MM_HINT_T0);
-                _mm_prefetch(p_old.add(64), _MM_HINT_T0);
-                _mm_prefetch(p_new, _MM_HINT_T0);
-                _mm_prefetch(p_new.add(64), _MM_HINT_T0);
-            }
+            _mm_prefetch(map_ptr.add(old_shape as usize) as *const i8, _MM_HINT_T0);
+            _mm_prefetch(map_ptr.add(new_shape as usize) as *const i8, _MM_HINT_T0);
         }
         *idx_tbl_ptr.add(center_new_map_idx) = center_shapes;
         *center_slot = center_new_map_idx as u16;
         new_map_idx += 1;
 
+        // Pass 1: update index_table for all ray cells and issue parallel prefetches
+        // into the 1.77 MiB `mapping_index` table.
         for dir in 0..4 {
             let mapping_idx = dir >> 1;
             let map_ptr = map_idx_ptrs[mapping_idx];
@@ -941,51 +971,82 @@ impl Mix9svqAccumulator {
                 debug_assert!((new_shape as usize) < SHAPE_NUM);
                 next_shapes[dir] = new_shape;
                 *idx_tbl_ptr.add(new_map_idx) = next_shapes;
-
-                let old_cb_idx = *map_ptr.add(old_shape as usize);
-                let new_cb_idx = *map_ptr.add(new_shape as usize);
                 *inner_slot = new_map_idx as u16;
 
-                if old_cb_idx == new_cb_idx {
-                    // Identical VQ codebook cluster -> bit-exact zero delta in map_sum,
-                    // map_conv (3x3 dwconv), and vsum_group.
-                    let old_s = map_sum_ptr.add(old_map_idx) as *const __m256i;
-                    let new_s = map_sum_ptr.add(new_map_idx) as *mut __m256i;
-                    _mm256_storeu_si256(new_s, _mm256_loadu_si256(old_s));
-                    _mm256_storeu_si256(new_s.add(1), _mm256_loadu_si256(old_s.add(1)));
-                    _mm256_storeu_si256(new_s.add(2), _mm256_loadu_si256(old_s.add(2)));
-                    _mm256_storeu_si256(new_s.add(3), _mm256_loadu_si256(old_s.add(3)));
-                    new_map_idx += 1;
-                    continue;
-                }
+                _mm_prefetch(map_ptr.add(old_shape as usize) as *const i8, _MM_HINT_T0);
+                _mm_prefetch(map_ptr.add(new_shape as usize) as *const i8, _MM_HINT_T0);
 
-                changes
-                    .get_unchecked_mut(change_count)
-                    .write(OnePointChange {
-                        x: xu as u8,
-                        y: yu as u8,
-                        mapping_idx: mapping_idx as u8,
-                        old_map_idx: old_map_idx as u16,
-                        new_map_idx: new_map_idx as u16,
-                        old_cb_idx,
-                        new_cb_idx,
-                    });
-                change_count += 1;
+                pending.get_unchecked_mut(pending_count).write(PendingShape {
+                    x: xu as u8,
+                    y: yu as u8,
+                    mapping_idx: mapping_idx as u8,
+                    old_map_idx: old_map_idx as u16,
+                    new_map_idx: new_map_idx as u16,
+                    old_shape,
+                    new_shape,
+                });
+                pending_count += 1;
                 new_map_idx += 1;
             }
         }
 
-        // Prime L1/L2 prefetch for the first 4 changes while zeroing vsum & updating center.
-        let prime_n = change_count.min(4);
-        for i in 0..prime_n {
-            let cp = changes.get_unchecked(i).assume_init();
-            let cb_next = cb_ptrs[cp.mapping_idx as usize];
-            let p_old = cb_next.add(cp.old_cb_idx as usize) as *const i8;
-            let p_new = cb_next.add(cp.new_cb_idx as usize) as *const i8;
-            _mm_prefetch(p_old, _MM_HINT_T0);
-            _mm_prefetch(p_old.add(64), _MM_HINT_T0);
-            _mm_prefetch(p_new, _MM_HINT_T0);
-            _mm_prefetch(p_new.add(64), _MM_HINT_T0);
+        // Resolve center cell codebook indices and prefetch its codebook lines.
+        let mut center_old_cb = [0_u16; 4];
+        let mut center_new_cb = [0_u16; 4];
+        for dir in 0..4 {
+            let map_ptr = map_idx_ptrs[dir >> 1];
+            let ocb = *map_ptr.add(center_old_shapes[dir] as usize);
+            let ncb = *map_ptr.add(center_shapes[dir] as usize);
+            center_old_cb[dir] = ocb;
+            center_new_cb[dir] = ncb;
+            if ocb != ncb {
+                let cb_base = cb_ptrs[dir >> 1];
+                let p_old = cb_base.add(ocb as usize) as *const i8;
+                let p_new = cb_base.add(ncb as usize) as *const i8;
+                _mm_prefetch(p_old, _MM_HINT_T0);
+                _mm_prefetch(p_old.add(64), _MM_HINT_T0);
+                _mm_prefetch(p_new, _MM_HINT_T0);
+                _mm_prefetch(p_new.add(64), _MM_HINT_T0);
+            }
+        }
+
+        // Pass 2: read prefetched `mapping_index`, skip identical VQ clusters, and
+        // prime codebook prefetches for the first 6 non-zero changes.
+        for i in 0..pending_count {
+            let p = pending.get_unchecked(i).assume_init();
+            let map_ptr = map_idx_ptrs[p.mapping_idx as usize];
+            let old_cb_idx = *map_ptr.add(p.old_shape as usize);
+            let new_cb_idx = *map_ptr.add(p.new_shape as usize);
+            if old_cb_idx == new_cb_idx {
+                let old_s = map_sum_ptr.add(p.old_map_idx as usize) as *const __m256i;
+                let new_s = map_sum_ptr.add(p.new_map_idx as usize) as *mut __m256i;
+                _mm256_store_si256(new_s, _mm256_load_si256(old_s));
+                _mm256_store_si256(new_s.add(1), _mm256_load_si256(old_s.add(1)));
+                _mm256_store_si256(new_s.add(2), _mm256_load_si256(old_s.add(2)));
+                _mm256_store_si256(new_s.add(3), _mm256_load_si256(old_s.add(3)));
+                continue;
+            }
+            if change_count < 6 {
+                let cb_base = cb_ptrs[p.mapping_idx as usize];
+                let p_old = cb_base.add(old_cb_idx as usize) as *const i8;
+                let p_new = cb_base.add(new_cb_idx as usize) as *const i8;
+                _mm_prefetch(p_old, _MM_HINT_T0);
+                _mm_prefetch(p_old.add(64), _MM_HINT_T0);
+                _mm_prefetch(p_new, _MM_HINT_T0);
+                _mm_prefetch(p_new.add(64), _MM_HINT_T0);
+            }
+            changes
+                .get_unchecked_mut(change_count)
+                .write(OnePointChange {
+                    x: p.x,
+                    y: p.y,
+                    mapping_idx: p.mapping_idx,
+                    old_map_idx: p.old_map_idx,
+                    new_map_idx: p.new_map_idx,
+                    old_cb_idx,
+                    new_cb_idx,
+                });
+            change_count += 1;
         }
 
         // Zero aligned vsum_group via inline AVX2 stores (no glibc memset).
@@ -1000,10 +1061,10 @@ impl Mix9svqAccumulator {
         {
             let old_s_ptr = map_sum_ptr.add(center_old_map_idx) as *const __m256i;
             let new_s_ptr = map_sum_ptr.add(center_new_map_idx) as *mut __m256i;
-            let old_s0 = _mm256_loadu_si256(old_s_ptr);
-            let old_s1 = _mm256_loadu_si256(old_s_ptr.add(1));
-            let old_s2 = _mm256_loadu_si256(old_s_ptr.add(2));
-            let old_s3 = _mm256_loadu_si256(old_s_ptr.add(3));
+            let old_s0 = _mm256_load_si256(old_s_ptr);
+            let old_s1 = _mm256_load_si256(old_s_ptr.add(1));
+            let old_s2 = _mm256_load_si256(old_s_ptr.add(2));
+            let old_s3 = _mm256_load_si256(old_s_ptr.add(3));
             let (mut new_s0, mut new_s1, mut new_s2, mut new_s3) = (old_s0, old_s1, old_s2, old_s3);
             for dir in 0..4 {
                 if center_old_cb[dir] == center_new_cb[dir] {
@@ -1013,26 +1074,26 @@ impl Mix9svqAccumulator {
                 let old_cb_ptr = cb_base.add(center_old_cb[dir] as usize) as *const __m256i;
                 let new_cb_ptr = cb_base.add(center_new_cb[dir] as usize) as *const __m256i;
                 new_s0 = _mm256_add_epi16(
-                    _mm256_sub_epi16(new_s0, _mm256_loadu_si256(old_cb_ptr)),
-                    _mm256_loadu_si256(new_cb_ptr),
+                    _mm256_sub_epi16(new_s0, _mm256_load_si256(old_cb_ptr)),
+                    _mm256_load_si256(new_cb_ptr),
                 );
                 new_s1 = _mm256_add_epi16(
-                    _mm256_sub_epi16(new_s1, _mm256_loadu_si256(old_cb_ptr.add(1))),
-                    _mm256_loadu_si256(new_cb_ptr.add(1)),
+                    _mm256_sub_epi16(new_s1, _mm256_load_si256(old_cb_ptr.add(1))),
+                    _mm256_load_si256(new_cb_ptr.add(1)),
                 );
                 new_s2 = _mm256_add_epi16(
-                    _mm256_sub_epi16(new_s2, _mm256_loadu_si256(old_cb_ptr.add(2))),
-                    _mm256_loadu_si256(new_cb_ptr.add(2)),
+                    _mm256_sub_epi16(new_s2, _mm256_load_si256(old_cb_ptr.add(2))),
+                    _mm256_load_si256(new_cb_ptr.add(2)),
                 );
                 new_s3 = _mm256_add_epi16(
-                    _mm256_sub_epi16(new_s3, _mm256_loadu_si256(old_cb_ptr.add(3))),
-                    _mm256_loadu_si256(new_cb_ptr.add(3)),
+                    _mm256_sub_epi16(new_s3, _mm256_load_si256(old_cb_ptr.add(3))),
+                    _mm256_load_si256(new_cb_ptr.add(3)),
                 );
             }
-            _mm256_storeu_si256(new_s_ptr, new_s0);
-            _mm256_storeu_si256(new_s_ptr.add(1), new_s1);
-            _mm256_storeu_si256(new_s_ptr.add(2), new_s2);
-            _mm256_storeu_si256(new_s_ptr.add(3), new_s3);
+            _mm256_store_si256(new_s_ptr, new_s0);
+            _mm256_store_si256(new_s_ptr.add(1), new_s1);
+            _mm256_store_si256(new_s_ptr.add(2), new_s2);
+            _mm256_store_si256(new_s_ptr.add(3), new_s3);
 
             let old_c0 = _mm256_slli_epi16(_mm256_max_epi16(old_s0, zero), 2);
             let old_c1 = _mm256_slli_epi16(_mm256_max_epi16(old_s1, zero), 2);
@@ -1056,10 +1117,10 @@ impl Mix9svqAccumulator {
                         _mm256_mulhi_epi16(dw1, new_c1),
                         _mm256_mulhi_epi16(dw1, old_c1),
                     );
-                    _mm256_storeu_si256(dst, _mm256_add_epi16(_mm256_loadu_si256(dst), d0));
-                    _mm256_storeu_si256(
+                    _mm256_store_si256(dst, _mm256_add_epi16(_mm256_load_si256(dst), d0));
+                    _mm256_store_si256(
                         dst.add(1),
-                        _mm256_add_epi16(_mm256_loadu_si256(dst.add(1)), d1),
+                        _mm256_add_epi16(_mm256_load_si256(dst.add(1)), d1),
                     );
                     k += 1;
                 }
@@ -1104,8 +1165,8 @@ impl Mix9svqAccumulator {
 
         for i in 0..change_count {
             let c = changes.get_unchecked(i).assume_init();
-            if i + 4 < change_count {
-                let cnext = changes.get_unchecked(i + 4).assume_init();
+            if i + 6 < change_count {
+                let cnext = changes.get_unchecked(i + 6).assume_init();
                 let cb_next = cb_ptrs[cnext.mapping_idx as usize];
                 let p_old = cb_next.add(cnext.old_cb_idx as usize) as *const i8;
                 let p_new = cb_next.add(cnext.new_cb_idx as usize) as *const i8;
@@ -1121,32 +1182,32 @@ impl Mix9svqAccumulator {
             let old_s_ptr = map_sum_ptr.add(c.old_map_idx as usize) as *const __m256i;
             let new_s_ptr = map_sum_ptr.add(c.new_map_idx as usize) as *mut __m256i;
 
-            let old_s0 = _mm256_loadu_si256(old_s_ptr);
-            let old_s1 = _mm256_loadu_si256(old_s_ptr.add(1));
-            let old_s2 = _mm256_loadu_si256(old_s_ptr.add(2));
-            let old_s3 = _mm256_loadu_si256(old_s_ptr.add(3));
+            let old_s0 = _mm256_load_si256(old_s_ptr);
+            let old_s1 = _mm256_load_si256(old_s_ptr.add(1));
+            let old_s2 = _mm256_load_si256(old_s_ptr.add(2));
+            let old_s3 = _mm256_load_si256(old_s_ptr.add(3));
 
             let new_s0 = _mm256_add_epi16(
-                _mm256_sub_epi16(old_s0, _mm256_loadu_si256(old_cb_ptr)),
-                _mm256_loadu_si256(new_cb_ptr),
+                _mm256_sub_epi16(old_s0, _mm256_load_si256(old_cb_ptr)),
+                _mm256_load_si256(new_cb_ptr),
             );
             let new_s1 = _mm256_add_epi16(
-                _mm256_sub_epi16(old_s1, _mm256_loadu_si256(old_cb_ptr.add(1))),
-                _mm256_loadu_si256(new_cb_ptr.add(1)),
+                _mm256_sub_epi16(old_s1, _mm256_load_si256(old_cb_ptr.add(1))),
+                _mm256_load_si256(new_cb_ptr.add(1)),
             );
             let new_s2 = _mm256_add_epi16(
-                _mm256_sub_epi16(old_s2, _mm256_loadu_si256(old_cb_ptr.add(2))),
-                _mm256_loadu_si256(new_cb_ptr.add(2)),
+                _mm256_sub_epi16(old_s2, _mm256_load_si256(old_cb_ptr.add(2))),
+                _mm256_load_si256(new_cb_ptr.add(2)),
             );
             let new_s3 = _mm256_add_epi16(
-                _mm256_sub_epi16(old_s3, _mm256_loadu_si256(old_cb_ptr.add(3))),
-                _mm256_loadu_si256(new_cb_ptr.add(3)),
+                _mm256_sub_epi16(old_s3, _mm256_load_si256(old_cb_ptr.add(3))),
+                _mm256_load_si256(new_cb_ptr.add(3)),
             );
 
-            _mm256_storeu_si256(new_s_ptr, new_s0);
-            _mm256_storeu_si256(new_s_ptr.add(1), new_s1);
-            _mm256_storeu_si256(new_s_ptr.add(2), new_s2);
-            _mm256_storeu_si256(new_s_ptr.add(3), new_s3);
+            _mm256_store_si256(new_s_ptr, new_s0);
+            _mm256_store_si256(new_s_ptr.add(1), new_s1);
+            _mm256_store_si256(new_s_ptr.add(2), new_s2);
+            _mm256_store_si256(new_s_ptr.add(3), new_s3);
 
             let old_c0 = _mm256_slli_epi16(_mm256_max_epi16(old_s0, zero), 2);
             let old_c1 = _mm256_slli_epi16(_mm256_max_epi16(old_s1, zero), 2);
@@ -1172,10 +1233,10 @@ impl Mix9svqAccumulator {
                         _mm256_mulhi_epi16(dw1, new_c1),
                         _mm256_mulhi_epi16(dw1, old_c1),
                     );
-                    _mm256_storeu_si256(dst, _mm256_add_epi16(_mm256_loadu_si256(dst), d0));
-                    _mm256_storeu_si256(
+                    _mm256_store_si256(dst, _mm256_add_epi16(_mm256_load_si256(dst), d0));
+                    _mm256_store_si256(
                         dst.add(1),
-                        _mm256_add_epi16(_mm256_loadu_si256(dst.add(1)), d1),
+                        _mm256_add_epi16(_mm256_load_si256(dst.add(1)), d1),
                     );
                     k += 1;
                 }
@@ -1237,9 +1298,9 @@ impl Mix9svqAccumulator {
                     .get_unchecked_mut(gj)
                     .as_mut_ptr() as *mut __m256i;
 
-                let old_v0 = _mm256_loadu_si256(old_ptr);
-                let new_v0 = _mm256_add_epi16(old_v0, _mm256_loadu_si256(new_ptr));
-                _mm256_storeu_si256(new_ptr, new_v0);
+                let old_v0 = _mm256_load_si256(old_ptr);
+                let new_v0 = _mm256_add_epi16(old_v0, _mm256_load_si256(new_ptr));
+                _mm256_store_si256(new_ptr, new_v0);
                 let diff0 = _mm256_sub_epi16(
                     _mm256_max_epi16(new_v0, zero),
                     _mm256_max_epi16(old_v0, zero),
@@ -1252,9 +1313,9 @@ impl Mix9svqAccumulator {
                     _mm256_add_epi32(_mm256_load_si256(vg_ptr.add(1)), hi0),
                 );
 
-                let old_v1 = _mm256_loadu_si256(old_ptr.add(1));
-                let new_v1 = _mm256_add_epi16(old_v1, _mm256_loadu_si256(new_ptr.add(1)));
-                _mm256_storeu_si256(new_ptr.add(1), new_v1);
+                let old_v1 = _mm256_load_si256(old_ptr.add(1));
+                let new_v1 = _mm256_add_epi16(old_v1, _mm256_load_si256(new_ptr.add(1)));
+                _mm256_store_si256(new_ptr.add(1), new_v1);
                 let diff1 = _mm256_sub_epi16(
                     _mm256_max_epi16(new_v1, zero),
                     _mm256_max_epi16(old_v1, zero),
@@ -1350,7 +1411,7 @@ impl Mix9svqAccumulator {
             for xi in x0..=x1 {
                 let outer_idx = outer_row + xi;
                 self.version_outer_index[outer_next_base + outer_idx] = new_map_conv_idx as u16;
-                self.map_conv[new_map_conv_idx] = [0; FEAT_DWCONV_DIM];
+                self.map_conv[new_map_conv_idx] = AlignedRow::zeroed();
                 new_map_conv_idx += 1;
             }
         }
@@ -1442,17 +1503,22 @@ impl Mix9svqAccumulator {
             if self.use_avx2 {
                 // SAFETY: `c.old_map_idx < c.new_map_idx` always holds since
                 // `new_map_idx` is strictly monotonically appended, so the two
-                // slices in `self.map_sum` never alias.
+                // slices in `self.map_sum` never alias; `AlignedRow<32>` has exact
+                // size 64 bytes matching `[i16; 32]`.
                 unsafe {
-                    let old_ptr = self.map_sum.as_ptr().add(c.old_map_idx);
-                    let new_ptr = self.map_sum.as_mut_ptr().add(c.new_map_idx);
+                    let old_ptr = &(*self.map_sum.as_ptr().add(c.old_map_idx)).0;
+                    let new_ptr = &mut (*self.map_sum.as_mut_ptr().add(c.new_map_idx)).0;
+                    let map_conv_raw = std::slice::from_raw_parts_mut(
+                        self.map_conv.as_mut_ptr() as *mut [i16; FEAT_DWCONV_DIM],
+                        self.map_conv.len(),
+                    );
                     update_point_avx2(
                         &w.codebook[c.mapping_idx][c.old_cb_idx],
                         &w.codebook[c.mapping_idx][c.new_cb_idx],
-                        &*old_ptr,
-                        &mut *new_ptr,
+                        old_ptr,
+                        new_ptr,
                         &w.feature_dwconv_weight,
-                        &mut self.map_conv,
+                        map_conv_raw,
                         &outer_indices,
                         &mut vsum_group[gi][gj],
                     );
@@ -1462,15 +1528,19 @@ impl Mix9svqAccumulator {
             #[cfg(target_arch = "aarch64")]
             if self.use_neon {
                 unsafe {
-                    let old_ptr = self.map_sum.as_ptr().add(c.old_map_idx);
-                    let new_ptr = self.map_sum.as_mut_ptr().add(c.new_map_idx);
+                    let old_ptr = &(*self.map_sum.as_ptr().add(c.old_map_idx)).0;
+                    let new_ptr = &mut (*self.map_sum.as_mut_ptr().add(c.new_map_idx)).0;
+                    let map_conv_raw = std::slice::from_raw_parts_mut(
+                        self.map_conv.as_mut_ptr() as *mut [i16; FEAT_DWCONV_DIM],
+                        self.map_conv.len(),
+                    );
                     update_point_neon(
                         &w.codebook[c.mapping_idx][c.old_cb_idx],
                         &w.codebook[c.mapping_idx][c.new_cb_idx],
-                        &*old_ptr,
-                        &mut *new_ptr,
+                        old_ptr,
+                        new_ptr,
                         &w.feature_dwconv_weight,
-                        &mut self.map_conv,
+                        map_conv_raw,
                         &outer_indices,
                         &mut vsum_group[gi][gj],
                     );
@@ -1480,7 +1550,7 @@ impl Mix9svqAccumulator {
 
             let old_cb = &w.codebook[c.mapping_idx][c.old_cb_idx];
             let new_cb = &w.codebook[c.mapping_idx][c.new_cb_idx];
-            let old_sum = self.map_sum[c.old_map_idx];
+            let old_sum = self.map_sum[c.old_map_idx].0;
             let mut new_sum = [0_i16; FEATURE_DIM];
             let mut old_f = [0_i16; FEATURE_DIM];
             let mut new_f = [0_i16; FEATURE_DIM];
@@ -1492,7 +1562,7 @@ impl Mix9svqAccumulator {
                 old_f[ch] = old_sum[ch].max(0);
                 new_f[ch] = ns.max(0);
             }
-            self.map_sum[c.new_map_idx] = new_sum;
+            self.map_sum[c.new_map_idx].0 = new_sum;
 
             let mut old_c = [0_i16; FEAT_DWCONV_DIM];
             let mut new_c = [0_i16; FEAT_DWCONV_DIM];
@@ -1527,9 +1597,9 @@ impl Mix9svqAccumulator {
                 #[cfg(target_arch = "x86_64")]
                 if self.use_avx2 {
                     unsafe {
-                        let old_ptr = self.map_conv.as_ptr().add(old_conv_idx);
-                        let new_ptr = self.map_conv.as_mut_ptr().add(commit_idx);
-                        commit_conv_cell_avx2(&*old_ptr, &mut *new_ptr, &mut vsum_group[gi][gj]);
+                        let old_ptr = &(*self.map_conv.as_ptr().add(old_conv_idx)).0;
+                        let new_ptr = &mut (*self.map_conv.as_mut_ptr().add(commit_idx)).0;
+                        commit_conv_cell_avx2(old_ptr, new_ptr, &mut vsum_group[gi][gj]);
                     }
                     commit_idx += 1;
                     continue;
@@ -1537,23 +1607,23 @@ impl Mix9svqAccumulator {
                 #[cfg(target_arch = "aarch64")]
                 if self.use_neon {
                     unsafe {
-                        let old_ptr = self.map_conv.as_ptr().add(old_conv_idx);
-                        let new_ptr = self.map_conv.as_mut_ptr().add(commit_idx);
-                        commit_conv_cell_neon(&*old_ptr, &mut *new_ptr, &mut vsum_group[gi][gj]);
+                        let old_ptr = &(*self.map_conv.as_ptr().add(old_conv_idx)).0;
+                        let new_ptr = &mut (*self.map_conv.as_mut_ptr().add(commit_idx)).0;
+                        commit_conv_cell_neon(old_ptr, new_ptr, &mut vsum_group[gi][gj]);
                     }
                     commit_idx += 1;
                     continue;
                 }
 
-                let old_v = self.map_conv[old_conv_idx];
-                let delta_v = self.map_conv[commit_idx];
+                let old_v = self.map_conv[old_conv_idx].0;
+                let delta_v = self.map_conv[commit_idx].0;
                 let mut new_v = [0_i16; FEAT_DWCONV_DIM];
                 for ch in 0..FEAT_DWCONV_DIM {
                     let nv = old_v[ch].wrapping_add(delta_v[ch]);
                     new_v[ch] = nv;
                     vsum_group[gi][gj][ch] += (nv.max(0) as i32) - (old_v[ch].max(0) as i32);
                 }
-                self.map_conv[commit_idx] = new_v;
+                self.map_conv[commit_idx].0 = new_v;
                 commit_idx += 1;
             }
         }
@@ -2259,7 +2329,7 @@ impl Mix9svqAccumulator {
             let mc_idx = self.version_outer_index[outer_ver_base + outer_idx] as usize;
             linear_i16_chunk2_prerelu_scalar::<POLICY_PWCONV_DIM, POLICY_DIM>(
                 &mut p_i32,
-                &self.map_conv[mc_idx],
+                &self.map_conv[mc_idx].0,
                 &pw_w,
                 &pw_b,
             );
@@ -2366,7 +2436,7 @@ impl Mix9svqAccumulator {
             let mc_idx = *outer_ver_ptr.add(outer_idx) as usize;
             linear_i16_chunk2_prerelu_avx2::<POLICY_PWCONV_DIM, POLICY_DIM>(
                 &mut *p_i32.as_mut_ptr(),
-                &*map_conv_ptr.add(mc_idx),
+                &(*map_conv_ptr.add(mc_idx)).0,
                 pw_w_ref,
                 pw_b_ref,
             );
@@ -2474,7 +2544,7 @@ impl Mix9svqAccumulator {
             let mc_idx = *outer_ver_ptr.add(outer_idx) as usize;
             linear_i16_chunk2_prerelu_avx2::<POLICY_PWCONV_DIM, POLICY_DIM>(
                 &mut *p_i32.as_mut_ptr(),
-                &*map_conv_ptr.add(mc_idx),
+                &(*map_conv_ptr.add(mc_idx)).0,
                 pw_w_ref,
                 pw_b_ref,
             );
@@ -2538,7 +2608,7 @@ impl Mix9svqAccumulator {
             let mc_idx = self.version_outer_index[outer_ver_base + outer_idx] as usize;
             linear_i16_chunk2_prerelu_neon::<POLICY_PWCONV_DIM, POLICY_DIM>(
                 &mut p_i32,
-                &self.map_conv[mc_idx],
+                &self.map_conv[mc_idx].0,
                 &pw_w,
                 &pw_b,
             );
@@ -2597,7 +2667,7 @@ impl Mix9svqAccumulator {
             let mc_idx = self.version_outer_index[outer_ver_base + outer_idx] as usize;
             linear_i16_chunk2_prerelu_neon::<POLICY_PWCONV_DIM, POLICY_DIM>(
                 &mut p_i32,
-                &self.map_conv[mc_idx],
+                &self.map_conv[mc_idx].0,
                 &pw_w,
                 &pw_b,
             );
@@ -2688,7 +2758,7 @@ impl Mix9svqAccumulator {
                 let mc_idx = self.version_outer_index[outer_ver_base + outer_row + x] as usize;
                 linear_i16_chunk2_prerelu_scalar::<POLICY_PWCONV_DIM, POLICY_DIM>(
                     &mut p_i32,
-                    &self.map_conv[mc_idx],
+                    &self.map_conv[mc_idx].0,
                     &pw_w,
                     &pw_b,
                 );
@@ -2755,7 +2825,7 @@ impl Mix9svqAccumulator {
                 let mc_idx = self.version_outer_index[outer_ver_base + outer_row + x] as usize;
                 linear_i16_chunk2_prerelu_avx2::<POLICY_PWCONV_DIM, POLICY_DIM>(
                     &mut p_i32,
-                    &self.map_conv[mc_idx],
+                    &self.map_conv[mc_idx].0,
                     &pw_w,
                     &pw_b,
                 );
@@ -2819,7 +2889,7 @@ impl Mix9svqAccumulator {
                 let mc_idx = self.version_outer_index[outer_ver_base + outer_row + x] as usize;
                 linear_i16_chunk2_prerelu_neon::<POLICY_PWCONV_DIM, POLICY_DIM>(
                     &mut p_i32,
-                    &self.map_conv[mc_idx],
+                    &self.map_conv[mc_idx].0,
                     &pw_w,
                     &pw_b,
                 );
@@ -2883,7 +2953,7 @@ impl Mix9svqAccumulator {
                 let mc_idx = self.version_outer_index[outer_ver_base + outer_row + x] as usize;
                 linear_i16_chunk2_prerelu_neon::<POLICY_PWCONV_DIM, POLICY_DIM>(
                     &mut p_i32,
-                    &self.map_conv[mc_idx],
+                    &self.map_conv[mc_idx].0,
                     &pw_w,
                     &pw_b,
                 );
