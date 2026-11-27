@@ -65,50 +65,24 @@ fn classical_move_score(board: &FastBoard, pos: usize, self_side: usize) -> i16 
     clamp_move_score(SELF_WEIGHT[s] + OPPO_WEIGHT[o])
 }
 
-/// Rapfi-aligned `fastPartialSort` (`movepick.cpp:72`), descending by `(score, Reverse(pos))`.
-fn fast_partial_sort(slice: &mut [ScoredMove]) {
-    let n = slice.len();
-    if n <= 1 {
-        return;
-    }
-    const INSERTION_LIMIT: usize = 56;
-    const PARTIAL_LIMIT: usize = 150;
-    let cmp =
-        |a: &ScoredMove, b: &ScoredMove| b.score.cmp(&a.score).then_with(|| a.pos.cmp(&b.pos));
-
-    if n <= INSERTION_LIMIT {
-        // Insertion sort for small lists (Rapfi's `limit = 0` partial insertion sort
-        // keeps moves with `score >= 0` sorted at the front, leaving `< 0` unsorted).
-        let mut sorted_end = 0_usize;
-        for p in 1..n {
-            if slice[p].score >= 0 {
-                let tmp = slice[p];
-                sorted_end += 1;
-                slice[p] = slice[sorted_end];
-                let mut q = sorted_end;
-                while q > 0 && cmp(&tmp, &slice[q - 1]).is_lt() {
-                    slice[q] = slice[q - 1];
-                    q -= 1;
-                }
-                slice[q] = tmp;
-            }
-        }
-        // Also ensure slice[0] is ordered properly if slice[0].score < 0 and something >= 0 arrived.
-        // Wait: the loop above inserts into `0..=sorted_end` comparing against `slice[q-1]`,
-        // which naturally pushes a negative `slice[0]` down past every non-negative move!
-    } else if n <= PARTIAL_LIMIT {
-        slice.sort_unstable_by(cmp);
-    } else {
-        slice.select_nth_unstable_by(PARTIAL_LIMIT - 1, cmp);
-        slice[..PARTIAL_LIMIT].sort_unstable_by(cmp);
-    }
+/// Pack `(score DESC, pos ASC)` into a single comparable `u32` key.
+#[inline(always)]
+fn scored_key(m: ScoredMove) -> u32 {
+    (((m.score as i32 + 32_768) as u32) << 16) | ((u16::MAX - m.pos) as u32)
 }
+
+/// Number of top moves selected lazily via O(N) linear scan before sorting the
+/// remaining tail. Most search nodes beta-cutoff within the first 1-4 moves,
+/// avoiding O(N log N) sorting of ~60 candidates on >90% of nodes while
+/// preserving exact `(score DESC, pos ASC)` order.
+const LAZY_SELECT_LIMIT: usize = 6;
 
 pub struct MovePicker {
     stage: Stage,
     tt_move: u16,
     allow_plain_b4_in_vcf: bool,
     has_policy: bool,
+    tail_sorted: bool,
     cur_score: i16,
     cur_idx: usize,
     moves: MoveList,
@@ -244,6 +218,7 @@ impl MovePicker {
             tt_move: if ttm_valid { tt_move } else { NONE_MOVE },
             allow_plain_b4_in_vcf: false,
             has_policy: false,
+            tail_sorted: true,
             cur_score: 0,
             cur_idx: 0,
             moves: MoveList::new(),
@@ -296,6 +271,7 @@ impl MovePicker {
             tt_move: if ttm_valid { tt_move } else { NONE_MOVE },
             allow_plain_b4_in_vcf: allow_plain_b4,
             has_policy: false,
+            tail_sorted: true,
             cur_score: 0,
             cur_idx: 0,
             moves: MoveList::new(),
@@ -406,7 +382,7 @@ impl MovePicker {
             m.score = clamp_move_score(total);
         }
 
-        fast_partial_sort(slice);
+        self.tail_sorted = n <= 1;
     }
 
     /// Pick next legal move, or `NONE_MOVE` when exhausted.
@@ -522,7 +498,29 @@ impl MovePicker {
                     let check_forbid = RENJU && board.side_to_move() == FE_BLACK;
                     let len = self.moves.len();
                     while self.cur_idx < len {
-                        let m = self.moves.as_slice()[self.cur_idx];
+                        let idx = self.cur_idx;
+                        if !self.tail_sorted {
+                            let slice = self.moves.as_mut_slice();
+                            if idx < LAZY_SELECT_LIMIT {
+                                let mut best_i = idx;
+                                let mut best_k = scored_key(slice[idx]);
+                                for j in (idx + 1)..len {
+                                    let k = scored_key(slice[j]);
+                                    if k > best_k {
+                                        best_k = k;
+                                        best_i = j;
+                                    }
+                                }
+                                if best_i != idx {
+                                    slice.swap(idx, best_i);
+                                }
+                            } else {
+                                slice[idx..]
+                                    .sort_unstable_by(|a, b| scored_key(*b).cmp(&scored_key(*a)));
+                                self.tail_sorted = true;
+                            }
+                        }
+                        let m = self.moves.as_slice()[idx];
                         self.cur_idx += 1;
                         if m.pos == self.tt_move {
                             continue;

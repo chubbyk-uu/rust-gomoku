@@ -310,6 +310,10 @@ pub struct FastBoard {
     zobrist_key: u64,
 }
 
+#[cfg(test)]
+pub(crate) static TEST_FORBID_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 impl FastBoard {
     pub fn new(rule: RuleSet, cand_range: CandRange) -> Self {
         let mut board = Self {
@@ -865,6 +869,8 @@ impl FastBoard {
         if self.pattern4(pos, FE_BLACK) != Pattern4::Forbid {
             return false;
         }
+        #[cfg(test)]
+        TEST_FORBID_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let mut win_by_four = 0_u8;
         for dir in 0..4 {

@@ -58,6 +58,46 @@ Verification & timing:
   - `play_move (pure)`: `~1,600+ ns -> 1,244–1,278 ns`.
   - `mid10 1T 1s`: `407K -> 451.6K` NPS (`+11.0%`, `d19/29`, `440K` nodes; 98.2% of Rapfi `460K` `d18/37`).
   - `mid10 4T 1s`: `1,886K -> 1,937K–2,156K` NPS (`d21/33–37`, matching Rapfi `2,180K` `d18/49`).
+- M1 100-game 1T Renju vs `pbrain-rapfi` (`strength_100_prefixes.jsonl`, 1s/move, 32 MiB TT, `--reuse-engine-state`):
+  - `51-49-0` (`51.0% ± 2.86%`, `+6.95 Elo`, `WW=1, WL=49, LL=0`), `avg 551.0ms / med 901.7ms / p95 974.4ms / max 983.3ms` (vs Rapfi `max 1026.2ms`, `0` timeouts; 1 ply-224 full-board Black-only-forbidden terminal error).
+  - Note: `strength_100_prefixes.jsonl` produced 49/50 splits because many ply-10 prefixes from classical games are already decisively won/lost for NNUE; all subsequent Phase 2+ single-factor gates use balanced Renjunet pro openings (`center_50_prefixes.jsonl`).
+- Rejected Phase 2.1 experiment (reverted):
+  - 3-key static-eval `CorrectionHistory` (`black_corr` + `white_corr` + `cont_corr`, `±256 cp` max, applied to `search()` and `vcfsearch()` with raw-eval TT purity):
+  - 100-game 1T Renju self-play vs `phase1_1t` (`center_50_prefixes.jsonl`, 500ms/move, 32 MiB TT, `--reuse-engine-state`): `40-45-15` (`47.5% ± 4.23%`, `-17.39 Elo`, `WW=0, WD=4, WL/DD=38, LD=7, LL=1`, `0` errors / `0` timeouts).
+  - Root cause: unlike Chess `pawn_hash` (slow endgame skeleton), Gomoku stones are permanent so `color_key(BLACK)` stays identical across all sibling White replies to a Black move, aliasing tactical outliers across siblings and overwhelming tight RFP/Razoring margins (`63 cp/ply`). Immediately reverted per stop-loss rule.
+- Rejected Phase 2.2 experiment (reverted):
+  - 1-ply + 2-ply `ContinuationHistory` (`2 x 225 x 225` `i16` each, `405 KiB/worker`, fed into `MovePicker` ordering + LMR `stat_score` without altering `static_eval`):
+  - 100-game 1T Renju self-play vs `phase1_1t` (`center_50_prefixes.jsonl`, 500ms/move, 32 MiB TT, `--reuse-engine-state`): `42-44-14` (`49.0% ± 4.77%`, `-6.95 Elo`, `WW=1, WD=4, WL/DD=39, LD=4, LL=2`, `0` timeouts; 1 ply-224 full-board Black-only-forbidden terminal error on `phase1_1t`).
+  - Root cause: `Mix9svq`'s dynamic pointwise policy head already supplies strong board-conditioned move ordering; allocating/zeroing `405 KiB` per move and indexing 2 extra tables per candidate added overhead without net Elo gain. Reverted per stop-loss rule.
+- Rejected Phase 2.3 experiment (reverted):
+  - Un-aged persistent `MainHistory` + `CounterMoveHistory` preserved across moves in `FastSearcher`:
+  - 100-game 1T Renju self-play vs `phase1_1t` (`center_50_prefixes.jsonl`, 500ms/move, 32 MiB TT, `--reuse-engine-state`): `42-48-10` (`47.0% ± 4.72%`, `-20.87 Elo`, `WW=1, WD=1, WL/DD=42, LD=3, LL=3`, `0` errors / `0` timeouts).
+  - Root cause: carrying un-decayed history from earlier board states biases LMR `stat_score` and ordering toward stale squares as tactics shift; fresh per-move history outperformed it cleanly. Reverted per stop-loss rule.
+
+## 2026-11-27 (2) — `exp/rapfi-60pct-phase1` Step 1: 2 MiB Huge Pages + VQ Skip + Policy Batch-4 + Lazy MovePicker (`+21%–28%` NPS vs `master`, surpassing Rapfi)
+
+Context:
+
+- Component breakdown probe on `012ec27` (`AnonHugePages: 0 kB`) showed `play_move` (~44%), `eval_value` (~17%), `FastBoard` (~8%), and `eval_policy` (~6.2%, avg 58–64 candidates) plus `MovePicker` sorting (falling back to full `sort_unstable_by` at `INSERTION_LIMIT = 56 < avg_c`) accounted for total search time, while host THP `/sys/kernel/mm/transparent_hugepage/enabled` was `[madvise]` (meaning `pbrain-rapfi` got 2 MiB huge pages while Rust got 4 KiB pages).
+
+Kept optimizations (100% bit-exact / order-exact, exact fixed `d15` node counts `10,619` and `36,808` unchanged):
+
+- `src/fast_engine/tt.rs` & `src/nnue/mix9svq.rs`:
+  - Linux 2 MiB Transparent Huge Pages (`alloc` → `madvise(MADV_HUGEPAGE)` → `write_bytes(0)`) for `FastTT` (`32 MiB`) and `Mix9svqWeight` `codebook`/`mapping_index` (`HugeBox<T>`, verified `AnonHugePages: 67,584 kB`).
+  - Zero-delta VQ cluster skip (`if old_cb_idx == new_cb_idx`) and early `codebook` prefetch (`changes[0..4]` + `i + 4`) in `play_move_avx2`.
+  - Fused 4-candidate AVX2 pointwise policy conv + output projection (`src/nnue/simd.rs::policy_eval_batch4_avx2`) loading `pw_w` once per 4 candidates (`eval_policy 30mv: 454 ns -> 411 ns`).
+- `src/fast_engine/movepick.rs`:
+  - Replaced upfront full `sort_unstable_by` on 60+ candidates with lazy top-6 `u32`-key selection sort (`scored_key` packing `(score DESC, pos ASC)`), deferring tail sort to rare all-nodes while keeping 100% identical move order.
+
+Verification & timing (`fast_engine_component_timing`, release+LTO, 32 MiB TT):
+
+- Fixed `d15 mid10` (`10,619` nodes, mv=129): `28.1ms (master)` → `25.04ms (Phase 1)` → **`23.16ms`** (`+21.3%` vs `master`).
+- Fixed `d15 open4` (`36,808` nodes, mv=83): `113.8ms (master)` → `100.61ms (Phase 1)` → **`92.71ms`** (`+22.7%` vs `master`).
+- `mid10 1T 1s`: `407K (master)` → **`492.7K` NPS** (`+21.1%` vs `master`, `1.07x` Rapfi `460K`).
+- `mid10 4T 1s`: `1,886K (master)` → **`2,208K` NPS** (`d23/28`, surpassing Rapfi `2,180K`).
+- `open4 1T 1s`: `333K (master)` → **`411.7K` NPS** (`+23.6%` vs `master`).
+- `open4 4T 1s`: `1,667K (master)` → **`2,131K` NPS** (`+27.8%` vs `master`).
+- Correctness: `mix9svq` bit-exact test + all `fast_engine` tests (`fast_tt_resize_kb_is_panic_safe_on_invalid_size` intact) passed.
 
 ## 2026-11-19 (3) — Incremental `dgn`, sparse `bucket_dot`, deferred rest-sort, and 4-line direct `value_wide_compute`
 

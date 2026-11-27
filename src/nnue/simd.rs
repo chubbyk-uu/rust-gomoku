@@ -648,6 +648,88 @@ pub unsafe fn linear_i16_chunk2_prerelu_avx2<const OUT: usize, const IN: usize>(
     _mm256_storeu_si256(output.as_mut_ptr().add(8) as *mut __m256i, acc1);
 }
 
+/// Fused 4-candidate AVX2 pointwise policy conv (`32 -> 16` pre-ReLU i16) +
+/// `policy_dot16` output projection. Loads `pw_w` (1 KiB) once per 4 candidates
+/// and keeps all 16-channel accumulators in YMM registers (100% bit-exact with
+/// `linear_i16_chunk2_prerelu_avx2` + `policy_dot16_avx2`).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn policy_eval_batch4_avx2(
+    in0: &[i16; 32],
+    in1: &[i16; 32],
+    in2: &[i16; 32],
+    in3: &[i16; 32],
+    pw_w: &[i16; 512],
+    pw_b: &[i32; 16],
+    out_w: &[f32; 16],
+    out_bias: f32,
+) -> [f32; 4] {
+    let zero = _mm256_setzero_si256();
+    let b0 = _mm256_loadu_si256(pw_b.as_ptr() as *const __m256i);
+    let b1 = _mm256_loadu_si256(pw_b.as_ptr().add(8) as *const __m256i);
+    let (mut a00, mut a01) = (b0, b1);
+    let (mut a10, mut a11) = (b0, b1);
+    let (mut a20, mut a21) = (b0, b1);
+    let (mut a30, mut a31) = (b0, b1);
+
+    let p0 = in0.as_ptr() as *const i32;
+    let p1 = in1.as_ptr() as *const i32;
+    let p2 = in2.as_ptr() as *const i32;
+    let p3 = in3.as_ptr() as *const i32;
+    let w_ptr = pw_w.as_ptr();
+
+    for c in 0..16 {
+        let w0 = _mm256_loadu_si256(w_ptr.add(c * 32) as *const __m256i);
+        let w1 = _mm256_loadu_si256(w_ptr.add(c * 32 + 16) as *const __m256i);
+
+        let v0 = _mm256_max_epi16(_mm256_set1_epi32(std::ptr::read_unaligned(p0.add(c))), zero);
+        a00 = _mm256_add_epi32(a00, _mm256_madd_epi16(v0, w0));
+        a01 = _mm256_add_epi32(a01, _mm256_madd_epi16(v0, w1));
+
+        let v1 = _mm256_max_epi16(_mm256_set1_epi32(std::ptr::read_unaligned(p1.add(c))), zero);
+        a10 = _mm256_add_epi32(a10, _mm256_madd_epi16(v1, w0));
+        a11 = _mm256_add_epi32(a11, _mm256_madd_epi16(v1, w1));
+
+        let v2 = _mm256_max_epi16(_mm256_set1_epi32(std::ptr::read_unaligned(p2.add(c))), zero);
+        a20 = _mm256_add_epi32(a20, _mm256_madd_epi16(v2, w0));
+        a21 = _mm256_add_epi32(a21, _mm256_madd_epi16(v2, w1));
+
+        let v3 = _mm256_max_epi16(_mm256_set1_epi32(std::ptr::read_unaligned(p3.add(c))), zero);
+        a30 = _mm256_add_epi32(a30, _mm256_madd_epi16(v3, w0));
+        a31 = _mm256_add_epi32(a31, _mm256_madd_epi16(v3, w1));
+    }
+
+    let fw0 = _mm256_loadu_ps(out_w.as_ptr());
+    let fw1 = _mm256_loadu_ps(out_w.as_ptr().add(8));
+    #[inline(always)]
+    unsafe fn reduce16(
+        a0: __m256i,
+        a1: __m256i,
+        zero: __m256i,
+        fw0: __m256,
+        fw1: __m256,
+        bias: f32,
+    ) -> f32 {
+        let f0 = _mm256_cvtepi32_ps(_mm256_max_epi32(a0, zero));
+        let f1 = _mm256_cvtepi32_ps(_mm256_max_epi32(a1, zero));
+        let prod = _mm256_add_ps(_mm256_mul_ps(f0, fw0), _mm256_mul_ps(f1, fw1));
+        let lo = _mm256_castps256_ps128(prod);
+        let hi = _mm256_extractf128_ps(prod, 1);
+        let sum4 = _mm_add_ps(lo, hi);
+        let shuf = _mm_movehdup_ps(sum4);
+        let sum2 = _mm_add_ps(sum4, shuf);
+        let shuf2 = _mm_movehl_ps(sum2, sum2);
+        _mm_cvtss_f32(_mm_add_ss(sum2, shuf2)) + bias
+    }
+    [
+        reduce16(a00, a01, zero, fw0, fw1, out_bias),
+        reduce16(a10, a11, zero, fw0, fw1, out_bias),
+        reduce16(a20, a21, zero, fw0, fw1, out_bias),
+        reduce16(a30, a31, zero, fw0, fw1, out_bias),
+    ]
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub unsafe fn avg_pool_2x2_u8_avx2(

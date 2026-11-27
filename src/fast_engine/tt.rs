@@ -10,8 +10,59 @@
 //!   any memory size, not just powers of two).
 //! - Integer ply depth range: `DEPTH_LOWER_BOUND (-20)..=DEPTH_UPPER_BOUND (235)`.
 
-use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::alloc::{alloc, alloc_zeroed, dealloc, Layout};
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+
+#[cfg(target_os = "linux")]
+const HUGE_PAGE_SIZE: usize = 2 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const MADV_HUGEPAGE: i32 = 14;
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn madvise(addr: *mut std::ffi::c_void, length: usize, advice: i32) -> i32;
+}
+
+/// Compute an allocation layout aligned/rounded to 2 MiB huge pages on Linux
+/// for large buffers (`>= 1 MiB`), falling back to `base` on smaller buffers
+/// or non-Linux targets.
+pub(crate) fn huge_page_layout(base: Layout) -> Layout {
+    #[cfg(target_os = "linux")]
+    {
+        if base.size() >= HUGE_PAGE_SIZE / 2 {
+            let align = base.align().max(HUGE_PAGE_SIZE);
+            if let Some(rounded) = base
+                .size()
+                .checked_add(HUGE_PAGE_SIZE - 1)
+                .map(|s| s & !(HUGE_PAGE_SIZE - 1))
+            {
+                if let Ok(layout) = Layout::from_size_align(rounded, align) {
+                    return layout;
+                }
+            }
+        }
+    }
+    base
+}
+
+/// Allocate zeroed memory backed by 2 MiB Transparent Huge Pages on Linux when
+/// `layout` is 2 MiB-aligned (`alloc` -> `madvise(MADV_HUGEPAGE)` -> `write_bytes(0)`
+/// so first-touch page faults immediately receive 2 MiB pages).
+///
+/// # Safety
+/// Caller must deallocate with the exact same `layout` via `std::alloc::dealloc`.
+pub(crate) unsafe fn alloc_huge_zeroed(layout: Layout) -> *mut u8 {
+    #[cfg(target_os = "linux")]
+    if layout.align() >= HUGE_PAGE_SIZE && layout.size() >= HUGE_PAGE_SIZE {
+        let ptr = alloc(layout);
+        if !ptr.is_null() {
+            let _ = madvise(ptr as *mut std::ffi::c_void, layout.size(), MADV_HUGEPAGE);
+            std::ptr::write_bytes(ptr, 0, layout.size());
+        }
+        return ptr;
+    }
+    alloc_zeroed(layout)
+}
 
 use crate::fast_engine::board::NONE_MOVE;
 
@@ -157,6 +208,7 @@ fn mulhi64(a: u64, b: usize) -> usize {
 /// Shared 5-tier transposition table. Safe to share across Lazy SMP threads via `&FastTT`.
 pub struct FastTT {
     ptr: *mut TTBucket,
+    alloc_layout: Layout,
     num_buckets: usize,
     generation: AtomicU8,
 }
@@ -178,9 +230,7 @@ unsafe impl Sync for FastTT {}
 impl Drop for FastTT {
     fn drop(&mut self) {
         if !self.ptr.is_null() && self.num_buckets > 0 {
-            let layout =
-                Layout::array::<TTBucket>(self.num_buckets).expect("valid TTBucket array layout");
-            unsafe { dealloc(self.ptr as *mut u8, layout) };
+            unsafe { dealloc(self.ptr as *mut u8, self.alloc_layout) };
         }
     }
 }
@@ -191,14 +241,17 @@ impl FastTT {
             .checked_mul(1024)
             .expect("FastTT hash_size_kb overflow");
         let num_buckets = (bytes / std::mem::size_of::<TTBucket>()).max(1);
-        let layout = Layout::array::<TTBucket>(num_buckets).expect("valid TTBucket array layout");
-        let ptr = unsafe { alloc_zeroed(layout) as *mut TTBucket };
+        let base_layout =
+            Layout::array::<TTBucket>(num_buckets).expect("valid TTBucket array layout");
+        let alloc_layout = huge_page_layout(base_layout);
+        let ptr = unsafe { alloc_huge_zeroed(alloc_layout) as *mut TTBucket };
         assert!(
             !ptr.is_null(),
             "failed to allocate FastTT ({hash_size_kb} KiB)"
         );
         Self {
             ptr,
+            alloc_layout,
             num_buckets,
             generation: AtomicU8::new(0),
         }
@@ -213,7 +266,7 @@ impl FastTT {
     }
 
     pub fn resize_kb(&mut self, hash_size_kb: usize) {
-        self.resize_kb_with_alloc(hash_size_kb, |layout| unsafe { alloc_zeroed(layout) });
+        self.resize_kb_with_alloc(hash_size_kb, |layout| unsafe { alloc_huge_zeroed(layout) });
     }
 
     #[inline(always)]
@@ -232,17 +285,18 @@ impl FastTT {
         // Allocate the new buffer before freeing the old one (strong exception
         // safety): if layout validation or allocation fails, the existing table
         // remains intact and valid for subsequent probe/store/hash_usage calls.
-        let new_layout = Layout::array::<TTBucket>(new_buckets).expect("new layout");
+        let base_layout = Layout::array::<TTBucket>(new_buckets).expect("new layout");
+        let new_layout = huge_page_layout(base_layout);
         let ptr = alloc_fn(new_layout) as *mut TTBucket;
         assert!(
             !ptr.is_null(),
             "failed to allocate FastTT ({hash_size_kb} KiB)"
         );
         if !self.ptr.is_null() && self.num_buckets > 0 {
-            let old_layout = Layout::array::<TTBucket>(self.num_buckets).expect("old layout");
-            unsafe { dealloc(self.ptr as *mut u8, old_layout) };
+            unsafe { dealloc(self.ptr as *mut u8, self.alloc_layout) };
         }
         self.ptr = ptr;
+        self.alloc_layout = new_layout;
         self.num_buckets = new_buckets;
         self.generation.store(0, Ordering::Relaxed);
     }

@@ -2424,50 +2424,124 @@ mod tests {
         }
         let fb_ns = t4.elapsed().as_nanos() as f64 / n_fb as f64;
 
-        // 6. Measure full 1T and 4T search on mid10
+        // 6. Measure full 1T and 4T search on mid10 and open4 with exact breakdown
         let searcher = FastSearcher::new(32 * 1024);
-        let r1 = searcher.search(
+        let read_huge_kb = || -> String {
+            std::fs::read_to_string("/proc/self/smaps_rollup")
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("AnonHugePages:"))
+                        .map(|l| l.trim().to_string())
+                })
+                .unwrap_or_else(|| "AnonHugePages: n/a".to_string())
+        };
+        let run_bench = |label: &str, board: &FastBoard, ev: &Mix9svqEvaluator, threads: usize| {
+            searcher.clear_tt();
+            crate::nnue::mix9svq::test_counters::reset();
+            crate::fast_engine::board::TEST_FORBID_CALLS.store(0, Ordering::Relaxed);
+            let r = searcher.search(
+                board,
+                ev,
+                &FastSearchConfig {
+                    max_depth: 99,
+                    time_limit_ms: Some(1000),
+                    num_threads: threads,
+                    ..Default::default()
+                },
+            );
+            let pm = crate::nnue::mix9svq::test_counters::PLAY_MOVE_CALLS.load(Ordering::Relaxed);
+            let vc = crate::nnue::mix9svq::test_counters::VALUE_CALLS.load(Ordering::Relaxed);
+            let pc = crate::nnue::mix9svq::test_counters::POLICY_CALLS.load(Ordering::Relaxed);
+            let pcands = crate::nnue::mix9svq::test_counters::POLICY_CANDS.load(Ordering::Relaxed);
+            let fc = crate::fast_engine::board::TEST_FORBID_CALLS.load(Ordering::Relaxed);
+            let pm_ms = pm as f64 * (pm_val_ns - 2.0 * val_ns) / 1e6;
+            let val_ms = vc as f64 * val_ns / 1e6;
+            let pol_ms = pc as f64 * pol_ns / 1e6;
+            let fb_ms = r.nodes as f64 * fb_ns / 1e6;
+            let avg_cands = if pc > 0 {
+                pcands as f64 / pc as f64
+            } else {
+                0.0
+            };
+            eprintln!(
+                "{label:12}: d{}/{} nodes={} time={:.1}ms nps={:.0} | pm={} (~{:.0}ms) val={} (~{:.0}ms) pol={} avg_c={:.1} (~{:.0}ms) fb(~{:.0}ms) forbid={}",
+                r.depth,
+                r.sel_depth,
+                r.nodes,
+                r.elapsed_ms,
+                r.nodes as f64 / (r.elapsed_ms / 1000.0),
+                pm,
+                pm_ms,
+                vc,
+                val_ms,
+                pc,
+                avg_cands,
+                pol_ms,
+                fb_ms,
+                fc,
+            );
+        };
+
+        // Also construct open4 board
+        let mut leg4 = Board::new();
+        let mut fb4 = FastBoard::new(RuleSet::Renju, CandRange::Square3Line4);
+        for &(x, y) in &[(7, 7), (7, 6), (8, 6), (6, 8)] {
+            let m = xy_to_move(x, y).unwrap();
+            leg4.play_for_rule(m, None, RuleSet::Renju).unwrap();
+            fb4.play(m as usize);
+        }
+        let mut ev4 = eval.clone();
+        ev4.sync_with_board(&leg4);
+        let _ = ev4.evaluate_value(BLACK);
+        let _ = ev4.evaluate_value(WHITE);
+
+        // Fixed d15 1T deterministic benchmark on mid10 & open4
+        searcher.clear_tt();
+        let d15_m = searcher.search(
             &fb,
             &eval,
             &FastSearchConfig {
-                max_depth: 99,
-                time_limit_ms: Some(1000),
+                max_depth: 15,
+                time_limit_ms: None,
                 num_threads: 1,
                 ..Default::default()
             },
         );
         searcher.clear_tt();
-        let r4 = searcher.search(
-            &fb,
-            &eval,
+        let d15_o = searcher.search(
+            &fb4,
+            &ev4,
             &FastSearchConfig {
-                max_depth: 99,
-                time_limit_ms: Some(1000),
-                num_threads: 4,
+                max_depth: 15,
+                time_limit_ms: None,
+                num_threads: 1,
                 ..Default::default()
             },
         );
+
         eprintln!(
-            "=== COMPONENT TIMING ===\n\
+            "=== COMPONENT TIMING ({}) ===\n\
              eval.clone()       : {clone_ms:.2} ms (4x = {:.2} ms)\n\
              eval_value (pure)  : {val_ns:.0} ns\n\
              play_move+val+undo : {pm_val_ns:.0} ns (implied play_move ~ {:.0} ns)\n\
              eval_policy (30mv) : {pol_ns:.0} ns\n\
              FastBoard play+undo: {fb_ns:.0} ns\n\
-             mid10 1T 1s        : d{}/{} nodes={} time={:.1}ms nps={:.0}\n\
-             mid10 4T 1s        : d{}/{} nodes={} time={:.1}ms nps={:.0}",
+             fixed d15 mid10    : nodes={} time={:.2}ms mv={}\n\
+             fixed d15 open4    : nodes={} time={:.2}ms mv={}",
+            read_huge_kb(),
             clone_ms * 4.0,
             pm_val_ns - 2.0 * val_ns,
-            r1.depth,
-            r1.sel_depth,
-            r1.nodes,
-            r1.elapsed_ms,
-            r1.nodes as f64 / (r1.elapsed_ms / 1000.0),
-            r4.depth,
-            r4.sel_depth,
-            r4.nodes,
-            r4.elapsed_ms,
-            r4.nodes as f64 / (r4.elapsed_ms / 1000.0),
+            d15_m.nodes,
+            d15_m.elapsed_ms,
+            d15_m.best_move,
+            d15_o.nodes,
+            d15_o.elapsed_ms,
+            d15_o.best_move,
         );
+        run_bench("mid10 1T 1s", &fb, &eval, 1);
+        run_bench("mid10 4T 1s", &fb, &eval, 4);
+        run_bench("open4 1T 1s", &fb4, &ev4, 1);
+        run_bench("open4 4T 1s", &fb4, &ev4, 4);
     }
 }

@@ -22,7 +22,7 @@ use crate::nnue::simd::{
     avg_pool_2x2_u8_avx2, commit_conv_cell_avx2, commit_vsum_avx2, crelu_i32_to_i16_avx2,
     crelu_i32_to_i8_avx2, dot2_u7i8_avx2, linear_i16_chunk2_prerelu_avx2, linear_i8_chunk4_avx2,
     linear_i8_chunk4_avxvnni, linear_i8_chunk4_batch4_avxvnni, linear_i8_row4_avx2,
-    linear_i8_row4_avxvnni, policy_dot16_avx2, update_point_avx2,
+    linear_i8_row4_avxvnni, policy_dot16_avx2, policy_eval_batch4_avx2, update_point_avx2,
 };
 
 #[cfg(target_arch = "aarch64")]
@@ -212,6 +212,62 @@ pub struct HeadBucket {
     policy_output_bias: f32,
 }
 
+/// Heap-allocated zero-initialized POD block backed by 2 MiB Transparent Huge
+/// Pages on Linux (`madvise(MADV_HUGEPAGE)` before first touch), reducing L2
+/// dTLB misses on the 16 MiB per-side `codebook` and `mapping_index` tables.
+struct HugeBox<T> {
+    ptr: std::ptr::NonNull<T>,
+    layout: std::alloc::Layout,
+}
+
+// SAFETY: `HugeBox<T>` exclusively owns a `T` buffer just like `Box<T>`.
+unsafe impl<T: Send> Send for HugeBox<T> {}
+unsafe impl<T: Sync> Sync for HugeBox<T> {}
+
+impl<T> HugeBox<T> {
+    /// Allocate a zero-initialized `T` in a hugepage-backed buffer.
+    ///
+    /// # Safety
+    /// All-zero bytes must be a valid bit pattern for `T`.
+    unsafe fn new_zeroed() -> Self {
+        let base = std::alloc::Layout::new::<T>();
+        let layout = crate::fast_engine::tt::huge_page_layout(base);
+        let raw = crate::fast_engine::tt::alloc_huge_zeroed(layout) as *mut T;
+        let ptr = std::ptr::NonNull::new(raw).expect("failed to allocate HugeBox");
+        Self { ptr, layout }
+    }
+}
+
+impl<T> std::ops::Deref for HugeBox<T> {
+    type Target = T;
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.ptr.as_ref() }
+    }
+}
+
+impl<T> std::ops::DerefMut for HugeBox<T> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { self.ptr.as_mut() }
+    }
+}
+
+impl<T> Drop for HugeBox<T> {
+    fn drop(&mut self) {
+        unsafe {
+            std::ptr::drop_in_place(self.ptr.as_ptr());
+            std::alloc::dealloc(self.ptr.as_ptr() as *mut u8, self.layout);
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for HugeBox<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HugeBox({} bytes)", self.layout.size())
+    }
+}
+
 /// Shared read-only `Mix9svq` weights (~18 MiB per side).
 ///
 /// All tensor buffers are private and shape-validated at load/construction time
@@ -220,8 +276,8 @@ pub struct HeadBucket {
 #[derive(Debug)]
 pub struct Mix9svqWeight {
     pub header: StandardHeader,
-    codebook: [Box<[[i16; FEATURE_DIM]; CODEBOOK_SIZE]>; 2],
-    mapping_index: [Box<[u16; SHAPE_NUM]>; 2],
+    codebook: [HugeBox<[[i16; FEATURE_DIM]; CODEBOOK_SIZE]>; 2],
+    mapping_index: HugeBox<[[u16; SHAPE_NUM]; 2]>,
     feature_dwconv_weight: [[i16; FEAT_DWCONV_DIM]; 9],
     feature_dwconv_bias: [i16; FEAT_DWCONV_DIM],
     bucket: HeadBucket,
@@ -394,16 +450,13 @@ impl Mix9svqWeight {
         }
 
         // 1. Read compressed codebooks (each codebook uses a fresh 10-bit stream)
-        let mut codebook: [Box<[[i16; FEATURE_DIM]; CODEBOOK_SIZE]>; 2] = [
-            vec![[0_i16; FEATURE_DIM]; CODEBOOK_SIZE]
-                .into_boxed_slice()
-                .try_into()
-                .expect("exact codebook length"),
-            vec![[0_i16; FEATURE_DIM]; CODEBOOK_SIZE]
-                .into_boxed_slice()
-                .try_into()
-                .expect("exact codebook length"),
-        ];
+        // SAFETY: integer arrays `[i16; ...]` and `[u16; ...]` are valid when zero-initialized.
+        let mut codebook: [HugeBox<[[i16; FEATURE_DIM]; CODEBOOK_SIZE]>; 2] = unsafe {
+            [
+                HugeBox::<[[i16; FEATURE_DIM]; CODEBOOK_SIZE]>::new_zeroed(),
+                HugeBox::<[[i16; FEATURE_DIM]; CODEBOOK_SIZE]>::new_zeroed(),
+            ]
+        };
         for cb in &mut codebook {
             let mut stream = PackedSigned10Stream::new();
             for row in cb.iter_mut() {
@@ -413,17 +466,9 @@ impl Mix9svqWeight {
             }
         }
 
-        let mut mapping_index: [Box<[u16; SHAPE_NUM]>; 2] = [
-            vec![0_u16; SHAPE_NUM]
-                .into_boxed_slice()
-                .try_into()
-                .expect("exact mapping_index length"),
-            vec![0_u16; SHAPE_NUM]
-                .into_boxed_slice()
-                .try_into()
-                .expect("exact mapping_index length"),
-        ];
-        for mi in &mut mapping_index {
+        let mut mapping_index: HugeBox<[[u16; SHAPE_NUM]; 2]> =
+            unsafe { HugeBox::<[[u16; SHAPE_NUM]; 2]>::new_zeroed() };
+        for mi in mapping_index.iter_mut() {
             let bytes = cur.take(SHAPE_NUM * 2)?;
             for (dst, chunk) in mi.iter_mut().zip(bytes.chunks_exact(2)) {
                 *dst = u16::from_le_bytes([chunk[0], chunk[1]]);
@@ -838,6 +883,10 @@ impl Mix9svqAccumulator {
         let x_i = x as isize;
         let y_i = y as isize;
 
+        let map_sum_ptr = self.map_sum.as_mut_ptr();
+        let cb_ptrs = [w.codebook[0].as_ptr(), w.codebook[1].as_ptr()];
+        let dw_weight_ptr = w.feature_dwconv_weight.as_ptr();
+
         // Fuse the 4 `dist == 0` updates at the newly placed cell `(x, y)` into
         // a single telescoping update (41 changes instead of 44, 100% bit-exact).
         let center_slot = vi_ptr.add(inner_next_base + y * BOARD_SIZE + x);
@@ -853,8 +902,19 @@ impl Mix9svqAccumulator {
             let new_shape = old_shape + center_delta;
             debug_assert!((new_shape as usize) < SHAPE_NUM);
             center_shapes[dir] = new_shape;
-            center_old_cb[dir] = *map_ptr.add(old_shape as usize);
-            center_new_cb[dir] = *map_ptr.add(new_shape as usize);
+            let ocb = *map_ptr.add(old_shape as usize);
+            let ncb = *map_ptr.add(new_shape as usize);
+            center_old_cb[dir] = ocb;
+            center_new_cb[dir] = ncb;
+            if ocb != ncb {
+                let cb_base = cb_ptrs[dir >> 1];
+                let p_old = cb_base.add(ocb as usize) as *const i8;
+                let p_new = cb_base.add(ncb as usize) as *const i8;
+                _mm_prefetch(p_old, _MM_HINT_T0);
+                _mm_prefetch(p_old.add(64), _MM_HINT_T0);
+                _mm_prefetch(p_new, _MM_HINT_T0);
+                _mm_prefetch(p_new.add(64), _MM_HINT_T0);
+            }
         }
         *idx_tbl_ptr.add(center_new_map_idx) = center_shapes;
         *center_slot = center_new_map_idx as u16;
@@ -886,6 +946,19 @@ impl Mix9svqAccumulator {
                 let new_cb_idx = *map_ptr.add(new_shape as usize);
                 *inner_slot = new_map_idx as u16;
 
+                if old_cb_idx == new_cb_idx {
+                    // Identical VQ codebook cluster -> bit-exact zero delta in map_sum,
+                    // map_conv (3x3 dwconv), and vsum_group.
+                    let old_s = map_sum_ptr.add(old_map_idx) as *const __m256i;
+                    let new_s = map_sum_ptr.add(new_map_idx) as *mut __m256i;
+                    _mm256_storeu_si256(new_s, _mm256_loadu_si256(old_s));
+                    _mm256_storeu_si256(new_s.add(1), _mm256_loadu_si256(old_s.add(1)));
+                    _mm256_storeu_si256(new_s.add(2), _mm256_loadu_si256(old_s.add(2)));
+                    _mm256_storeu_si256(new_s.add(3), _mm256_loadu_si256(old_s.add(3)));
+                    new_map_idx += 1;
+                    continue;
+                }
+
                 changes
                     .get_unchecked_mut(change_count)
                     .write(OnePointChange {
@@ -902,6 +975,19 @@ impl Mix9svqAccumulator {
             }
         }
 
+        // Prime L1/L2 prefetch for the first 4 changes while zeroing vsum & updating center.
+        let prime_n = change_count.min(4);
+        for i in 0..prime_n {
+            let cp = changes.get_unchecked(i).assume_init();
+            let cb_next = cb_ptrs[cp.mapping_idx as usize];
+            let p_old = cb_next.add(cp.old_cb_idx as usize) as *const i8;
+            let p_new = cb_next.add(cp.new_cb_idx as usize) as *const i8;
+            _mm_prefetch(p_old, _MM_HINT_T0);
+            _mm_prefetch(p_old.add(64), _MM_HINT_T0);
+            _mm_prefetch(p_new, _MM_HINT_T0);
+            _mm_prefetch(p_new.add(64), _MM_HINT_T0);
+        }
+
         // Zero aligned vsum_group via inline AVX2 stores (no glibc memset).
         let mut vsum_aligned = std::mem::MaybeUninit::<AlignedVSum>::uninit();
         let vsum_raw = vsum_aligned.as_mut_ptr() as *mut __m256i;
@@ -909,10 +995,6 @@ impl Mix9svqAccumulator {
             _mm256_store_si256(vsum_raw.add(i), zero);
         }
         let vsum_group = &mut (*vsum_aligned.as_mut_ptr()).0;
-
-        let map_sum_ptr = self.map_sum.as_mut_ptr();
-        let cb_ptrs = [w.codebook[0].as_ptr(), w.codebook[1].as_ptr()];
-        let dw_weight_ptr = w.feature_dwconv_weight.as_ptr();
 
         // Apply fused 4-direction update for center cell `(x, y)`.
         {
@@ -924,6 +1006,9 @@ impl Mix9svqAccumulator {
             let old_s3 = _mm256_loadu_si256(old_s_ptr.add(3));
             let (mut new_s0, mut new_s1, mut new_s2, mut new_s3) = (old_s0, old_s1, old_s2, old_s3);
             for dir in 0..4 {
+                if center_old_cb[dir] == center_new_cb[dir] {
+                    continue;
+                }
                 let cb_base = cb_ptrs[dir >> 1];
                 let old_cb_ptr = cb_base.add(center_old_cb[dir] as usize) as *const __m256i;
                 let new_cb_ptr = cb_base.add(center_new_cb[dir] as usize) as *const __m256i;
@@ -1019,8 +1104,8 @@ impl Mix9svqAccumulator {
 
         for i in 0..change_count {
             let c = changes.get_unchecked(i).assume_init();
-            if i + 2 < change_count {
-                let cnext = changes.get_unchecked(i + 2).assume_init();
+            if i + 4 < change_count {
+                let cnext = changes.get_unchecked(i + 4).assume_init();
                 let cb_next = cb_ptrs[cnext.mapping_idx as usize];
                 let p_old = cb_next.add(cnext.old_cb_idx as usize) as *const i8;
                 let p_new = cb_next.add(cnext.new_cb_idx as usize) as *const i8;
@@ -2245,7 +2330,37 @@ impl Mix9svqAccumulator {
         let map_conv_ptr = self.map_conv.as_ptr();
         let mut p_i32 = MaybeUninit::<[i32; POLICY_PWCONV_DIM]>::uninit();
         let n = moves.len().min(out_scores.len());
-        for i in 0..n {
+        let mut i = 0;
+        while i + 4 <= n {
+            let mc0 = *outer_ver_ptr
+                .add(*INNER_TO_OUTER.get_unchecked(*moves.get_unchecked(i) as usize) as usize)
+                as usize;
+            let mc1 = *outer_ver_ptr
+                .add(*INNER_TO_OUTER.get_unchecked(*moves.get_unchecked(i + 1) as usize) as usize)
+                as usize;
+            let mc2 = *outer_ver_ptr
+                .add(*INNER_TO_OUTER.get_unchecked(*moves.get_unchecked(i + 2) as usize) as usize)
+                as usize;
+            let mc3 = *outer_ver_ptr
+                .add(*INNER_TO_OUTER.get_unchecked(*moves.get_unchecked(i + 3) as usize) as usize)
+                as usize;
+            let s4 = policy_eval_batch4_avx2(
+                &*map_conv_ptr.add(mc0),
+                &*map_conv_ptr.add(mc1),
+                &*map_conv_ptr.add(mc2),
+                &*map_conv_ptr.add(mc3),
+                pw_w_ref,
+                pw_b_ref,
+                &b.policy_output_weight,
+                b.policy_output_bias,
+            );
+            *out_scores.get_unchecked_mut(i) = s4[0];
+            *out_scores.get_unchecked_mut(i + 1) = s4[1];
+            *out_scores.get_unchecked_mut(i + 2) = s4[2];
+            *out_scores.get_unchecked_mut(i + 3) = s4[3];
+            i += 4;
+        }
+        while i < n {
             let idx = *moves.get_unchecked(i) as usize;
             let outer_idx = *INNER_TO_OUTER.get_unchecked(idx) as usize;
             let mc_idx = *outer_ver_ptr.add(outer_idx) as usize;
@@ -2260,6 +2375,7 @@ impl Mix9svqAccumulator {
                 &b.policy_output_weight,
                 b.policy_output_bias,
             );
+            i += 1;
         }
     }
 
@@ -2322,7 +2438,37 @@ impl Mix9svqAccumulator {
         let map_conv_ptr = self.map_conv.as_ptr();
         let mut p_i32 = MaybeUninit::<[i32; POLICY_PWCONV_DIM]>::uninit();
         let n = moves.len().min(out_scores.len());
-        for i in 0..n {
+        let mut i = 0;
+        while i + 4 <= n {
+            let mc0 = *outer_ver_ptr
+                .add(*INNER_TO_OUTER.get_unchecked(*moves.get_unchecked(i) as usize) as usize)
+                as usize;
+            let mc1 = *outer_ver_ptr
+                .add(*INNER_TO_OUTER.get_unchecked(*moves.get_unchecked(i + 1) as usize) as usize)
+                as usize;
+            let mc2 = *outer_ver_ptr
+                .add(*INNER_TO_OUTER.get_unchecked(*moves.get_unchecked(i + 2) as usize) as usize)
+                as usize;
+            let mc3 = *outer_ver_ptr
+                .add(*INNER_TO_OUTER.get_unchecked(*moves.get_unchecked(i + 3) as usize) as usize)
+                as usize;
+            let s4 = policy_eval_batch4_avx2(
+                &*map_conv_ptr.add(mc0),
+                &*map_conv_ptr.add(mc1),
+                &*map_conv_ptr.add(mc2),
+                &*map_conv_ptr.add(mc3),
+                pw_w_ref,
+                pw_b_ref,
+                &b.policy_output_weight,
+                b.policy_output_bias,
+            );
+            *out_scores.get_unchecked_mut(i) = s4[0];
+            *out_scores.get_unchecked_mut(i + 1) = s4[1];
+            *out_scores.get_unchecked_mut(i + 2) = s4[2];
+            *out_scores.get_unchecked_mut(i + 3) = s4[3];
+            i += 4;
+        }
+        while i < n {
             let idx = *moves.get_unchecked(i) as usize;
             let outer_idx = *INNER_TO_OUTER.get_unchecked(idx) as usize;
             let mc_idx = *outer_ver_ptr.add(outer_idx) as usize;
@@ -2337,6 +2483,7 @@ impl Mix9svqAccumulator {
                 &b.policy_output_weight,
                 b.policy_output_bias,
             );
+            i += 1;
         }
     }
 
@@ -3097,6 +3244,22 @@ pub struct Mix9svqEvaluator {
     pending_balance: isize,
 }
 
+#[cfg(test)]
+pub(crate) mod test_counters {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    pub static PLAY_MOVE_CALLS: AtomicU64 = AtomicU64::new(0);
+    pub static VALUE_CALLS: AtomicU64 = AtomicU64::new(0);
+    pub static POLICY_CALLS: AtomicU64 = AtomicU64::new(0);
+    pub static POLICY_CANDS: AtomicU64 = AtomicU64::new(0);
+
+    pub fn reset() {
+        PLAY_MOVE_CALLS.store(0, Ordering::Relaxed);
+        VALUE_CALLS.store(0, Ordering::Relaxed);
+        POLICY_CALLS.store(0, Ordering::Relaxed);
+        POLICY_CANDS.store(0, Ordering::Relaxed);
+    }
+}
+
 impl Mix9svqEvaluator {
     pub fn new(black_weight: Arc<Mix9svqWeight>, white_weight: Arc<Mix9svqWeight>) -> Self {
         let mut eval = Self {
@@ -3256,6 +3419,8 @@ impl Mix9svqEvaluator {
                 } else {
                     entry.new_color
                 };
+                #[cfg(test)]
+                test_counters::PLAY_MOVE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 acc.play_move(w, piece, entry.x as usize, entry.y as usize);
             } else {
                 acc.undo();
@@ -3280,6 +3445,8 @@ impl Mix9svqEvaluator {
     /// Evaluate the current position from `side_to_move`'s perspective in centipawns.
     #[inline]
     pub fn evaluate_value(&mut self, side_to_move: Side) -> i32 {
+        #[cfg(test)]
+        test_counters::VALUE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let slot = side_to_color(side_to_move) as usize;
         self.flush_move_cache(slot);
         let (_, (w, l, d)) = self.accumulator[slot].evaluate_value_logits(&self.weight[slot]);
@@ -3293,6 +3460,12 @@ impl Mix9svqEvaluator {
         moves: &[crate::types::Move],
         out_scores: &mut [f32],
     ) {
+        #[cfg(test)]
+        {
+            test_counters::POLICY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            test_counters::POLICY_CANDS
+                .fetch_add(moves.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         let slot = side_to_color(side_to_move) as usize;
         self.flush_move_cache(slot);
         self.accumulator[slot].evaluate_policy_moves(&self.weight[slot], moves, out_scores);
