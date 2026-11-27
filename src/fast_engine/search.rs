@@ -1486,6 +1486,8 @@ impl<'a> SearchWorker<'a> {
                     return beta;
                 } else if tt_value >= beta {
                     extension = -SE_REDUCTION_FH;
+                } else if cut_node {
+                    extension = -1.5;
                 }
             } else if mv == tt_move {
                 extension = if pv_node {
