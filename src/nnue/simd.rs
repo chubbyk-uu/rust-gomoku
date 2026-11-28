@@ -1208,8 +1208,7 @@ pub unsafe fn linear_i8_chunk4_batch4_avxvnni<
     let stride = OUT * 4;
 
     let mut out_batch = 0;
-    // 12-YMM-accumulator tile (4 inputs x 3 output vectors = 12 accumulators + 3 weights + 1 input = 16 YMM).
-    // Hides 5-cycle vpdpbusd latency on dual FMA/VNNI ports and cuts outer loop passes by 33%.
+    // Twelve accumulators, three weights, and one input broadcast fit in 16 YMM registers.
     while out_batch + 3 <= num_batches {
         let boff = out_batch * 8;
         let b0 = _mm256_loadu_si256(b_ptr.add(boff) as *const __m256i);
@@ -1223,34 +1222,52 @@ pub unsafe fn linear_i8_chunk4_batch4_avxvnni<
         let w_base = w_ptr.add(out_batch * 32);
         for c in 0..num_chunks {
             let wc = w_base.add(c * stride);
+            let w0 = _mm256_loadu_si256(wc as *const __m256i);
+            let w1 = _mm256_loadu_si256(wc.add(32) as *const __m256i);
+            let w2 = _mm256_loadu_si256(wc.add(64) as *const __m256i);
 
-            let v0 = _mm256_set1_epi32(std::ptr::read_unaligned(p0.add(c)));
-            a00 = _mm256_dpbusd_avx_epi32(a00, v0, _mm256_loadu_si256(wc as *const __m256i));
-            a01 =
-                _mm256_dpbusd_avx_epi32(a01, v0, _mm256_loadu_si256(wc.add(32) as *const __m256i));
-            a02 =
-                _mm256_dpbusd_avx_epi32(a02, v0, _mm256_loadu_si256(wc.add(64) as *const __m256i));
-
-            let v1 = _mm256_set1_epi32(std::ptr::read_unaligned(p1.add(c)));
-            a10 = _mm256_dpbusd_avx_epi32(a10, v1, _mm256_loadu_si256(wc as *const __m256i));
-            a11 =
-                _mm256_dpbusd_avx_epi32(a11, v1, _mm256_loadu_si256(wc.add(32) as *const __m256i));
-            a12 =
-                _mm256_dpbusd_avx_epi32(a12, v1, _mm256_loadu_si256(wc.add(64) as *const __m256i));
-
-            let v2 = _mm256_set1_epi32(std::ptr::read_unaligned(p2.add(c)));
-            a20 = _mm256_dpbusd_avx_epi32(a20, v2, _mm256_loadu_si256(wc as *const __m256i));
-            a21 =
-                _mm256_dpbusd_avx_epi32(a21, v2, _mm256_loadu_si256(wc.add(32) as *const __m256i));
-            a22 =
-                _mm256_dpbusd_avx_epi32(a22, v2, _mm256_loadu_si256(wc.add(64) as *const __m256i));
-
-            let v3 = _mm256_set1_epi32(std::ptr::read_unaligned(p3.add(c)));
-            a30 = _mm256_dpbusd_avx_epi32(a30, v3, _mm256_loadu_si256(wc as *const __m256i));
-            a31 =
-                _mm256_dpbusd_avx_epi32(a31, v3, _mm256_loadu_si256(wc.add(32) as *const __m256i));
-            a32 =
-                _mm256_dpbusd_avx_epi32(a32, v3, _mm256_loadu_si256(wc.add(64) as *const __m256i));
+            // Reuse a single broadcast register. LLVM can otherwise schedule two
+            // broadcasts together and spill an accumulator on every chunk.
+            std::arch::asm!(
+                "vpbroadcastd {input}, dword ptr [{p0} + {chunk} * 4]",
+                "{{vex}} vpdpbusd {a00}, {input}, {w0}",
+                "{{vex}} vpdpbusd {a01}, {input}, {w1}",
+                "{{vex}} vpdpbusd {a02}, {input}, {w2}",
+                "vpbroadcastd {input}, dword ptr [{p1} + {chunk} * 4]",
+                "{{vex}} vpdpbusd {a10}, {input}, {w0}",
+                "{{vex}} vpdpbusd {a11}, {input}, {w1}",
+                "{{vex}} vpdpbusd {a12}, {input}, {w2}",
+                "vpbroadcastd {input}, dword ptr [{p2} + {chunk} * 4]",
+                "{{vex}} vpdpbusd {a20}, {input}, {w0}",
+                "{{vex}} vpdpbusd {a21}, {input}, {w1}",
+                "{{vex}} vpdpbusd {a22}, {input}, {w2}",
+                "vpbroadcastd {input}, dword ptr [{p3} + {chunk} * 4]",
+                "{{vex}} vpdpbusd {a30}, {input}, {w0}",
+                "{{vex}} vpdpbusd {a31}, {input}, {w1}",
+                "{{vex}} vpdpbusd {a32}, {input}, {w2}",
+                p0 = in(reg) p0,
+                p1 = in(reg) p1,
+                p2 = in(reg) p2,
+                p3 = in(reg) p3,
+                chunk = in(reg) c,
+                w0 = in(ymm_reg) w0,
+                w1 = in(ymm_reg) w1,
+                w2 = in(ymm_reg) w2,
+                input = out(ymm_reg) _,
+                a00 = inout(ymm_reg) a00,
+                a01 = inout(ymm_reg) a01,
+                a02 = inout(ymm_reg) a02,
+                a10 = inout(ymm_reg) a10,
+                a11 = inout(ymm_reg) a11,
+                a12 = inout(ymm_reg) a12,
+                a20 = inout(ymm_reg) a20,
+                a21 = inout(ymm_reg) a21,
+                a22 = inout(ymm_reg) a22,
+                a30 = inout(ymm_reg) a30,
+                a31 = inout(ymm_reg) a31,
+                a32 = inout(ymm_reg) a32,
+                options(pure, readonly, nostack, preserves_flags),
+            );
         }
 
         _mm256_storeu_si256(o0_ptr.add(boff) as *mut __m256i, a00);

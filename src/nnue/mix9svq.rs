@@ -837,6 +837,54 @@ impl Mix9svqAccumulator {
     unsafe fn play_move_avx2(&mut self, w: &Mix9svqWeight, piece_color: u8, x: usize, y: usize) {
         use std::arch::x86_64::*;
 
+        // Pack the ternary increment, board index, y, and x into 16/8/4/4 bits.
+        #[derive(Clone, Copy)]
+        struct Ray {
+            cells: [u32; 10],
+            len: usize,
+        }
+
+        const fn build_rays() -> [[Ray; 4]; BOARD_AREA] {
+            assert!(BOARD_SIZE <= 16 && POWER3[10] <= u16::MAX as u32);
+            let mut rays = [[Ray {
+                cells: [0; 10],
+                len: 0,
+            }; 4]; BOARD_AREA];
+            let mut pos = 0;
+            while pos < BOARD_AREA {
+                let x = (pos % BOARD_SIZE) as isize;
+                let y = (pos / BOARD_SIZE) as isize;
+                let mut dir = 0;
+                while dir < 4 {
+                    let ray = &mut rays[pos][dir];
+                    let mut dist = -5_isize;
+                    while dist <= 5 {
+                        let xi = x + dist * DX[dir];
+                        let yi = y + dist * DY[dir];
+                        if dist != 0
+                            && xi >= 0
+                            && xi < BOARD_SIZE as isize
+                            && yi >= 0
+                            && yi < BOARD_SIZE as isize
+                        {
+                            let inner = yi as u32 * BOARD_SIZE as u32 + xi as u32;
+                            ray.cells[ray.len] = (POWER3[(dist + 5) as usize] << 16)
+                                | (inner << 8)
+                                | ((yi as u32) << 4)
+                                | xi as u32;
+                            ray.len += 1;
+                        }
+                        dist += 1;
+                    }
+                    dir += 1;
+                }
+                pos += 1;
+            }
+            rays
+        }
+
+        static RAYS: [[Ray; 4]; BOARD_AREA] = build_rays();
+
         #[derive(Clone, Copy)]
         struct OnePointChange {
             x: u8,
@@ -918,9 +966,7 @@ impl Mix9svqAccumulator {
         let idx_tbl_ptr = self.index_table.as_mut_ptr();
         let map_idx_ptrs = [w.mapping_index[0].as_ptr(), w.mapping_index[1].as_ptr()];
         let mut new_map_idx = change_num.inner as usize;
-        const BS_SUB1: isize = (BOARD_SIZE - 1) as isize;
-        let x_i = x as isize;
-        let y_i = y as isize;
+        let rays = RAYS.get_unchecked(y * BOARD_SIZE + x);
 
         let map_sum_ptr = self.map_sum.as_mut_ptr();
         let cb_ptrs = [w.codebook[0].as_ptr(), w.codebook[1].as_ptr()];
@@ -950,47 +996,50 @@ impl Mix9svqAccumulator {
 
         // Pass 1: update index_table for all ray cells and issue parallel prefetches
         // into the 1.77 MiB `mapping_index` table.
-        for dir in 0..4 {
-            let mapping_idx = dir >> 1;
-            let map_ptr = map_idx_ptrs[mapping_idx];
-            let dx_dir = DX[dir];
-            let dy_dir = DY[dir];
-            for dist in [-5_isize, -4, -3, -2, -1, 1, 2, 3, 4, 5] {
-                let xi = x_i + dist * dx_dir;
-                let yi = y_i + dist * dy_dir;
-                if (xi | (BS_SUB1 - xi) | yi | (BS_SUB1 - yi)) < 0 {
-                    continue;
+        // A constant direction lets the four-component shape update stay in a vector register.
+        macro_rules! update_ray {
+            ($direction:literal) => {{
+                let dir: usize = $direction;
+                let mapping_idx = dir >> 1;
+                let map_ptr = map_idx_ptrs[mapping_idx];
+                let ray = &rays[dir];
+                for &cell in ray.cells.get_unchecked(..ray.len) {
+                    let xu = (cell & 15) as u8;
+                    let yu = ((cell >> 4) & 15) as u8;
+                    let inner = ((cell >> 8) & 255) as usize;
+                    let inner_slot = vi_ptr.add(inner_next_base + inner);
+                    let old_map_idx = *inner_slot as usize;
+                    let mut next_shapes = *idx_tbl_ptr.add(old_map_idx);
+                    let old_shape = next_shapes[dir];
+                    let new_shape = old_shape + d_pow3 * (cell >> 16);
+                    debug_assert!((new_shape as usize) < SHAPE_NUM);
+                    next_shapes[dir] = new_shape;
+                    *idx_tbl_ptr.add(new_map_idx) = next_shapes;
+                    *inner_slot = new_map_idx as u16;
+
+                    _mm_prefetch(map_ptr.add(old_shape as usize) as *const i8, _MM_HINT_T0);
+                    _mm_prefetch(map_ptr.add(new_shape as usize) as *const i8, _MM_HINT_T0);
+
+                    pending
+                        .get_unchecked_mut(pending_count)
+                        .write(PendingShape {
+                            x: xu,
+                            y: yu,
+                            mapping_idx: mapping_idx as u8,
+                            old_map_idx: old_map_idx as u16,
+                            new_map_idx: new_map_idx as u16,
+                            old_shape,
+                            new_shape,
+                        });
+                    pending_count += 1;
+                    new_map_idx += 1;
                 }
-                let xu = xi as usize;
-                let yu = yi as usize;
-                let inner_slot = vi_ptr.add(inner_next_base + yu * BOARD_SIZE + xu);
-                let old_map_idx = *inner_slot as usize;
-                let mut next_shapes = *idx_tbl_ptr.add(old_map_idx);
-                let old_shape = next_shapes[dir];
-                let new_shape = old_shape + d_pow3 * POWER3[(dist + 5) as usize];
-                debug_assert!((new_shape as usize) < SHAPE_NUM);
-                next_shapes[dir] = new_shape;
-                *idx_tbl_ptr.add(new_map_idx) = next_shapes;
-                *inner_slot = new_map_idx as u16;
-
-                _mm_prefetch(map_ptr.add(old_shape as usize) as *const i8, _MM_HINT_T0);
-                _mm_prefetch(map_ptr.add(new_shape as usize) as *const i8, _MM_HINT_T0);
-
-                pending
-                    .get_unchecked_mut(pending_count)
-                    .write(PendingShape {
-                        x: xu as u8,
-                        y: yu as u8,
-                        mapping_idx: mapping_idx as u8,
-                        old_map_idx: old_map_idx as u16,
-                        new_map_idx: new_map_idx as u16,
-                        old_shape,
-                        new_shape,
-                    });
-                pending_count += 1;
-                new_map_idx += 1;
-            }
+            }};
         }
+        update_ray!(0);
+        update_ray!(1);
+        update_ray!(2);
+        update_ray!(3);
 
         // Resolve center cell codebook indices and prefetch its codebook lines.
         let mut center_old_cb = [0_u16; 4];
