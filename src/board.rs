@@ -4,7 +4,7 @@
 //! Gomocup and GUI conventions. The internal grid is stored as
 //! `grid[row][column]`, and `Move` is encoded as `row * BOARD_SIZE + column`.
 
-use crate::constants::{BLACK, BOARD_AREA, BOARD_SIZE, EMPTY};
+use crate::constants::{BLACK, BOARD_AREA, BOARD_SIZE, EMPTY, WHITE};
 use crate::rules::{classify_forbidden_move, ForbiddenKind, RuleSet};
 use crate::types::{is_valid_side, opposite_side, Move, PlayedMove, Side};
 use crate::zobrist::{validate_side, ZobristError, ZobristTable, DEFAULT_ZOBRIST};
@@ -193,6 +193,17 @@ impl Board {
         rule: RuleSet,
     ) -> Result<PlayedMove, BoardError> {
         self.play_with_rule(move_, side, rule, false)
+    }
+
+    /// Record an adjudicated Renju black forbidden move and the resulting loss.
+    /// The caller has already established that the move is forbidden.
+    pub(crate) fn play_renju_forbidden_loss(
+        &mut self,
+        move_: Move,
+    ) -> Result<PlayedMove, BoardError> {
+        let played = self.play_assuming_rule_legal(move_, Some(BLACK), RuleSet::Renju)?;
+        self.winner = WHITE;
+        Ok(played)
     }
 
     fn play_with_rule(

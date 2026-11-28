@@ -17,22 +17,17 @@ use crate::rules::RuleSet;
 
 const MAX_FIND_DIST: isize = 4;
 
-/// A candidate move paired with ordering scores (matching Rapfi `ScoredMove`).
+/// A candidate move paired with ordering score (4 bytes, 4-byte aligned).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ScoredMove {
     pub pos: u16,
     pub score: i16,
-    pub raw_score: i16,
 }
 
 impl ScoredMove {
     #[inline(always)]
     pub const fn new(pos: u16) -> Self {
-        Self {
-            pos,
-            score: 0,
-            raw_score: 0,
-        }
+        Self { pos, score: 0 }
     }
 }
 

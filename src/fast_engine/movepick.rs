@@ -156,7 +156,6 @@ impl MovePicker {
             );
             for i in 0..legal_len {
                 let s = clamp_move_score((raw_scores[i] * POLICY_SCORE_SCALE) as i32);
-                buf[i].raw_score = s;
                 buf[i].score = s;
             }
             buf[..legal_len]
@@ -320,7 +319,7 @@ impl MovePicker {
                     raw_policy[i].write(0.0);
                 }
                 let side_val = if self_side == FE_BLACK { BLACK } else { WHITE };
-                // SAFETY: `move_list[..n]` and `raw_policy[..n]` are initialized above.
+                // SAFETY: Both buffers have their first n elements initialized above.
                 let ml_slice =
                     unsafe { std::slice::from_raw_parts(move_list.as_ptr() as *const u16, n) };
                 let rp_slice = unsafe {
@@ -370,8 +369,6 @@ impl MovePicker {
             } else {
                 classical_move_score(board, pos, self_side)
             };
-            m.raw_score = raw;
-
             let mut total = raw as i32;
 
             if USE_MAIN_HIST {

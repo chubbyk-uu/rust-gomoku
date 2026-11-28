@@ -3486,6 +3486,56 @@ impl Mix9svqEvaluator {
         self.pending_balance = 0;
     }
 
+    /// Incrementally sync `self` to the exact board position of `src` using the
+    /// longest-common-prefix diff when both evaluators share weights and clean
+    /// move histories, avoiding an ~8.5 MiB full-accumulator clone/copy.
+    pub fn sync_from_evaluator(&mut self, src: &Mix9svqEvaluator) {
+        if Arc::ptr_eq(&self.weight[0], &src.weight[0])
+            && Arc::ptr_eq(&self.weight[1], &src.weight[1])
+            && self.pending_balance == 0
+            && src.pending_balance == 0
+        {
+            if let Some(target) = src.synced_history.as_ref() {
+                if let Some(prev) = self.synced_history.take() {
+                    let lcp = prev
+                        .iter()
+                        .zip(target.iter())
+                        .take_while(|(a, b)| a == b)
+                        .count();
+                    if lcp == prev.len() && lcp == target.len() {
+                        self.synced_history = Some(prev);
+                        return;
+                    }
+                    // If the game changed completely (lcp == 0) and prev was long,
+                    // resetting from empty is cheaper than undoing many moves.
+                    if lcp == 0 && prev.len() > 8 {
+                        self.init_empty_board();
+                        for &(side, x, y) in target {
+                            self.queue_cache(side_to_color(side), x as usize, y as usize, false);
+                        }
+                        self.synced_history = Some(target.clone());
+                        return;
+                    }
+                    for &(side, x, y) in prev[lcp..].iter().rev() {
+                        self.queue_cache(side_to_color(side), x as usize, y as usize, true);
+                    }
+                    for &(side, x, y) in &target[lcp..] {
+                        self.queue_cache(side_to_color(side), x as usize, y as usize, false);
+                    }
+                    self.synced_history = Some(target.clone());
+                    return;
+                }
+                self.init_empty_board();
+                for &(side, x, y) in target {
+                    self.queue_cache(side_to_color(side), x as usize, y as usize, false);
+                }
+                self.synced_history = Some(target.clone());
+                return;
+            }
+        }
+        *self = src.clone();
+    }
+
     #[inline(always)]
     pub fn before_move(&mut self, side: Side, x: usize, y: usize) {
         self.pending_balance += 1;

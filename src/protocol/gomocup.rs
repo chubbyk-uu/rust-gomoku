@@ -347,6 +347,7 @@ impl GomocupProtocol {
             self.searcher = None;
             self.nnue_prewarm = None;
             let _ = self.ensure_prewarm_status();
+            self.prepare_fast_nnue();
             return;
         }
         if args.len() < 2 {
@@ -442,6 +443,7 @@ impl GomocupProtocol {
                     self.config.runtime.use_nnue = parsed != 0;
                     self.searcher = None;
                     let _ = self.ensure_prewarm_status();
+                    self.prepare_fast_nnue();
                 }
             }
             "vct_strict_and_memo_key" => {
@@ -473,6 +475,7 @@ impl GomocupProtocol {
                         self.max_memory_fast_tt_kb = new_fast_kb;
                         self.fast_searcher = None;
                     }
+                    self.prepare_fast_nnue();
                     let new_cap = if parsed == 0 {
                         None
                     } else {
@@ -493,6 +496,7 @@ impl GomocupProtocol {
             "fast_nnue" => {
                 if let Some(parsed) = parse_one::<i32>(value) {
                     self.fast_nnue = parsed != 0;
+                    self.prepare_fast_nnue();
                 }
             }
             "tt_bits" => {
@@ -504,6 +508,7 @@ impl GomocupProtocol {
                             self.fast_searcher = None;
                         }
                         self.clear_pending_error(PendingProtocolError::TtBitsOutOfRange);
+                        self.prepare_fast_nnue();
                     } else {
                         self.pending_error = Some(PendingProtocolError::TtBitsOutOfRange);
                     }
@@ -520,6 +525,7 @@ impl GomocupProtocol {
                                 fs.clear_tt();
                             }
                             let _ = self.ensure_prewarm_status();
+                            self.prepare_fast_nnue();
                         }
                     }
                 }
@@ -554,13 +560,18 @@ impl GomocupProtocol {
             let path = std::path::Path::new(&dir);
             let canonical_dir = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
             let res = crate::nnue::load_mix9svq_evaluator_for_rule(path, self.config.rule_set);
-            let code = if res.is_ok() {
-                PREWARM_READY
-            } else {
-                PREWARM_FAILED
+            let code = match res {
+                Ok(loaded) => {
+                    if self.fast_nnue {
+                        self.fast_evaluator =
+                            Some((canonical_dir.clone(), self.config.rule_set, loaded));
+                    }
+                    PREWARM_READY
+                }
+                Err(_) => PREWARM_FAILED,
             };
             self.nnue_prewarm = Some((
-                canonical_dir,
+                canonical_dir.clone(),
                 self.config.rule_set,
                 Arc::new((Mutex::new(code), Condvar::new())),
             ));
@@ -569,6 +580,62 @@ impl GomocupProtocol {
                 RuleSet::Renju => RuleSet::Freestyle,
             };
             let _ = crate::nnue::load_mix9svq_evaluator_for_rule(path, other);
+            if code == PREWARM_READY && self.fast_nnue {
+                let _ = crate::fast_engine::pattern::tables();
+                let _ =
+                    crate::fast_engine::classical_model::warm_classical_model(Some(&canonical_dir));
+                let target_tt_kb = self.effective_fast_tt_kb();
+                if self
+                    .fast_searcher
+                    .as_ref()
+                    .is_none_or(|fs| fs.tt().hash_size_kb() != target_tt_kb)
+                {
+                    self.fast_searcher = Some(Arc::new(crate::fast_engine::FastSearcher::new(
+                        target_tt_kb,
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Eagerly prepare `fast_evaluator`, classical hybrid model, and `fast_searcher`
+    /// during `START` / `INFO` setup so Move 1 does not lose ~20ms of turn budget to
+    /// weight loading and 32 MiB TT page-faulting.
+    fn prepare_fast_nnue(&mut self) {
+        if !self.fast_nnue || !self.config.runtime.use_nnue {
+            return;
+        }
+        let Some(dir) = self.config.runtime.nnue_dir.as_deref() else {
+            return;
+        };
+        let rule = self.config.rule_set;
+        let path = std::path::Path::new(dir);
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if !crate::nnue::mix9svq_files_exist_for_rule(&canonical, rule) {
+            return;
+        }
+        let needs_reload = match &self.fast_evaluator {
+            Some((d, r, _)) => d != &canonical || *r != rule,
+            None => true,
+        };
+        if needs_reload {
+            if let Ok(loaded) = crate::nnue::load_mix9svq_evaluator_for_rule(&canonical, rule) {
+                self.fast_evaluator = Some((canonical.clone(), rule, loaded));
+            } else {
+                return;
+            }
+        }
+        let _ = crate::fast_engine::pattern::tables();
+        let _ = crate::fast_engine::classical_model::warm_classical_model(Some(&canonical));
+        let target_tt_kb = self.effective_fast_tt_kb();
+        if self
+            .fast_searcher
+            .as_ref()
+            .is_none_or(|fs| fs.tt().hash_size_kb() != target_tt_kb)
+        {
+            self.fast_searcher = Some(Arc::new(crate::fast_engine::FastSearcher::new(
+                target_tt_kb,
+            )));
         }
     }
 
@@ -994,21 +1061,34 @@ impl GomocupProtocol {
             cand_range: crate::fast_engine::CandRange::Square3Line4,
         };
 
-        let res = searcher.search(&fb, eval, &cfg);
+        let res = searcher.search_mut(&fb, eval, &cfg);
+        let side = self.board.side_to_move();
         let mut move_ = res.best_move;
-        if !self
-            .board
-            .is_legal_move_for_rule(move_, self.board.side_to_move(), rule)
-        {
-            let fallback = (0..BOARD_AREA as u16).find(|&c| {
-                self.board
-                    .is_legal_move_for_rule(c, self.board.side_to_move(), rule)
-            })?;
-            move_ = fallback;
+        let mut forced_forbidden = false;
+        if !self.board.is_legal_move_for_rule(move_, side, rule) {
+            if let Some(fallback) =
+                (0..BOARD_AREA as u16).find(|&c| self.board.is_legal_move_for_rule(c, side, rule))
+            {
+                move_ = fallback;
+            } else {
+                if rule != RuleSet::Renju || side != crate::constants::BLACK {
+                    return None;
+                }
+                // Renju terminal squeeze (e.g. ply 224 where the only remaining empty
+                // cell(s) are Black forbidden points): play the empty cell directly so
+                // the referee adjudicates a clean rule loss instead of a protocol error.
+                if (move_ as usize) >= BOARD_AREA || !self.board.is_legal_move(move_) {
+                    move_ = (0..BOARD_AREA as u16).find(|&c| self.board.is_legal_move(c))?;
+                }
+                forced_forbidden = true;
+            }
         }
         let (x, y) = move_to_xy(move_).ok()?;
-        let side = self.board.side_to_move();
-        self.play_xy(x, y, side).ok()?;
+        if forced_forbidden {
+            self.board.play_renju_forbidden_loss(move_).ok()?;
+        } else {
+            self.play_xy(x, y, side).ok()?;
+        }
 
         let mut responses = Vec::new();
         if self.config.runtime.root_profile {
@@ -1459,5 +1539,76 @@ mod tests {
             elapsed_ms < 250.0,
             "match-only INFO time_left 100 must not run unbounded depth 18, took {elapsed_ms:.1}ms"
         );
+    }
+
+    #[test]
+    fn fast_nnue_prewarms_evaluator_and_tt_before_first_move() {
+        let local_weights = std::path::Path::new("opponent/rapfi-networks/mix9svq");
+        if !local_weights.exists() {
+            return;
+        }
+        let mut p = GomocupProtocol::default();
+        p.handle_line(&format!("INFO nnue_dir {}", local_weights.display()));
+        assert_eq!(p.handle_line("START 15"), vec!["OK"]);
+        p.handle_line("INFO rule 0");
+        p.handle_line("INFO max_memory 33554432");
+        assert!(
+            p.fast_evaluator.is_some(),
+            "fast_evaluator should be preloaded on START/INFO"
+        );
+        let fs = p
+            .fast_searcher
+            .as_ref()
+            .expect("fast_searcher should be preallocated on START/INFO");
+        assert_eq!(fs.tt().hash_size_kb(), 32 * 1024);
+    }
+
+    #[test]
+    fn fast_nnue_renju_forced_forbidden_last_cell_plays_cell_instead_of_protocol_error() {
+        let local_weights = std::path::Path::new("opponent/rapfi-networks/mix9svq");
+        if !local_weights.exists() {
+            return;
+        }
+        let mut p = GomocupProtocol::default();
+        p.handle_line(&format!("INFO nnue_dir {}", local_weights.display()));
+        p.handle_line("INFO rule 4");
+        p.handle_line("INFO tt_bits 15");
+        assert_eq!(p.handle_line("START 15"), vec!["OK"]);
+
+        // Construct a board with ONLY cell (7, 7) empty and Black to move, where
+        // (7, 7) is an overline forbidden point (6 in a row on row 7: cols 4,5,6,8,9,10).
+        // Fill all other 224 cells with a non-winning checkerboard-ish pattern so
+        // winner == 0 and the sole empty cell (7, 7) is Black-forbidden.
+        use crate::constants::{BLACK, WHITE};
+        let grid = p.board.grid_rows_mut();
+        for y in 0..BOARD_SIZE {
+            for x in 0..BOARD_SIZE {
+                // 2x2-staggered pattern prevents any 5-in-a-row anywhere.
+                grid[y][x] = if ((x / 2) + y) % 2 == 0 { BLACK } else { WHITE };
+            }
+        }
+        // Place Black overline around (7, 7): B B B . B B B on row 7.
+        for x in [4, 5, 6, 8, 9, 10] {
+            grid[7][x] = BLACK;
+        }
+        grid[7][7] = crate::constants::EMPTY;
+        // Ensure (7, 7) is indeed forbidden for Black and no other empty cell exists.
+        let center = xy_to_move(7, 7).unwrap();
+        assert!(!p
+            .board
+            .is_legal_move_for_rule(center, BLACK, RuleSet::Renju));
+        let original_key = p.board.zobrist_key();
+        let resp = p.search_move();
+        assert_eq!(
+            resp.last().map(String::as_str),
+            Some("7,7"),
+            "Renju forced-forbidden terminal squeeze must play the sole empty cell, got {resp:?}"
+        );
+        assert_eq!(p.board.winner(), WHITE);
+        assert_eq!(p.board.side_to_move(), WHITE);
+        assert_eq!(p.board.move_history().last().unwrap().move_, center);
+        assert_eq!(p.board.undo().unwrap().side, BLACK);
+        assert!(!p.board.is_terminal());
+        assert_eq!(p.board.zobrist_key(), original_key);
     }
 }

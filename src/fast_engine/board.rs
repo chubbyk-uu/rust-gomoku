@@ -377,6 +377,8 @@ struct MoveRestore {
     len: u8,
     /// Packed `u32`: `posi (8) | (dir << 8) | (old_p2x << 16) | (old_p4 << 24)`.
     entries: [u32; 40],
+    /// Pre-move `[pcode_black, pcode_white]` for each entry.
+    pcodes: [[u16; 2]; 40],
 }
 
 impl Default for MoveRestore {
@@ -384,6 +386,7 @@ impl Default for MoveRestore {
         Self {
             len: 0,
             entries: [0; 40],
+            pcodes: [[0; 2]; 40],
         }
     }
 }
@@ -406,6 +409,7 @@ pub struct FastBoard {
     bit_key3: [u64; 2 * BOARD_SIZE - 1],
     pattern2xs: [[Pattern2x; 4]; BOARD_AREA],
     pattern4x2: [u8; BOARD_AREA],
+    pcode_x2: [[u16; 2]; BOARD_AREA],
     empty_bb: Bitboard225,
     candidates_bb: Bitboard225,
     cand_journal: [CandJournalEntry; MAX_CAND_JOURNAL],
@@ -435,6 +439,7 @@ impl FastBoard {
             bit_key3: [0; 2 * BOARD_SIZE - 1],
             pattern2xs: [[Pattern2x::default(); 4]; BOARD_AREA],
             pattern4x2: [0; BOARD_AREA],
+            pcode_x2: [[0; 2]; BOARD_AREA],
             empty_bb: Bitboard225::all_on_board(),
             candidates_bb: Bitboard225::empty(),
             cand_journal: [CandJournalEntry::default(); MAX_CAND_JOURNAL],
@@ -511,6 +516,7 @@ impl FastBoard {
             let p4_b = cp_b.pattern4_raw();
             let p4_w = cp_w.pattern4_raw();
             self.pattern4x2[pos] = pack_p4_pair(p4_b, p4_w);
+            self.pcode_x2[pos] = [cp_b.pcode(), cp_w.pcode()];
             st.p4_count[FE_BLACK][p4_b as usize] += 1;
             st.p4_count[FE_WHITE][p4_w as usize] += 1;
             if let Some(cm) = self.classical {
@@ -596,19 +602,8 @@ impl FastBoard {
 
     #[inline(always)]
     pub fn pcode_pair(&self, pos: usize) -> (u16, u16) {
-        let p2x = self.pattern2xs[pos];
-        let idx_b = (p2x[0].black_raw() << 12)
-            | (p2x[1].black_raw() << 8)
-            | (p2x[2].black_raw() << 4)
-            | p2x[3].black_raw();
-        let idx_w = (p2x[0].white_raw() << 12)
-            | (p2x[1].white_raw() << 8)
-            | (p2x[2].white_raw() << 4)
-            | p2x[3].white_raw();
-        (
-            self.tables.pcode[idx_b].pcode(),
-            self.tables.pcode[idx_w].pcode(),
-        )
+        let p = self.pcode_x2[pos];
+        (p[0], p[1])
     }
 
     #[inline(always)]
@@ -910,15 +905,14 @@ impl FastBoard {
                         continue;
                     }
 
+                    let old_pcode = *self.pcode_x2.get_unchecked(posi);
                     let packed = (posi as u32)
                         | ((dir as u32) << 8)
                         | ((old_p2x.0 as u32) << 16)
                         | ((p4_pair as u32) << 24);
-                    *self
-                        .move_restores
-                        .get_unchecked_mut(restore_slot)
-                        .entries
-                        .get_unchecked_mut(restore_idx) = packed;
+                    let restore_entry = self.move_restores.get_unchecked_mut(restore_slot);
+                    *restore_entry.entries.get_unchecked_mut(restore_idx) = packed;
+                    *restore_entry.pcodes.get_unchecked_mut(restore_idx) = old_pcode;
                     restore_idx += 1;
 
                     let row_mut = self.pattern2xs.get_unchecked_mut(posi);
@@ -934,16 +928,12 @@ impl FastBoard {
                         | row[3].white_raw();
                     let cp_b = *pc_b.get_unchecked(idx_b);
                     let cp_w = *pc_w.get_unchecked(idx_w);
+                    let new_pcode_b = cp_b.pcode();
+                    let new_pcode_w = cp_w.pcode();
+                    *self.pcode_x2.get_unchecked_mut(posi) = [new_pcode_b, new_pcode_w];
                     if let Some(cm) = classical {
-                        let shift = (3 - dir) * 4;
-                        let old_idx_b = (idx_b & !(0xF << shift)) | (old_p2x.black_raw() << shift);
-                        let old_idx_w = (idx_w & !(0xF << shift)) | (old_p2x.white_raw() << shift);
-                        delta_value_black += cm
-                            .get_value_black::<RENJU>(cp_b.pcode(), cp_w.pcode())
-                            - cm.get_value_black::<RENJU>(
-                                pc_b.get_unchecked(old_idx_b).pcode(),
-                                pc_w.get_unchecked(old_idx_w).pcode(),
-                            );
+                        delta_value_black += cm.get_value_black::<RENJU>(new_pcode_b, new_pcode_w)
+                            - cm.get_value_black::<RENJU>(old_pcode[0], old_pcode[1]);
                     }
                     let p4_b = cp_b.pattern4_raw();
                     let p4_w = cp_w.pattern4_raw();
@@ -1055,6 +1045,7 @@ impl FastBoard {
             let len = restore.len as usize;
             for idx in 0..len {
                 let packed = *restore.entries.get_unchecked(idx);
+                let old_pcode = *restore.pcodes.get_unchecked(idx);
                 let posi = (packed & 0xFF) as usize;
                 let dir = ((packed >> 8) & 0x03) as usize;
                 let old_p2x = ((packed >> 16) & 0xFF) as u8;
@@ -1064,6 +1055,7 @@ impl FastBoard {
                     .get_unchecked_mut(posi)
                     .get_unchecked_mut(dir) = Pattern2x(old_p2x);
                 *self.pattern4x2.get_unchecked_mut(posi) = old_p4;
+                *self.pcode_x2.get_unchecked_mut(posi) = old_pcode;
             }
         }
     }

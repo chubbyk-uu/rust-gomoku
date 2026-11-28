@@ -406,16 +406,20 @@ pub struct FastSearchResult {
     pub elapsed_ms: f64,
 }
 
-/// Persistent native NNUE searcher holding a shared 5-tier `FastTT`.
+/// Persistent native NNUE searcher holding a shared 5-tier `FastTT` and
+/// reusable helper evaluators for multi-thread Lazy SMP (avoiding ~8.5 MiB
+/// per-thread heap allocations/clones on every move).
 #[derive(Debug)]
 pub struct FastSearcher {
     tt: FastTT,
+    helper_evals: std::sync::Mutex<Vec<Mix9svqEvaluator>>,
 }
 
 impl FastSearcher {
     pub fn new(tt_size_kb: usize) -> Self {
         Self {
             tt: FastTT::new_kb(tt_size_kb),
+            helper_evals: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -439,6 +443,19 @@ impl FastSearcher {
         evaluator: &Mix9svqEvaluator,
         cfg: &FastSearchConfig,
     ) -> FastSearchResult {
+        let mut root_eval = evaluator.clone();
+        self.search_mut(root_board, &mut root_eval, cfg)
+    }
+
+    /// Zero-clone variant of [`Self::search`] that reuses `evaluator` in-place
+    /// on Thread 0 (strictly restoring it to the root position upon return) and
+    /// incrementally syncs cached helper evaluators on `num_threads > 1`.
+    pub fn search_mut(
+        &self,
+        root_board: &FastBoard,
+        evaluator: &mut Mix9svqEvaluator,
+        cfg: &FastSearchConfig,
+    ) -> FastSearchResult {
         let start = Instant::now();
         let num_threads = cfg.num_threads.clamp(1, 64);
 
@@ -447,7 +464,6 @@ impl FastSearcher {
             compute_time_budget(cfg.time_limit_ms, cfg.time_left_ms, root_board.moves_left());
 
         let mut root_board_mut = root_board.clone();
-        let mut root_eval = evaluator.clone();
 
         // Empty board fast path: play center (7, 7) immediately.
         if root_board_mut.move_count() == 0 {
@@ -463,7 +479,7 @@ impl FastSearcher {
             };
         }
 
-        let root_move_list = MovePicker::generate_root_moves(&mut root_board_mut, &mut root_eval);
+        let root_move_list = MovePicker::generate_root_moves(&mut root_board_mut, evaluator);
         if root_move_list.is_empty() {
             // Fallback: pick any legal empty cell (in Renju, Black may be forced to pick a cell).
             let mut fallback = NONE_MOVE;
@@ -531,7 +547,7 @@ impl FastSearcher {
         };
 
         let init_side = if self_side == FE_BLACK { BLACK } else { WHITE };
-        let init_eval = root_eval
+        let init_eval = evaluator
             .evaluate_value(init_side)
             .clamp(VALUE_EVAL_MIN, VALUE_EVAL_MAX);
 
@@ -539,7 +555,7 @@ impl FastSearcher {
             let mut worker = SearchWorker::new(
                 0,
                 root_board_mut,
-                root_eval,
+                evaluator,
                 &root_move_list,
                 init_eval,
                 &shared,
@@ -547,36 +563,73 @@ impl FastSearcher {
             worker.iterative_deepening();
             vec![worker.into_outcome()]
         } else {
-            std::thread::scope(|s| {
-                let mut handles = Vec::with_capacity(num_threads - 1);
-                for tid in 1..num_threads {
+            let helper_count = num_threads - 1;
+            let mut helpers: Vec<Mix9svqEvaluator> = {
+                let mut pool = self.helper_evals.lock().unwrap_or_else(|e| e.into_inner());
+                let mut taken = Vec::with_capacity(helper_count);
+                while taken.len() < helper_count {
+                    if let Some(ev) = pool.pop() {
+                        taken.push(ev);
+                    } else {
+                        break;
+                    }
+                }
+                taken
+            };
+            // Sync cached helpers via LCP move-cache diff (~50ns each; flushed on
+            // each worker thread in parallel), only cloning on the very first search.
+            for ev in &mut helpers {
+                ev.sync_from_evaluator(evaluator);
+            }
+            while helpers.len() < helper_count {
+                helpers.push(evaluator.clone());
+            }
+
+            let (outcomes, returned_helpers) = std::thread::scope(|s| {
+                let mut handles = Vec::with_capacity(helper_count);
+                for (idx, mut ev) in helpers.into_iter().enumerate() {
+                    let tid = idx + 1;
                     let b = root_board_mut.clone();
-                    let ev = root_eval.clone();
                     let rm_ref = &root_move_list;
                     let sh_ref = &shared;
                     handles.push(s.spawn(move || {
-                        let mut w = SearchWorker::new(tid, b, ev, rm_ref, init_eval, sh_ref);
-                        w.iterative_deepening();
-                        w.into_outcome()
+                        let outcome = {
+                            let mut w =
+                                SearchWorker::new(tid, b, &mut ev, rm_ref, init_eval, sh_ref);
+                            w.iterative_deepening();
+                            w.into_outcome()
+                        };
+                        (outcome, ev)
                     }));
                 }
-                let mut main_w = SearchWorker::new(
-                    0,
-                    root_board_mut,
-                    root_eval,
-                    &root_move_list,
-                    init_eval,
-                    &shared,
-                );
-                main_w.iterative_deepening();
-                stop.store(true, Ordering::Relaxed);
+                let main_outcome = {
+                    let mut main_w = SearchWorker::new(
+                        0,
+                        root_board_mut,
+                        evaluator,
+                        &root_move_list,
+                        init_eval,
+                        &shared,
+                    );
+                    main_w.iterative_deepening();
+                    stop.store(true, Ordering::Relaxed);
+                    main_w.into_outcome()
+                };
                 let mut outcomes = Vec::with_capacity(num_threads);
-                outcomes.push(main_w.into_outcome());
+                let mut ret_helpers = Vec::with_capacity(helper_count);
+                outcomes.push(main_outcome);
                 for h in handles {
-                    outcomes.push(h.join().expect("worker thread panicked"));
+                    let (out, ev) = h.join().expect("worker thread panicked");
+                    outcomes.push(out);
+                    ret_helpers.push(ev);
                 }
-                outcomes
-            })
+                (outcomes, ret_helpers)
+            });
+
+            if let Ok(mut pool) = self.helper_evals.lock() {
+                pool.extend(returned_helpers);
+            }
+            outcomes
         };
 
         let best = pick_best_thread(&thread_results);
@@ -772,7 +825,7 @@ enum NodeType {
 struct SearchWorker<'a> {
     tid: usize,
     board: FastBoard,
-    evaluator: Mix9svqEvaluator,
+    evaluator: &'a mut Mix9svqEvaluator,
     main_hist: MainHistory,
     cm_hist: CounterMoveHistory,
     stack: Vec<StackEntry>,
@@ -793,7 +846,7 @@ impl<'a> SearchWorker<'a> {
     fn new(
         tid: usize,
         board: FastBoard,
-        evaluator: Mix9svqEvaluator,
+        evaluator: &'a mut Mix9svqEvaluator,
         root_move_list: &[u16],
         init_eval: i32,
         shared: &'a SharedSearchState<'a>,
@@ -1383,7 +1436,7 @@ impl<'a> SearchWorker<'a> {
         loop {
             let mv = mp.next_move::<RENJU>(
                 &mut self.board,
-                Some(&mut self.evaluator),
+                Some(&mut *self.evaluator),
                 Some(&self.main_hist),
                 Some(&self.cm_hist),
             );
@@ -1501,7 +1554,7 @@ impl<'a> SearchWorker<'a> {
                 } else {
                     TTM_EXT_NONPV[rs]
                 };
-                if self_p4 >= Pattern4::EBlock4 && mt.dist_self >= 0 && mt.dist_self <= 6 {
+                if self_p4 >= Pattern4::EBlock4 && mt.dist_self <= 6 {
                     extension += if mt.dist_self <= 4 {
                         NEARB4_EXT_DIST4
                     } else {
@@ -1511,7 +1564,7 @@ impl<'a> SearchWorker<'a> {
             }
 
             if likely_fail_high {
-                if self_p4 >= Pattern4::EBlock4 {
+                if self.stack[ss].move_p4[self_side] >= Pattern4::EBlock4 {
                     if self.stack[ss - 2].move_p4[self_side] >= Pattern4::EBlock4 {
                         extension += 1.0;
                     }
@@ -1658,7 +1711,12 @@ impl<'a> SearchWorker<'a> {
                 }
             }
 
-            hist_tracker.add_searched_move(&self.board, mv, best_move, self_p4);
+            hist_tracker.add_searched_move(
+                &self.board,
+                mv,
+                best_move,
+                self.stack[ss].move_p4[self_side],
+            );
         }
 
         if root_node && non_mated_count == 1 && (move_count > 1 || self.root_moves.len() == 1) {
@@ -1791,8 +1849,7 @@ impl<'a> SearchWorker<'a> {
 
         if !oppo4
             && self.stack[ss - 2].move_p4[self_side] >= Pattern4::HFlex3
-            && (self_p4 >= Pattern4::HFlex3
-                || (mt.dist_self >= 0 && mt.dist_self <= 4 && self_p4 >= Pattern4::JFlex2x2))
+            && (self_p4 >= Pattern4::HFlex3 || (mt.dist_self <= 4 && self_p4 >= Pattern4::JFlex2x2))
         {
             r -= CONTINUOUS_ATTACK_EXT;
         }
@@ -2558,5 +2615,144 @@ mod tests {
         run_bench("mid10 4T 1s", &fb, &eval, 4);
         run_bench("open4 1T 1s", &fb4, &ev4, 1);
         run_bench("open4 4T 1s", &fb4, &ev4, 4);
+
+        // Freestyle component timing comparison
+        let mut ev_fs =
+            load_mix9svq_evaluator_for_rule(dir, RuleSet::Freestyle).expect("load fs mix9svq");
+        let fs_cases: &[(&str, &[(usize, usize)])] = &[
+            (
+                "FS case36",
+                &[(7, 7), (8, 6), (4, 6), (6, 7), (10, 8), (7, 5), (6, 6)],
+            ),
+            (
+                "FS mid10",
+                &[
+                    (7, 7),
+                    (7, 6),
+                    (8, 6),
+                    (6, 8),
+                    (6, 6),
+                    (8, 8),
+                    (5, 7),
+                    (9, 7),
+                    (7, 8),
+                    (6, 7),
+                ],
+            ),
+            ("FS open6", &[(7, 7), (5, 4), (9, 6), (6, 6)]),
+        ];
+        for &(name, mvs) in fs_cases {
+            let mut l = Board::new();
+            let mut f = FastBoard::new(RuleSet::Freestyle, CandRange::Square3Line4);
+            for &(x, y) in mvs {
+                let m = xy_to_move(x, y).unwrap();
+                l.play_for_rule(m, None, RuleSet::Freestyle).unwrap();
+                f.play(m as usize);
+            }
+            ev_fs.sync_with_board(&l);
+            let _ = ev_fs.evaluate_value(BLACK);
+            let _ = ev_fs.evaluate_value(WHITE);
+            run_bench(&format!("{name} 1T"), &f, &ev_fs, 1);
+            run_bench(&format!("{name} 4T"), &f, &ev_fs, 4);
+        }
+    }
+
+    #[test]
+    fn fast_search_nearb4_dist_and_post_se_move_p4_parity() {
+        let dir = Path::new("opponent/rapfi-networks/mix9svq");
+        let cm = Path::new("opponent/rapfi-networks/classical/model210901.bin");
+        if !dir.exists() || !cm.exists() {
+            return;
+        }
+        let check = |rule: RuleSet,
+                     moves: &[(usize, usize)],
+                     max_depth: i32,
+                     exp_mv: (usize, usize),
+                     exp_score: i32,
+                     exp_sel: i32,
+                     exp_nodes: u64| {
+            let mut eval = load_mix9svq_evaluator_for_rule(dir, rule).expect("load mix9svq");
+            let mut leg = Board::new();
+            let mut fb = FastBoard::new(rule, CandRange::Square3Line4);
+            for &(x, y) in moves {
+                let m = xy_to_move(x, y).unwrap();
+                leg.play_for_rule(m, None, rule).unwrap();
+                fb.play(m as usize);
+            }
+            eval.sync_with_board(&leg);
+            let searcher = FastSearcher::new(32 * 1024);
+            let r = searcher.search(
+                &fb,
+                &eval,
+                &FastSearchConfig {
+                    max_depth,
+                    time_limit_ms: None,
+                    num_threads: 1,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                (
+                    r.best_move as usize % BOARD_SIZE,
+                    r.best_move as usize / BOARD_SIZE
+                ),
+                exp_mv,
+                "best_move mismatch"
+            );
+            assert_eq!(r.score, exp_score, "score mismatch");
+            assert_eq!(r.sel_depth, exp_sel, "sel_depth mismatch");
+            assert_eq!(r.nodes, exp_nodes, "nodes mismatch");
+        };
+
+        // Regression for post-SE `stack[ss].move_p4[self_side]` in add_searched_move / likely_fail_high.
+        check(
+            RuleSet::Freestyle,
+            &[
+                (7, 7),
+                (8, 6),
+                (4, 6),
+                (6, 7),
+                (10, 8),
+                (7, 5),
+                (6, 6),
+                (8, 4),
+            ],
+            10,
+            (8, 8),
+            826,
+            17,
+            3052,
+        );
+        // Regression for `mt.dist_self <= 6` (without `>= 0`) on ply 0/1 near-B4 TT extensions.
+        check(
+            RuleSet::Freestyle,
+            &[(7, 7), (8, 6), (4, 6), (6, 7), (10, 8), (7, 5), (6, 6)],
+            10,
+            (5, 5),
+            -62,
+            17,
+            3319,
+        );
+        // Verify Renju deterministic parity is preserved.
+        check(
+            RuleSet::Renju,
+            &[
+                (7, 7),
+                (7, 6),
+                (8, 6),
+                (6, 8),
+                (6, 6),
+                (8, 8),
+                (5, 7),
+                (9, 7),
+                (7, 8),
+                (6, 7),
+            ],
+            12,
+            (5, 8),
+            57,
+            13,
+            5459,
+        );
     }
 }

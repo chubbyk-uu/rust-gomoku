@@ -909,13 +909,95 @@ pub unsafe fn linear_i8_chunk4_avxvnni<
     debug_assert_eq!(IN % 4, 0);
     let num_batches = OUT / 8;
     let num_chunks = IN / 4;
-    let sign_flip = _mm256_set1_epi8(-128_i8);
-    let in32_ptr = input.as_ptr() as *const i32;
+    let mut shifted_in = std::mem::MaybeUninit::<[i8; IN]>::uninit();
+    let in32_ptr = if SIGNED_INPUT {
+        let sign_flip = _mm256_set1_epi8(-128_i8);
+        let src = input.as_ptr();
+        let dst = shifted_in.as_mut_ptr() as *mut i8;
+        let mut off = 0;
+        while off + 32 <= IN {
+            let v = _mm256_loadu_si256(src.add(off) as *const __m256i);
+            _mm256_storeu_si256(dst.add(off) as *mut __m256i, _mm256_xor_si256(v, sign_flip));
+            off += 32;
+        }
+        while off < IN {
+            *dst.add(off) = (*src.add(off)) ^ (-128_i8);
+            off += 1;
+        }
+        dst as *const i32
+    } else {
+        input.as_ptr() as *const i32
+    };
     let w_ptr = weight.as_ptr();
     let b_ptr = bias.as_ptr();
     let o_ptr = output.as_mut_ptr();
+    let stride = OUT * 4;
 
     let mut out_batch = 0;
+    // 12-YMM-accumulator tile (96 outputs per tile) hides 5-cycle vpdpbusd latency
+    // across dual FMA/VNNI ports (requires 10+ independent chains) for large layers.
+    while out_batch + 12 <= num_batches {
+        let boff = out_batch * 8;
+        let mut a0 = _mm256_loadu_si256(b_ptr.add(boff) as *const __m256i);
+        let mut a1 = _mm256_loadu_si256(b_ptr.add(boff + 8) as *const __m256i);
+        let mut a2 = _mm256_loadu_si256(b_ptr.add(boff + 16) as *const __m256i);
+        let mut a3 = _mm256_loadu_si256(b_ptr.add(boff + 24) as *const __m256i);
+        let mut a4 = _mm256_loadu_si256(b_ptr.add(boff + 32) as *const __m256i);
+        let mut a5 = _mm256_loadu_si256(b_ptr.add(boff + 40) as *const __m256i);
+        let mut a6 = _mm256_loadu_si256(b_ptr.add(boff + 48) as *const __m256i);
+        let mut a7 = _mm256_loadu_si256(b_ptr.add(boff + 56) as *const __m256i);
+        let mut a8 = _mm256_loadu_si256(b_ptr.add(boff + 64) as *const __m256i);
+        let mut a9 = _mm256_loadu_si256(b_ptr.add(boff + 72) as *const __m256i);
+        let mut a10 = _mm256_loadu_si256(b_ptr.add(boff + 80) as *const __m256i);
+        let mut a11 = _mm256_loadu_si256(b_ptr.add(boff + 88) as *const __m256i);
+
+        let w_base = w_ptr.add(out_batch * 32);
+        for c in 0..num_chunks {
+            let in0 = _mm256_set1_epi32(std::ptr::read_unaligned(in32_ptr.add(c)));
+            let wc = w_base.add(c * stride);
+            a0 = _mm256_dpbusd_avx_epi32(a0, in0, _mm256_loadu_si256(wc as *const __m256i));
+            a1 = _mm256_dpbusd_avx_epi32(a1, in0, _mm256_loadu_si256(wc.add(32) as *const __m256i));
+            a2 = _mm256_dpbusd_avx_epi32(a2, in0, _mm256_loadu_si256(wc.add(64) as *const __m256i));
+            a3 = _mm256_dpbusd_avx_epi32(a3, in0, _mm256_loadu_si256(wc.add(96) as *const __m256i));
+            a4 =
+                _mm256_dpbusd_avx_epi32(a4, in0, _mm256_loadu_si256(wc.add(128) as *const __m256i));
+            a5 =
+                _mm256_dpbusd_avx_epi32(a5, in0, _mm256_loadu_si256(wc.add(160) as *const __m256i));
+            a6 =
+                _mm256_dpbusd_avx_epi32(a6, in0, _mm256_loadu_si256(wc.add(192) as *const __m256i));
+            a7 =
+                _mm256_dpbusd_avx_epi32(a7, in0, _mm256_loadu_si256(wc.add(224) as *const __m256i));
+            a8 =
+                _mm256_dpbusd_avx_epi32(a8, in0, _mm256_loadu_si256(wc.add(256) as *const __m256i));
+            a9 =
+                _mm256_dpbusd_avx_epi32(a9, in0, _mm256_loadu_si256(wc.add(288) as *const __m256i));
+            a10 = _mm256_dpbusd_avx_epi32(
+                a10,
+                in0,
+                _mm256_loadu_si256(wc.add(320) as *const __m256i),
+            );
+            a11 = _mm256_dpbusd_avx_epi32(
+                a11,
+                in0,
+                _mm256_loadu_si256(wc.add(352) as *const __m256i),
+            );
+        }
+
+        _mm256_storeu_si256(o_ptr.add(boff) as *mut __m256i, a0);
+        _mm256_storeu_si256(o_ptr.add(boff + 8) as *mut __m256i, a1);
+        _mm256_storeu_si256(o_ptr.add(boff + 16) as *mut __m256i, a2);
+        _mm256_storeu_si256(o_ptr.add(boff + 24) as *mut __m256i, a3);
+        _mm256_storeu_si256(o_ptr.add(boff + 32) as *mut __m256i, a4);
+        _mm256_storeu_si256(o_ptr.add(boff + 40) as *mut __m256i, a5);
+        _mm256_storeu_si256(o_ptr.add(boff + 48) as *mut __m256i, a6);
+        _mm256_storeu_si256(o_ptr.add(boff + 56) as *mut __m256i, a7);
+        _mm256_storeu_si256(o_ptr.add(boff + 64) as *mut __m256i, a8);
+        _mm256_storeu_si256(o_ptr.add(boff + 72) as *mut __m256i, a9);
+        _mm256_storeu_si256(o_ptr.add(boff + 80) as *mut __m256i, a10);
+        _mm256_storeu_si256(o_ptr.add(boff + 88) as *mut __m256i, a11);
+        out_batch += 12;
+    }
+
     while out_batch + 8 <= num_batches {
         let boff = out_batch * 8;
         let mut a0 = _mm256_loadu_si256(b_ptr.add(boff) as *const __m256i);
@@ -928,12 +1010,8 @@ pub unsafe fn linear_i8_chunk4_avxvnni<
         let mut a7 = _mm256_loadu_si256(b_ptr.add(boff + 56) as *const __m256i);
 
         let w_base = w_ptr.add(out_batch * 32);
-        let stride = OUT * 4;
         for c in 0..num_chunks {
-            let mut in0 = _mm256_set1_epi32(std::ptr::read_unaligned(in32_ptr.add(c)));
-            if SIGNED_INPUT {
-                in0 = _mm256_xor_si256(in0, sign_flip);
-            }
+            let in0 = _mm256_set1_epi32(std::ptr::read_unaligned(in32_ptr.add(c)));
             let wc = w_base.add(c * stride);
             a0 = _mm256_dpbusd_avx_epi32(a0, in0, _mm256_loadu_si256(wc as *const __m256i));
             a1 = _mm256_dpbusd_avx_epi32(a1, in0, _mm256_loadu_si256(wc.add(32) as *const __m256i));
@@ -967,12 +1045,8 @@ pub unsafe fn linear_i8_chunk4_avxvnni<
             acc[t] = _mm256_loadu_si256(b_ptr.add((out_batch + t) * 8) as *const __m256i);
         }
         let w_base = w_ptr.add(out_batch * 32);
-        let stride = OUT * 4;
         for c in 0..num_chunks {
-            let mut in0 = _mm256_set1_epi32(std::ptr::read_unaligned(in32_ptr.add(c)));
-            if SIGNED_INPUT {
-                in0 = _mm256_xor_si256(in0, sign_flip);
-            }
+            let in0 = _mm256_set1_epi32(std::ptr::read_unaligned(in32_ptr.add(c)));
             let wc = w_base.add(c * stride);
             for t in 0..rem {
                 let w0 = _mm256_loadu_si256(wc.add(t * 32) as *const __m256i);
@@ -1056,15 +1130,75 @@ pub unsafe fn linear_i8_chunk4_batch4_avxvnni<
     weight: &[i8],
     bias: &[i32],
 ) {
-    debug_assert_eq!(OUT % 16, 0);
+    debug_assert_eq!(OUT % 8, 0);
     debug_assert_eq!(IN % 4, 0);
     let num_batches = OUT / 8;
     let num_chunks = IN / 4;
-    let sign_flip = _mm256_set1_epi8(-128_i8);
-    let p0 = in0.as_ptr() as *const i32;
-    let p1 = in1.as_ptr() as *const i32;
-    let p2 = in2.as_ptr() as *const i32;
-    let p3 = in3.as_ptr() as *const i32;
+
+    let mut s0 = std::mem::MaybeUninit::<[i8; IN]>::uninit();
+    let mut s1 = std::mem::MaybeUninit::<[i8; IN]>::uninit();
+    let mut s2 = std::mem::MaybeUninit::<[i8; IN]>::uninit();
+    let mut s3 = std::mem::MaybeUninit::<[i8; IN]>::uninit();
+    let (p0, p1, p2, p3) = if SIGNED_INPUT {
+        let sign_flip = _mm256_set1_epi8(-128_i8);
+        let d0 = s0.as_mut_ptr() as *mut i8;
+        let d1 = s1.as_mut_ptr() as *mut i8;
+        let d2 = s2.as_mut_ptr() as *mut i8;
+        let d3 = s3.as_mut_ptr() as *mut i8;
+        let mut off = 0;
+        while off + 32 <= IN {
+            _mm256_storeu_si256(
+                d0.add(off) as *mut __m256i,
+                _mm256_xor_si256(
+                    _mm256_loadu_si256(in0.as_ptr().add(off) as *const __m256i),
+                    sign_flip,
+                ),
+            );
+            _mm256_storeu_si256(
+                d1.add(off) as *mut __m256i,
+                _mm256_xor_si256(
+                    _mm256_loadu_si256(in1.as_ptr().add(off) as *const __m256i),
+                    sign_flip,
+                ),
+            );
+            _mm256_storeu_si256(
+                d2.add(off) as *mut __m256i,
+                _mm256_xor_si256(
+                    _mm256_loadu_si256(in2.as_ptr().add(off) as *const __m256i),
+                    sign_flip,
+                ),
+            );
+            _mm256_storeu_si256(
+                d3.add(off) as *mut __m256i,
+                _mm256_xor_si256(
+                    _mm256_loadu_si256(in3.as_ptr().add(off) as *const __m256i),
+                    sign_flip,
+                ),
+            );
+            off += 32;
+        }
+        while off < IN {
+            *d0.add(off) = (*in0.as_ptr().add(off)) ^ (-128_i8);
+            *d1.add(off) = (*in1.as_ptr().add(off)) ^ (-128_i8);
+            *d2.add(off) = (*in2.as_ptr().add(off)) ^ (-128_i8);
+            *d3.add(off) = (*in3.as_ptr().add(off)) ^ (-128_i8);
+            off += 1;
+        }
+        (
+            d0 as *const i32,
+            d1 as *const i32,
+            d2 as *const i32,
+            d3 as *const i32,
+        )
+    } else {
+        (
+            in0.as_ptr() as *const i32,
+            in1.as_ptr() as *const i32,
+            in2.as_ptr() as *const i32,
+            in3.as_ptr() as *const i32,
+        )
+    };
+
     let w_ptr = weight.as_ptr();
     let b_ptr = bias.as_ptr();
     let o0_ptr = out0.as_mut_ptr();
@@ -1074,7 +1208,67 @@ pub unsafe fn linear_i8_chunk4_batch4_avxvnni<
     let stride = OUT * 4;
 
     let mut out_batch = 0;
-    while out_batch < num_batches {
+    // 12-YMM-accumulator tile (4 inputs x 3 output vectors = 12 accumulators + 3 weights + 1 input = 16 YMM).
+    // Hides 5-cycle vpdpbusd latency on dual FMA/VNNI ports and cuts outer loop passes by 33%.
+    while out_batch + 3 <= num_batches {
+        let boff = out_batch * 8;
+        let b0 = _mm256_loadu_si256(b_ptr.add(boff) as *const __m256i);
+        let b1 = _mm256_loadu_si256(b_ptr.add(boff + 8) as *const __m256i);
+        let b2 = _mm256_loadu_si256(b_ptr.add(boff + 16) as *const __m256i);
+        let (mut a00, mut a01, mut a02) = (b0, b1, b2);
+        let (mut a10, mut a11, mut a12) = (b0, b1, b2);
+        let (mut a20, mut a21, mut a22) = (b0, b1, b2);
+        let (mut a30, mut a31, mut a32) = (b0, b1, b2);
+
+        let w_base = w_ptr.add(out_batch * 32);
+        for c in 0..num_chunks {
+            let wc = w_base.add(c * stride);
+
+            let v0 = _mm256_set1_epi32(std::ptr::read_unaligned(p0.add(c)));
+            a00 = _mm256_dpbusd_avx_epi32(a00, v0, _mm256_loadu_si256(wc as *const __m256i));
+            a01 =
+                _mm256_dpbusd_avx_epi32(a01, v0, _mm256_loadu_si256(wc.add(32) as *const __m256i));
+            a02 =
+                _mm256_dpbusd_avx_epi32(a02, v0, _mm256_loadu_si256(wc.add(64) as *const __m256i));
+
+            let v1 = _mm256_set1_epi32(std::ptr::read_unaligned(p1.add(c)));
+            a10 = _mm256_dpbusd_avx_epi32(a10, v1, _mm256_loadu_si256(wc as *const __m256i));
+            a11 =
+                _mm256_dpbusd_avx_epi32(a11, v1, _mm256_loadu_si256(wc.add(32) as *const __m256i));
+            a12 =
+                _mm256_dpbusd_avx_epi32(a12, v1, _mm256_loadu_si256(wc.add(64) as *const __m256i));
+
+            let v2 = _mm256_set1_epi32(std::ptr::read_unaligned(p2.add(c)));
+            a20 = _mm256_dpbusd_avx_epi32(a20, v2, _mm256_loadu_si256(wc as *const __m256i));
+            a21 =
+                _mm256_dpbusd_avx_epi32(a21, v2, _mm256_loadu_si256(wc.add(32) as *const __m256i));
+            a22 =
+                _mm256_dpbusd_avx_epi32(a22, v2, _mm256_loadu_si256(wc.add(64) as *const __m256i));
+
+            let v3 = _mm256_set1_epi32(std::ptr::read_unaligned(p3.add(c)));
+            a30 = _mm256_dpbusd_avx_epi32(a30, v3, _mm256_loadu_si256(wc as *const __m256i));
+            a31 =
+                _mm256_dpbusd_avx_epi32(a31, v3, _mm256_loadu_si256(wc.add(32) as *const __m256i));
+            a32 =
+                _mm256_dpbusd_avx_epi32(a32, v3, _mm256_loadu_si256(wc.add(64) as *const __m256i));
+        }
+
+        _mm256_storeu_si256(o0_ptr.add(boff) as *mut __m256i, a00);
+        _mm256_storeu_si256(o0_ptr.add(boff + 8) as *mut __m256i, a01);
+        _mm256_storeu_si256(o0_ptr.add(boff + 16) as *mut __m256i, a02);
+        _mm256_storeu_si256(o1_ptr.add(boff) as *mut __m256i, a10);
+        _mm256_storeu_si256(o1_ptr.add(boff + 8) as *mut __m256i, a11);
+        _mm256_storeu_si256(o1_ptr.add(boff + 16) as *mut __m256i, a12);
+        _mm256_storeu_si256(o2_ptr.add(boff) as *mut __m256i, a20);
+        _mm256_storeu_si256(o2_ptr.add(boff + 8) as *mut __m256i, a21);
+        _mm256_storeu_si256(o2_ptr.add(boff + 16) as *mut __m256i, a22);
+        _mm256_storeu_si256(o3_ptr.add(boff) as *mut __m256i, a30);
+        _mm256_storeu_si256(o3_ptr.add(boff + 8) as *mut __m256i, a31);
+        _mm256_storeu_si256(o3_ptr.add(boff + 16) as *mut __m256i, a32);
+        out_batch += 3;
+    }
+
+    if out_batch + 2 <= num_batches {
         let boff = out_batch * 8;
         let b0 = _mm256_loadu_si256(b_ptr.add(boff) as *const __m256i);
         let b1 = _mm256_loadu_si256(b_ptr.add(boff + 8) as *const __m256i);
@@ -1089,23 +1283,19 @@ pub unsafe fn linear_i8_chunk4_batch4_avxvnni<
             let w0 = _mm256_loadu_si256(wc as *const __m256i);
             let w1 = _mm256_loadu_si256(wc.add(32) as *const __m256i);
 
-            let mut v0 = _mm256_set1_epi32(std::ptr::read_unaligned(p0.add(c)));
-            let mut v1 = _mm256_set1_epi32(std::ptr::read_unaligned(p1.add(c)));
-            let mut v2 = _mm256_set1_epi32(std::ptr::read_unaligned(p2.add(c)));
-            let mut v3 = _mm256_set1_epi32(std::ptr::read_unaligned(p3.add(c)));
-            if SIGNED_INPUT {
-                v0 = _mm256_xor_si256(v0, sign_flip);
-                v1 = _mm256_xor_si256(v1, sign_flip);
-                v2 = _mm256_xor_si256(v2, sign_flip);
-                v3 = _mm256_xor_si256(v3, sign_flip);
-            }
-
+            let v0 = _mm256_set1_epi32(std::ptr::read_unaligned(p0.add(c)));
             a00 = _mm256_dpbusd_avx_epi32(a00, v0, w0);
             a01 = _mm256_dpbusd_avx_epi32(a01, v0, w1);
+
+            let v1 = _mm256_set1_epi32(std::ptr::read_unaligned(p1.add(c)));
             a10 = _mm256_dpbusd_avx_epi32(a10, v1, w0);
             a11 = _mm256_dpbusd_avx_epi32(a11, v1, w1);
+
+            let v2 = _mm256_set1_epi32(std::ptr::read_unaligned(p2.add(c)));
             a20 = _mm256_dpbusd_avx_epi32(a20, v2, w0);
             a21 = _mm256_dpbusd_avx_epi32(a21, v2, w1);
+
+            let v3 = _mm256_set1_epi32(std::ptr::read_unaligned(p3.add(c)));
             a30 = _mm256_dpbusd_avx_epi32(a30, v3, w0);
             a31 = _mm256_dpbusd_avx_epi32(a31, v3, w1);
         }
@@ -1119,6 +1309,40 @@ pub unsafe fn linear_i8_chunk4_batch4_avxvnni<
         _mm256_storeu_si256(o3_ptr.add(boff) as *mut __m256i, a30);
         _mm256_storeu_si256(o3_ptr.add(boff + 8) as *mut __m256i, a31);
         out_batch += 2;
+    }
+
+    if out_batch < num_batches {
+        let boff = out_batch * 8;
+        let b0 = _mm256_loadu_si256(b_ptr.add(boff) as *const __m256i);
+        let (mut a00, mut a10, mut a20, mut a30) = (b0, b0, b0, b0);
+        let w_base = w_ptr.add(out_batch * 32);
+        for c in 0..num_chunks {
+            let w0 = _mm256_loadu_si256(w_base.add(c * stride) as *const __m256i);
+            a00 = _mm256_dpbusd_avx_epi32(
+                a00,
+                _mm256_set1_epi32(std::ptr::read_unaligned(p0.add(c))),
+                w0,
+            );
+            a10 = _mm256_dpbusd_avx_epi32(
+                a10,
+                _mm256_set1_epi32(std::ptr::read_unaligned(p1.add(c))),
+                w0,
+            );
+            a20 = _mm256_dpbusd_avx_epi32(
+                a20,
+                _mm256_set1_epi32(std::ptr::read_unaligned(p2.add(c))),
+                w0,
+            );
+            a30 = _mm256_dpbusd_avx_epi32(
+                a30,
+                _mm256_set1_epi32(std::ptr::read_unaligned(p3.add(c))),
+                w0,
+            );
+        }
+        _mm256_storeu_si256(o0_ptr.add(boff) as *mut __m256i, a00);
+        _mm256_storeu_si256(o1_ptr.add(boff) as *mut __m256i, a10);
+        _mm256_storeu_si256(o2_ptr.add(boff) as *mut __m256i, a20);
+        _mm256_storeu_si256(o3_ptr.add(boff) as *mut __m256i, a30);
     }
 }
 
