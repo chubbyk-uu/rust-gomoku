@@ -14,6 +14,53 @@ use crate::{
     DEFAULT_ROOT_VCT_DEPTH, EMPTY, MAX_SEARCH_THREADS, WHITE,
 };
 
+/// Display language for GUI snapshots. Search and protocol values are independent of it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiLanguage {
+    Chinese,
+    English,
+}
+
+impl UiLanguage {
+    pub fn from_tag(tag: &str) -> Self {
+        if tag
+            .split(['-', '_', '.'])
+            .next()
+            .is_some_and(|part| part.eq_ignore_ascii_case("zh"))
+        {
+            Self::Chinese
+        } else {
+            Self::English
+        }
+    }
+
+    fn pick<T>(self, zh: T, en: T) -> T {
+        match self {
+            Self::Chinese => zh,
+            Self::English => en,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct UiText {
+    zh: String,
+    en: String,
+}
+
+impl UiText {
+    fn new(zh: impl Into<String>, en: impl Into<String>) -> Self {
+        Self {
+            zh: zh.into(),
+            en: en.into(),
+        }
+    }
+
+    fn in_language(&self, language: UiLanguage) -> String {
+        language.pick(&self.zh, &self.en).clone()
+    }
+}
+
 pub const DEFAULT_TIME_LIMIT_MS: u32 = 1000;
 pub const SUPPORTED_TIME_LIMITS_MS: &[u32] = &[500, 1000, 2500, 5000];
 /// Default TT bucket bits for interactive desktop GUI & Android play: `20` (32 MiB).
@@ -93,12 +140,12 @@ impl SearchDifficulty {
         }
     }
 
-    fn label(self) -> &'static str {
+    fn label(self, language: UiLanguage) -> &'static str {
         match self {
-            Self::Beginner => "入门",
-            Self::Normal => "普通",
-            Self::Senior => "高级",
-            Self::Master => "大师",
+            Self::Beginner => language.pick("入门", "Beginner"),
+            Self::Normal => language.pick("普通", "Normal"),
+            Self::Senior => language.pick("高级", "Advanced"),
+            Self::Master => language.pick("大师", "Master"),
         }
     }
 
@@ -157,8 +204,8 @@ pub struct GameController {
     human_side: Side,
     mode: GameMode,
     engine_thinking: bool,
-    status: String,
-    error: Option<String>,
+    status: UiText,
+    error: Option<UiText>,
     last_mark: Option<(usize, usize)>,
     last_result: Option<(SearchResult, bool)>,
     last_trace: Option<RootTrace>,
@@ -197,7 +244,7 @@ enum EngineSearchOutcome {
         worker_pool: Option<SearchWorkerPool>,
     },
     Failed {
-        error: String,
+        error: UiText,
     },
 }
 
@@ -208,10 +255,15 @@ pub struct EngineSearchCompletion {
 
 impl EngineSearchCompletion {
     pub fn failed(generation: u64, error: impl Into<String>) -> Self {
+        let error = error.into();
+        Self::failed_localized(generation, error.clone(), error)
+    }
+
+    pub fn failed_localized(generation: u64, zh: impl Into<String>, en: impl Into<String>) -> Self {
         Self {
             generation,
             outcome: EngineSearchOutcome::Failed {
-                error: error.into(),
+                error: UiText::new(zh, en),
             },
         }
     }
@@ -367,7 +419,10 @@ impl GameController {
             human_side: BLACK,
             mode: GameMode::VsEngine,
             engine_thinking: false,
-            status: "请选择执黑或执白，然后开始对局。".to_string(),
+            status: UiText::new(
+                "请选择执黑或执白，然后开始对局。",
+                "Choose Black or White to start a game.",
+            ),
             error: None,
             last_mark: None,
             last_result: None,
@@ -435,7 +490,10 @@ impl GameController {
         clock_mode: SearchClockMode,
     ) -> bool {
         if human_side != BLACK && human_side != WHITE {
-            self.error = Some("执棋方必须是黑方或白方。".to_string());
+            self.error = Some(UiText::new(
+                "执棋方必须是黑方或白方。",
+                "Choose Black or White.",
+            ));
             return false;
         }
         self.generation = self.generation.wrapping_add(1);
@@ -445,39 +503,51 @@ impl GameController {
         self.mode = mode;
         self.clock_mode = clock_mode;
         self.engine_thinking = false;
-        let rule_name = match rule {
-            RuleSet::Freestyle => "无禁手",
-            RuleSet::Renju => "有禁手",
+        let has_nnue = clock_mode == SearchClockMode::Timed && self.nnue_available_for(rule);
+        let game_status = |language: UiLanguage| {
+            let rule_name = match rule {
+                RuleSet::Freestyle => language.pick("无禁手", "Freestyle"),
+                RuleSet::Renju => language.pick("有禁手", "Renju"),
+            };
+            let clock_label = match clock_mode {
+                SearchClockMode::Untimed => {
+                    let diff = self
+                        .difficulty
+                        .map(|d| d.label(language))
+                        .unwrap_or(language.pick("自定义", "Custom"));
+                    language.pick(format!(" / 休闲·{diff}"), format!(" / Casual · {diff}"))
+                }
+                SearchClockMode::Timed => {
+                    let engine_tag = if has_nnue {
+                        language.pick("专业", "Pro")
+                    } else {
+                        language.pick("专业(经典)", "Pro (Classical)")
+                    };
+                    format!(
+                        " / {engine_tag} {}",
+                        format_time_limit_label(self.time_limit_ms)
+                    )
+                }
+            };
+            match mode {
+                GameMode::TwoPlayer => language.pick(
+                    format!("新局开始（双人 / {rule_name}）：黑方先行。"),
+                    format!("New game (Two Players / {rule_name}). Black moves first."),
+                ),
+                GameMode::VsEngine if human_side == BLACK => language.pick(
+                    format!("新局开始（{rule_name}{clock_label}）：你执黑，请落子。"),
+                    format!("New game ({rule_name}{clock_label}). You play Black."),
+                ),
+                GameMode::VsEngine => language.pick(
+                    format!("新局开始（{rule_name}{clock_label}）：你执白，引擎执黑思考中。"),
+                    format!("New game ({rule_name}{clock_label}). You play White. The engine is thinking."),
+                ),
+            }
         };
-        let clock_label = match clock_mode {
-            SearchClockMode::Untimed => {
-                let diff = self
-                    .difficulty
-                    .map(SearchDifficulty::label)
-                    .unwrap_or("自定义");
-                format!(" / 休闲·{diff}")
-            }
-            SearchClockMode::Timed => {
-                let engine_tag = if self.nnue_available_for(rule) {
-                    "专业"
-                } else {
-                    "专业(经典)"
-                };
-                format!(
-                    " / {engine_tag} {}",
-                    format_time_limit_label(self.time_limit_ms)
-                )
-            }
-        };
-        self.status = match mode {
-            GameMode::TwoPlayer => format!("新局开始（双人 / {rule_name}）：黑方先行。"),
-            GameMode::VsEngine if human_side == BLACK => {
-                format!("新局开始（{rule_name}{clock_label}）：你执黑，请落子。")
-            }
-            GameMode::VsEngine => {
-                format!("新局开始（{rule_name}{clock_label}）：你执白，引擎执黑思考中。")
-            }
-        };
+        self.status = UiText::new(
+            game_status(UiLanguage::Chinese),
+            game_status(UiLanguage::English),
+        );
         self.error = None;
         self.last_mark = None;
         self.last_result = None;
@@ -501,12 +571,15 @@ impl GameController {
     pub fn play_human(&mut self, x: usize, y: usize) -> bool {
         self.error = None;
         if !self.can_human_play() {
-            self.error = Some("现在不能落子。".to_string());
+            self.error = Some(UiText::new("现在不能落子。", "You cannot play right now."));
             return false;
         }
 
         let Ok(move_) = xy_to_move(x, y) else {
-            self.error = Some("缺少坐标或坐标超出棋盘。".to_string());
+            self.error = Some(UiText::new(
+                "缺少坐标或坐标超出棋盘。",
+                "The move is missing coordinates or is outside the board.",
+            ));
             return false;
         };
         // In two-player mode the side to move alternates, so judge forbidden
@@ -521,9 +594,15 @@ impl GameController {
             .ok()
             .filter(|kind| kind.is_forbidden());
         if let Some(kind) = forbidden {
-            self.error = Some(format!(
-                "黑棋禁手：{}，不能落在这里。",
-                forbidden_name(kind)
+            self.error = Some(UiText::new(
+                format!(
+                    "黑棋禁手：{}，不能落在这里。",
+                    forbidden_name(kind, UiLanguage::Chinese)
+                ),
+                format!(
+                    "Forbidden for Black ({}). Choose another point.",
+                    forbidden_name(kind, UiLanguage::English)
+                ),
             ));
             return false;
         }
@@ -539,34 +618,40 @@ impl GameController {
                         // and always return false so no engine search starts.
                         let winner = self.board.winner();
                         self.status = if winner == BLACK {
-                            "黑方胜。".to_string()
+                            UiText::new("黑方胜。", "Black wins.")
                         } else if winner == WHITE {
-                            "白方胜。".to_string()
+                            UiText::new("白方胜。", "White wins.")
                         } else if self.board.is_draw() {
-                            "和棋。".to_string()
+                            UiText::new("和棋。", "Draw.")
                         } else if self.board.side_to_move() == BLACK {
-                            "轮到黑方落子。".to_string()
+                            UiText::new("轮到黑方落子。", "Black to move.")
                         } else {
-                            "轮到白方落子。".to_string()
+                            UiText::new("轮到白方落子。", "White to move.")
                         };
                         false
                     }
                     GameMode::VsEngine => {
                         if self.board.winner() == self.human_side {
-                            self.status = "你赢了。".to_string();
+                            self.status = UiText::new("你赢了。", "You win.");
                             false
                         } else if self.board.is_draw() {
-                            self.status = "和棋。".to_string();
+                            self.status = UiText::new("和棋。", "Draw.");
                             false
                         } else {
-                            self.status = "你已落子，引擎思考中。".to_string();
+                            self.status = UiText::new(
+                                "你已落子，引擎思考中。",
+                                "Move played. The engine is thinking.",
+                            );
                             true
                         }
                     }
                 }
             }
             Err(err) => {
-                self.error = Some(format!("非法落子：{err:?}"));
+                self.error = Some(UiText::new(
+                    format!("非法落子：{err:?}"),
+                    format!("Illegal move: {err:?}"),
+                ));
                 false
             }
         }
@@ -574,12 +659,18 @@ impl GameController {
 
     pub fn undo_turn(&mut self) {
         if self.engine_thinking {
-            self.error = Some("引擎思考中，暂不能悔棋。".to_string());
+            self.error = Some(UiText::new(
+                "引擎思考中，暂不能悔棋。",
+                "Wait for the engine to finish before undoing.",
+            ));
             return;
         }
         self.error = None;
         if self.board.move_count() == 0 {
-            self.error = Some("当前没有可悔棋步。".to_string());
+            self.error = Some(UiText::new(
+                "当前没有可悔棋步。",
+                "There are no moves to undo.",
+            ));
             return;
         }
 
@@ -593,9 +684,9 @@ impl GameController {
             self.last_trace = None;
             self.last_search_ms = None;
             self.status = if self.board.side_to_move() == BLACK {
-                "已悔棋，轮到黑方落子。".to_string()
+                UiText::new("已悔棋，轮到黑方落子。", "Move undone. Black to move.")
             } else {
-                "已悔棋，轮到白方落子。".to_string()
+                UiText::new("已悔棋，轮到白方落子。", "Move undone. White to move.")
             };
             return;
         }
@@ -617,17 +708,26 @@ impl GameController {
         self.last_trace = None;
         self.last_search_ms = None;
         self.status = if self.board.side_to_move() == self.human_side {
-            "已悔棋，请继续落子。".to_string()
+            UiText::new("已悔棋，请继续落子。", "Moves undone. Your turn.")
         } else if self.board.move_count() == 0 && self.human_side == WHITE {
-            "已撤回引擎首手；点击“我执白”可重新让引擎开局。".to_string()
+            UiText::new(
+                "已撤回引擎首手；点击“我执白”可重新让引擎开局。",
+                "Opening move undone. Choose Play White to let the engine start again.",
+            )
         } else {
-            "已悔棋，当前不是你的回合。".to_string()
+            UiText::new(
+                "已悔棋，当前不是你的回合。",
+                "Moves undone. It is the engine’s turn.",
+            )
         };
     }
 
     pub fn set_difficulty(&mut self, difficulty: SearchDifficulty) {
         if self.engine_thinking {
-            self.error = Some("引擎思考中，暂不能切换难度。".to_string());
+            self.error = Some(UiText::new(
+                "引擎思考中，暂不能切换难度。",
+                "Wait for the engine to finish before changing the difficulty.",
+            ));
             return;
         }
         let prev_config = self.config.clone();
@@ -647,39 +747,55 @@ impl GameController {
         self.last_result = None;
         self.last_trace = None;
         self.last_search_ms = None;
-        let tactics = match (compute_vcf, compute_vct) {
-            (false, false) => "无战术搜索",
-            (true, false) => "VCF 开启",
-            (true, true) => "VCF/VCT 开启",
-            (false, true) => "VCT 开启",
+        let (tactics, tactics_en) = match (compute_vcf, compute_vct) {
+            (false, false) => ("无战术搜索", "no tactical search"),
+            (true, false) => ("VCF 开启", "VCF enabled"),
+            (true, true) => ("VCF/VCT 开启", "VCF/VCT enabled"),
+            (false, true) => ("VCT 开启", "VCT enabled"),
         };
-        self.status = format!(
-            "已切换到休闲·{}难度（d{depth}/w{width}，{tactics}），下一次引擎思考生效。",
-            difficulty.label(),
+        self.status = UiText::new(
+            format!(
+                "已切换到休闲·{}难度（d{depth}/w{width}，{tactics}），下一次引擎思考生效。",
+                difficulty.label(UiLanguage::Chinese)
+            ),
+            format!(
+                "{} difficulty (d{depth}/w{width}, {tactics_en}) applies on the next engine turn.",
+                difficulty.label(UiLanguage::English)
+            ),
         );
     }
 
     pub fn set_time_limit_ms(&mut self, ms: u32) -> bool {
         if self.engine_thinking {
-            self.error = Some("引擎思考中，暂不能切换每步限时。".to_string());
+            self.error = Some(UiText::new(
+                "引擎思考中，暂不能切换每步限时。",
+                "Wait for the engine to finish before changing the time limit.",
+            ));
             return false;
         }
         if !SUPPORTED_TIME_LIMITS_MS.contains(&ms) {
-            self.error = Some("不支持的限时档位，请选择 500、1000、2500 或 5000 ms。".to_string());
+            self.error = Some(UiText::new(
+                "不支持的限时档位，请选择 500、1000、2500 或 5000 ms。",
+                "Choose a time limit of 500, 1000, 2500 or 5000 ms.",
+            ));
             return false;
         }
         self.time_limit_ms = ms;
         self.error = None;
-        self.status = format!(
-            "已切换专业限时为 {}，下一次引擎思考生效。",
-            format_time_limit_label(ms)
+        let limit = format_time_limit_label(ms);
+        self.status = UiText::new(
+            format!("已切换专业限时为 {limit}，下一次引擎思考生效。"),
+            format!("The Pro time limit of {limit} applies on the next engine turn."),
         );
         true
     }
 
     pub fn set_threads(&mut self, threads: usize) {
         if self.engine_thinking {
-            self.error = Some("引擎思考中，暂不能切换线程数。".to_string());
+            self.error = Some(UiText::new(
+                "引擎思考中，暂不能切换线程数。",
+                "Wait for the engine to finish before changing the thread count.",
+            ));
             return;
         }
         let threads = threads.clamp(1, MAX_SEARCH_THREADS);
@@ -696,7 +812,10 @@ impl GameController {
             }
         }
         self.error = None;
-        self.status = format!("已切换为 {threads} 线程，下一次引擎思考生效。");
+        self.status = UiText::new(
+            format!("已切换为 {threads} 线程，下一次引擎思考生效。"),
+            format!("The new thread count ({threads}) applies on the next engine turn."),
+        );
     }
 
     pub fn set_overlap_vct_alphabeta(&mut self, enabled: bool) {
@@ -707,7 +826,12 @@ impl GameController {
     }
 
     pub fn set_error(&mut self, message: impl Into<String>) {
-        self.error = Some(message.into());
+        let message = message.into();
+        self.set_localized_error(message.clone(), message);
+    }
+
+    pub fn set_localized_error(&mut self, zh: impl Into<String>, en: impl Into<String>) {
+        self.error = Some(UiText::new(zh, en));
     }
 
     pub fn prepare_engine_search(&mut self) -> Option<EngineSearchTask> {
@@ -720,7 +844,7 @@ impl GameController {
         }
         self.engine_thinking = true;
         self.error = None;
-        self.status = "引擎思考中...".to_string();
+        self.status = UiText::new("引擎思考中...", "The engine is thinking…");
         let taken_pool = self
             .search_pool
             .lock()
@@ -765,7 +889,7 @@ impl GameController {
                 ),
                 EngineSearchOutcome::Failed { error } => {
                     self.error = Some(error);
-                    self.status = "引擎搜索失败。".to_string();
+                    self.status = UiText::new("引擎搜索失败。", "Engine search failed.");
                     self.engine_thinking = false;
                     return true;
                 }
@@ -793,8 +917,11 @@ impl GameController {
                 self.board.side_to_move(),
                 self.config.rule_set,
             ) {
-                self.error = Some("引擎返回禁手或非法落子。".to_string());
-                self.status = "引擎落子失败。".to_string();
+                self.error = Some(UiText::new(
+                    "引擎返回禁手或非法落子。",
+                    "The engine returned a forbidden or illegal move.",
+                ));
+                self.status = UiText::new("引擎落子失败。", "The engine could not play a move.");
             } else {
                 match self
                     .board
@@ -811,16 +938,20 @@ impl GameController {
                             history.push(sample);
                         }
                         self.status = if self.board.winner() != EMPTY {
-                            "引擎获胜。".to_string()
+                            UiText::new("引擎获胜。", "The engine wins.")
                         } else if self.board.is_draw() {
-                            "和棋。".to_string()
+                            UiText::new("和棋。", "Draw.")
                         } else {
-                            "引擎已落子，轮到你。".to_string()
+                            UiText::new("引擎已落子，轮到你。", "The engine has played. Your turn.")
                         };
                     }
                     Err(err) => {
-                        self.error = Some(format!("引擎返回非法落子：{err:?}"));
-                        self.status = "引擎落子失败。".to_string();
+                        self.error = Some(UiText::new(
+                            format!("引擎返回非法落子：{err:?}"),
+                            format!("The engine returned an illegal move: {err:?}"),
+                        ));
+                        self.status =
+                            UiText::new("引擎落子失败。", "The engine could not play a move.");
                     }
                 }
             }
@@ -830,6 +961,10 @@ impl GameController {
     }
 
     pub fn snapshot(&self) -> GameStateSnapshot {
+        self.snapshot_in(UiLanguage::Chinese)
+    }
+
+    pub fn snapshot_in(&self, language: UiLanguage) -> GameStateSnapshot {
         let last_result = self.last_result.map(|(result, used_nnue)| {
             let (x, y) = move_to_xy(result.move_).expect("engine move stays valid");
             SearchResultSnapshot {
@@ -887,8 +1022,8 @@ impl GameController {
             move_count: self.board.move_count(),
             can_play: self.can_human_play(),
             engine_thinking: self.engine_thinking,
-            status: self.status.clone(),
-            error: self.error.clone(),
+            status: self.status.in_language(language),
+            error: self.error.as_ref().map(|error| error.in_language(language)),
             last_mark: self.last_mark.map(|(x, y)| [x, y]),
             last_result,
             last_trace,
@@ -1041,7 +1176,11 @@ impl EngineSearchTask {
                     self.board
                         .is_legal_move_for_rule(c, self.board.side_to_move(), rule)
                 }) else {
-                    return EngineSearchCompletion::failed(self.generation, "无合法落子。");
+                    return EngineSearchCompletion::failed_localized(
+                        self.generation,
+                        "无合法落子。",
+                        "No legal move.",
+                    );
                 };
                 move_ = fallback;
             }
@@ -1083,9 +1222,10 @@ impl EngineSearchTask {
             None => match TranspositionTable::try_new_with_fallback_layout(tt_bits, 16, false) {
                 Ok((tt, _)) => tt,
                 Err(_) => {
-                    return EngineSearchCompletion::failed(
+                    return EngineSearchCompletion::failed_localized(
                         self.generation,
                         "内存不足，无法分配置换表。",
+                        "There is not enough memory for the transposition table.",
                     );
                 }
             },
@@ -1101,9 +1241,10 @@ impl EngineSearchTask {
         let result = match searcher.try_search(&mut self.board, Some(self.limits)) {
             Ok(result) => result,
             Err(err) => {
-                return EngineSearchCompletion::failed(
+                return EngineSearchCompletion::failed_localized(
                     self.generation,
                     format!("引擎搜索失败：{err:?}"),
+                    format!("Engine search failed: {err:?}"),
                 );
             }
         };
@@ -1135,12 +1276,12 @@ fn format_time_limit_label(ms: u32) -> String {
     }
 }
 
-fn forbidden_name(kind: ForbiddenKind) -> &'static str {
+fn forbidden_name(kind: ForbiddenKind, language: UiLanguage) -> &'static str {
     match kind {
-        ForbiddenKind::None => "无",
-        ForbiddenKind::DoubleThree => "三三禁手",
-        ForbiddenKind::DoubleFour => "四四禁手",
-        ForbiddenKind::Overline => "长连禁手",
+        ForbiddenKind::None => language.pick("无", "none"),
+        ForbiddenKind::DoubleThree => language.pick("三三禁手", "double three"),
+        ForbiddenKind::DoubleFour => language.pick("四四禁手", "double four"),
+        ForbiddenKind::Overline => language.pick("长连禁手", "overline"),
     }
 }
 
@@ -1208,6 +1349,10 @@ mod tests {
         assert!(!controller.play_human(7, 7));
         assert_eq!(controller.board.move_count(), move_count);
         assert!(controller.snapshot().error.unwrap().contains("三三禁手"));
+        let english = controller.snapshot_in(UiLanguage::English);
+        assert_eq!(english.move_count, move_count);
+        assert_eq!(english.forbidden_points, snapshot.forbidden_points);
+        assert!(english.error.unwrap().contains("double three"));
     }
 
     #[test]

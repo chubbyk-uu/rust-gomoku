@@ -1,11 +1,16 @@
 "use strict";
 
+const launchParams = new URLSearchParams(location.search);
+const systemTag = launchParams.get("lang") === "zh-CN" ? "zh-CN" : "en";
+const { tag: uiTag, text: tr } = localizeUi(systemTag);
+
 /* ===================================================================== *
  * Native transport: a promise wrapper over the @JavascriptInterface
  * bridge exposed by MainActivity (AndroidBridge.request(json, callbackId)).
  * Responses arrive on window.__onNativeResult(callbackId, responseJson).
  * ===================================================================== */
 const pending = new Map();
+const callPrefix = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
 let nextCallId = 0;
 
 window.__onNativeResult = function (callbackId, responseJson) {
@@ -22,12 +27,12 @@ window.__onNativeResult = function (callbackId, responseJson) {
 function nativeRequest(payload) {
   return new Promise((resolve, reject) => {
     if (!window.AndroidBridge || typeof window.AndroidBridge.request !== "function") {
-      reject(new Error("native bridge unavailable"));
+      reject(new Error(tr("无法连接引擎", "Engine connection unavailable")));
       return;
     }
-    const id = "c" + (nextCallId++);
+    const id = callPrefix + "-" + nextCallId++;
     pending.set(id, { resolve, reject });
-    window.AndroidBridge.request(JSON.stringify(payload), id);
+    window.AndroidBridge.request(JSON.stringify({ ...payload, lang: uiTag }), id);
   });
 }
 
@@ -58,11 +63,11 @@ const statusMsg = document.getElementById("status-msg");
 const turnDot = document.getElementById("turn-dot");
 const toastEl = document.getElementById("toast");
 const difficultyNames = {
-  beginner: "入门",
-  normal: "普通",
-  senior: "高级",
-  master: "大师",
-  custom: "自定义",
+  beginner: tr("入门", "Beginner"),
+  normal: tr("普通", "Normal"),
+  senior: tr("高级", "Advanced"),
+  master: tr("大师", "Master"),
+  custom: tr("自定义", "Custom"),
 };
 
 function formatTimeLimit(ms) {
@@ -313,19 +318,19 @@ function render(state) {
   // title-bar meta
   const isRenju = state.params && state.params.rule === "renju";
   const ruleChip = document.getElementById("meta-rule");
-  ruleChip.textContent = isRenju ? "有禁手" : "无禁手";
+  ruleChip.textContent = isRenju ? tr("有禁手", "Renju") : tr("无禁手", "Freestyle");
   ruleChip.classList.toggle("renju", isRenju);
   const twoPlayer = state.params.mode === "two_player";
   const sideChip = document.getElementById("meta-side");
-  sideChip.textContent = twoPlayer ? "双人对弈" : (state.human_side === WHITE ? "你执白" : "你执黑");
+  sideChip.textContent = twoPlayer ? tr("双人对弈", "Two Players") : (state.human_side === WHITE ? tr("你执白", "White (you)") : tr("你执黑", "Black (you)"));
   const isTimed = state.params.clock_mode === "timed";
   const timeLimitMs = state.params.time_limit_ms || 1000;
   const difficultyChip = document.getElementById("meta-difficulty");
   difficultyChip.hidden = twoPlayer;
   difficultyChip.textContent = isTimed
-    ? `专业 ${formatTimeLimit(timeLimitMs)}`
-    : `休闲·${difficultyNames[state.params.difficulty] || state.params.difficulty}`;
-  document.getElementById("meta-moves").textContent = "第 " + state.move_count + " 手";
+    ? tr(`专业 ${formatTimeLimit(timeLimitMs)}`, `Pro ${formatTimeLimit(timeLimitMs)}`)
+    : tr(`休闲·${difficultyNames[state.params.difficulty] || state.params.difficulty}`, `Casual · ${difficultyNames[state.params.difficulty] || state.params.difficulty}`);
+  document.getElementById("meta-moves").textContent = tr(`第 ${state.move_count} 手`, `Move ${state.move_count}`);
   setSegmentValue("opt-gamemode", state.params.mode);
   setSegmentValue("opt-clockmode", isTimed ? "timed" : "untimed");
   syncNewGameMode();
@@ -354,7 +359,7 @@ function render(state) {
     mtRow.hidden = twoPlayer;
     const threads = state.params.threads || 1;
     mtInput.checked = threads > 1;
-    mtLabel.textContent = threads > 1 ? `多线程搜索（${threads} 线程）` : "多线程搜索（单线程）";
+    mtLabel.textContent = threads > 1 ? tr(`多线程搜索（${threads} 线程）`, `Multithreading (${threads} threads)`) : tr("多线程搜索（单线程）", "Multithreading (off)");
   }
   // controls
   UiLogic.syncBusyControls(document, busy, state);
@@ -378,7 +383,7 @@ function renderNnueEstimate(state) {
   positionChart.hidden = points.length === 0;
   if (positionPanel.hidden || points.length === 0) {
     selectedEstimatePly = null;
-    if (positionCurrent) positionCurrent.textContent = "引擎落子后更新";
+    if (positionCurrent) positionCurrent.textContent = tr("引擎落子后更新", "Updates after an engine move");
     if (positionPoint) positionPoint.textContent = "";
     return;
   }
@@ -387,13 +392,13 @@ function renderNnueEstimate(state) {
   const selected = points.find((point) => point.ply === selectedEstimatePly) || latest;
   const latestScore = blackExpectedScore(latest);
   const scorePerMille = Math.round(latestScore * 1000);
-  const advantage = scorePerMille > 500 ? "黑方占优" : scorePerMille < 500 ? "白方占优" : "均势";
+  const advantage = scorePerMille > 500 ? tr("黑方占优", "Black ahead") : scorePerMille < 500 ? tr("白方占优", "White ahead") : tr("均势", "Even");
   if (positionCurrent) {
-    positionCurrent.textContent = `第 ${latest.ply} 手 · ${advantage} ${percent(latestScore)}`;
+    positionCurrent.textContent = tr(`第 ${latest.ply} 手 · ${advantage} ${percent(latestScore)}`, `Move ${latest.ply} · ${advantage} ${percent(latestScore)}`);
   }
   if (positionPoint) {
     positionPoint.textContent =
-      `第 ${selected.ply} 手：黑胜 ${percent(selected.black_win)} · 和棋 ${percent(selected.draw)} · 白胜 ${percent(selected.white_win)}`;
+      tr(`第 ${selected.ply} 手：黑胜 ${percent(selected.black_win)} · 和棋 ${percent(selected.draw)} · 白胜 ${percent(selected.white_win)}`, `Move ${selected.ply} · Black ${percent(selected.black_win)} · Draw ${percent(selected.draw)} · White ${percent(selected.white_win)}`);
   }
 
   const { left, right, top, bottom } = chartBounds;
@@ -417,7 +422,7 @@ function renderNnueEstimate(state) {
     c.fillText(`${score * 100}%`, left - 7, y(score));
   }
   c.setLineDash([]);
-  c.fillText(`${maxPly} 手`, right, bottom + 19);
+  c.fillText(tr(`${maxPly} 手`, `${maxPly} moves`), right, bottom + 19);
   c.textAlign = "left";
   c.fillText("0", left, bottom + 19);
   c.beginPath();
@@ -456,14 +461,14 @@ function fillAdvanced(res, params) {
   const isTimed = params.clock_mode === "timed";
   const limitLabel = formatTimeLimit(params.time_limit_ms || 1000);
   const usedNnue = res ? Boolean(res.used_nnue) : Boolean(params.use_nnue);
-  set("eval", isTimed ? (usedNnue ? "NNUE (Mix9svq · FastEngine)" : "经典评估（未找到权重）") : "经典评估");
-  set("clock", isTimed ? `专业（每步 ${limitLabel}）` : "休闲（固定深度）");
-  set("difficulty", isTimed ? "自动深度" : (difficultyNames[params.difficulty] || params.difficulty || "—"));
-  set("threads", params.threads != null ? params.threads + " 线程" : "—");
+  set("eval", isTimed ? (usedNnue ? "NNUE (Mix9svq · FastEngine)" : tr("经典评估（未找到权重）", "Classical evaluation (weights missing)")) : tr("经典评估", "Classical evaluation"));
+  set("clock", isTimed ? tr(`专业（每步 ${limitLabel}）`, `Pro (${limitLabel} per move)`) : "休闲（固定深度）");
+  set("difficulty", isTimed ? tr("自动深度", "Automatic depth") : (difficultyNames[params.difficulty] || params.difficulty || "—"));
+  set("threads", params.threads != null ? params.threads + tr(" 线程", " threads") : "—");
   if (!res) { set("score", "—"); set("depth", "—"); set("nodes", "—"); set("ms", "—"); return; }
   set("score", res.score);
   set("depth", res.depth);
-  set("nodes", res.nodes != null ? res.nodes.toLocaleString() : "—");
+  set("nodes", res.nodes != null ? res.nodes.toLocaleString(uiTag) : "—");
   set("ms", res.ms != null ? Math.round(res.ms) + " ms" : "—");
 }
 
@@ -477,7 +482,7 @@ function setResultOpen(open) {
 }
 
 function showResultIfNeeded(state) {
-  const result = UiLogic.gameResult(state);
+  const result = UiLogic.gameResult(state, tr);
   if (!result) {
     announcedResult = null;
     setResultOpen(false);
@@ -496,7 +501,7 @@ function showResultIfNeeded(state) {
  * ===================================================================== */
 async function applyAndContinue(response) {
   if (!response.ok) {
-    statusMsg.textContent = (response.error && response.error.message) || "请求失败";
+    statusMsg.textContent = (response.error && response.error.message) || tr("请求失败", "Request failed");
     statusMsg.classList.add("error");
     return;
   }
@@ -505,10 +510,10 @@ async function applyAndContinue(response) {
   // In two-player mode the engine never moves; humans alternate on both sides.
   while (state.params.mode !== "two_player" && state.winner === EMPTY && !state.draw && state.side_to_move !== state.human_side) {
     const settledState = state;
-    render(UiLogic.engineThinkingState(state));
+    render(UiLogic.engineThinkingState(state, tr));
     const moved = await nativeRequest({ op: "engine_move" });
     if (!moved.ok) {
-      const message = (moved.error && moved.error.message) || "引擎落子失败";
+      const message = (moved.error && moved.error.message) || tr("引擎落子失败", "The engine could not play a move");
       render({ ...settledState, engine_thinking: false, status: message, error: message });
       break;
     }
@@ -520,7 +525,7 @@ async function applyAndContinue(response) {
 
 async function guarded(fn) {
   if (busy) {
-    toast("引擎思考中，请稍候");
+    toast(tr("引擎思考中，请稍候", "The engine is thinking. Please wait."));
     return false;
   }
   busy = true;
@@ -546,7 +551,7 @@ function onBoardTap(evt) {
 
   if (isForbidden(x, y)) {
     haptic(20);
-    toast("黑棋禁手，不能落在这里");
+    toast(tr("黑棋禁手，不能落在这里", "Forbidden for Black. Choose another point."));
     return;
   }
 
@@ -559,7 +564,7 @@ function onBoardTap(evt) {
   } else {
     ghost = { x, y }; // preview / move preview
     haptic(8);
-    statusMsg.textContent = "再次点击该点落子";
+    statusMsg.textContent = tr("再次点击该点落子", "Tap again to place the stone");
     statusMsg.classList.remove("error");
     draw();
   }
@@ -573,6 +578,34 @@ function openSheet(name) {
 }
 function closeSheet(name) {
   UiLogic.setSheetOpen(document, name, false);
+}
+
+function bindAboutSheet() {
+  const version = launchParams.get("version");
+  if (/^\d+\.\d+\.\d+$/.test(version)) {
+    const label = document.getElementById("about-version");
+    label.textContent = tr(`版本 ${version}`, `Version ${version}`);
+    label.hidden = false;
+    document.getElementById("about-source").href += `/tree/v${version}`;
+  }
+  document.getElementById("btn-about").addEventListener("click", () => {
+    closeSheet("more");
+    openSheet("about");
+  });
+  for (const details of document.querySelectorAll("#sheet-about [data-license]")) {
+    const content = details.querySelector("pre");
+    details.addEventListener("toggle", async () => {
+      if (!details.open || content.dataset.loaded) return;
+      try {
+        const response = await fetch(`legal/${details.dataset.license}`);
+        if (!response.ok) throw new Error(response.status);
+        content.textContent = await response.text();
+        content.dataset.loaded = "true";
+      } catch {
+        content.textContent = tr("无法读取许可文件。", "Could not load the license.");
+      }
+    });
+  }
 }
 
 function segValue(groupId) {
@@ -620,7 +653,7 @@ function bindEvents() {
 
   document.getElementById("btn-newgame").addEventListener("click", () => {
     if (busy || (lastState && lastState.engine_thinking)) {
-      toast("引擎思考中，请稍候");
+      toast(tr("引擎思考中，请稍候", "The engine is thinking. Please wait."));
       return;
     }
     openSheet("newgame");
@@ -656,7 +689,7 @@ function bindEvents() {
 
   document.getElementById("btn-start").addEventListener("click", () => {
     if (busy || (lastState && lastState.engine_thinking)) {
-      toast("引擎思考中，请稍候");
+      toast(tr("引擎思考中，请稍候", "The engine is thinking. Please wait."));
       return;
     }
     const mode = segValue("opt-gamemode");
@@ -687,7 +720,7 @@ function bindEvents() {
       guarded(async () => {
         const res = await nativeRequest({ op: "set_difficulty", difficulty });
         if (!res.ok) {
-          toast((res.error && res.error.message) || "切换难度失败");
+          toast((res.error && res.error.message) || tr("切换难度失败", "Could not change difficulty"));
           if (lastState) render(lastState);
           return;
         }
@@ -703,7 +736,7 @@ function bindEvents() {
       guarded(async () => {
         const res = await nativeRequest({ op: "set_time_limit", time_limit_ms });
         if (!res.ok) {
-          toast((res.error && res.error.message) || "切换限时失败");
+          toast((res.error && res.error.message) || tr("切换限时失败", "Could not change time limit"));
           if (lastState) render(lastState);
           return;
         }
@@ -716,7 +749,7 @@ function bindEvents() {
   numBtn.addEventListener("click", () => {
     showNumbers = !showNumbers;
     numBtn.setAttribute("aria-pressed", String(showNumbers));
-    numBtn.textContent = showNumbers ? "开" : "关";
+    numBtn.textContent = showNumbers ? tr("开", "On") : tr("关", "Off");
     draw();
   });
 
@@ -724,7 +757,7 @@ function bindEvents() {
   soundBtn.addEventListener("click", () => {
     soundOn = !soundOn;
     soundBtn.setAttribute("aria-pressed", String(soundOn));
-    soundBtn.textContent = soundOn ? "开" : "关";
+    soundBtn.textContent = soundOn ? tr("开", "On") : tr("关", "Off");
     if (soundOn) unlockAudio();
   });
 
@@ -735,7 +768,7 @@ function bindEvents() {
       guarded(async () => {
         const res = await nativeRequest({ op: "set_multithread", enabled });
         if (!res.ok) {
-          toast((res.error && res.error.message) || "切换线程失败");
+          toast((res.error && res.error.message) || tr("切换线程失败", "Could not change thread count"));
           if (lastState) render(lastState);
           return;
         }
@@ -770,6 +803,7 @@ function bindEvents() {
  * any in-flight search live in the ViewModel, so state() re-syncs the board.
  * ===================================================================== */
 bindEvents();
+bindAboutSheet();
 resize();
 guarded(async () => {
   await applyAndContinue(await nativeRequest({ op: "state" }));

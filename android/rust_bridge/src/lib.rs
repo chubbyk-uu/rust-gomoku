@@ -10,7 +10,7 @@ use jni::sys::{jlong, jstring};
 use jni::JNIEnv;
 use rust_gomoku::{
     default_interactive_threads, load_default_config, GameController, GameMode, RuleSet,
-    SearchClockMode, SearchDifficulty, BLACK, BOARD_SIZE, MAX_SEARCH_THREADS,
+    SearchClockMode, SearchDifficulty, UiLanguage, BLACK, BOARD_SIZE, MAX_SEARCH_THREADS,
     SUPPORTED_TIME_LIMITS_MS, WHITE,
 };
 use serde::Deserialize;
@@ -137,9 +137,9 @@ impl BridgeRegistry {
                 "Request JSON exceeds the {MAX_REQUEST_BYTES}-byte limit."
             )));
         }
-        let request = parse_request(request_json)?;
+        let (request, language) = parse_request(request_json)?;
         let controller = self.controller(handle)?;
-        dispatch_request(controller, request)
+        dispatch_request(controller, request, language)
     }
 }
 
@@ -147,12 +147,18 @@ fn registry() -> &'static BridgeRegistry {
     REGISTRY.get_or_init(BridgeRegistry::default)
 }
 
-fn parse_request(request_json: &str) -> Result<BridgeRequest, BridgeError> {
-    let value: Value = serde_json::from_str(request_json)
+fn parse_request(request_json: &str) -> Result<(BridgeRequest, UiLanguage), BridgeError> {
+    let mut value: Value = serde_json::from_str(request_json)
         .map_err(|err| BridgeError::invalid_request(format!("Invalid request JSON: {err}")))?;
     let object = value
-        .as_object()
+        .as_object_mut()
         .ok_or_else(|| BridgeError::invalid_request("Request JSON must be an object."))?;
+    let language = match object.remove("lang") {
+        Some(tag) => UiLanguage::from_tag(tag.as_str().ok_or_else(|| {
+            BridgeError::invalid_request("Request field \"lang\" must be a string.")
+        })?),
+        None => UiLanguage::Chinese,
+    };
     let operation = object
         .get("op")
         .and_then(Value::as_str)
@@ -180,15 +186,17 @@ fn parse_request(request_json: &str) -> Result<BridgeRequest, BridgeError> {
         )));
     }
     serde_json::from_value(value)
+        .map(|request| (request, language))
         .map_err(|err| BridgeError::invalid_request(format!("Invalid request fields: {err}")))
 }
 
 fn dispatch_request(
     controller: SharedController,
     request: BridgeRequest,
+    language: UiLanguage,
 ) -> Result<Value, BridgeError> {
     match request {
-        BridgeRequest::State => snapshot_response(&controller),
+        BridgeRequest::State => snapshot_response(&controller, language),
         BridgeRequest::NewGame {
             human_side,
             rule,
@@ -203,7 +211,7 @@ fn dispatch_request(
                 .lock()
                 .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
                 .new_game_with_clock(side, rule, mode, clock_mode);
-            snapshot_response(&controller)
+            snapshot_response(&controller, language)
         }
         BridgeRequest::Play { x, y } => {
             if x >= BOARD_SIZE || y >= BOARD_SIZE {
@@ -215,14 +223,14 @@ fn dispatch_request(
                 .lock()
                 .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
                 .play_human(x, y);
-            snapshot_response(&controller)
+            snapshot_response(&controller, language)
         }
         BridgeRequest::Undo => {
             controller
                 .lock()
                 .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
                 .undo_turn();
-            snapshot_response(&controller)
+            snapshot_response(&controller, language)
         }
         BridgeRequest::SetDifficulty { difficulty } => {
             let difficulty = parse_difficulty(&difficulty)?;
@@ -230,7 +238,7 @@ fn dispatch_request(
                 .lock()
                 .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
                 .set_difficulty(difficulty);
-            snapshot_response(&controller)
+            snapshot_response(&controller, language)
         }
         BridgeRequest::SetTimeLimit { time_limit_ms } => {
             if !SUPPORTED_TIME_LIMITS_MS.contains(&time_limit_ms) {
@@ -242,7 +250,7 @@ fn dispatch_request(
                 .lock()
                 .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
                 .set_time_limit_ms(time_limit_ms);
-            snapshot_response(&controller)
+            snapshot_response(&controller, language)
         }
         BridgeRequest::SetThreads { threads } => {
             if threads == 0 || threads > MAX_SEARCH_THREADS {
@@ -254,7 +262,7 @@ fn dispatch_request(
                 .lock()
                 .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
                 .set_threads(threads);
-            snapshot_response(&controller)
+            snapshot_response(&controller, language)
         }
         BridgeRequest::SetMultithread { enabled } => {
             let threads = if enabled {
@@ -266,7 +274,7 @@ fn dispatch_request(
                 .lock()
                 .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
                 .set_threads(threads);
-            snapshot_response(&controller)
+            snapshot_response(&controller, language)
         }
         BridgeRequest::EngineMove => {
             let task = controller
@@ -283,16 +291,19 @@ fn dispatch_request(
                 .lock()
                 .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
                 .commit_engine_search(completion);
-            snapshot_response(&controller)
+            snapshot_response(&controller, language)
         }
     }
 }
 
-fn snapshot_response(controller: &SharedController) -> Result<Value, BridgeError> {
+fn snapshot_response(
+    controller: &SharedController,
+    language: UiLanguage,
+) -> Result<Value, BridgeError> {
     let snapshot = controller
         .lock()
         .map_err(|_| BridgeError::internal("Game controller is unavailable."))?
-        .snapshot();
+        .snapshot_in(language);
     Ok(json!({ "ok": true, "state": snapshot }))
 }
 
@@ -636,7 +647,12 @@ mod tests {
         let request_controller = Arc::clone(&controller);
 
         let worker = thread::spawn(move || {
-            dispatch_request(request_controller, BridgeRequest::State).unwrap()
+            dispatch_request(
+                request_controller,
+                BridgeRequest::State,
+                UiLanguage::Chinese,
+            )
+            .unwrap()
         });
         assert!(registry.destroy(handle).unwrap());
 

@@ -210,10 +210,10 @@ test("the packaged page wires all tested UI helpers before app startup", () => {
 
   assert.match(appScript, /UiLogic\.syncBusyControls\(document, busy, state\)/);
   assert.match(appScript, /UiLogic\.boardDimensions\(/);
-  assert.match(appScript, /render\(UiLogic\.engineThinkingState\(state\)\)/);
+  assert.match(appScript, /render\(UiLogic\.engineThinkingState\(state, tr\)\)/);
   assert.match(appScript, /UiLogic\.setSheetOpen\(document, name, true\)/);
   assert.match(appScript, /UiLogic\.setSheetOpen\(document, name, false\)/);
-  assert.match(appScript, /UiLogic\.gameResult\(state\)/);
+  assert.match(appScript, /UiLogic\.gameResult\(state, tr\)/);
   assert.match(appScript, /op: "set_difficulty", difficulty/);
   assert.match(appScript, /op: "set_time_limit", time_limit_ms/);
   assert.match(appScript, /op: "set_multithread", enabled/);
@@ -242,5 +242,6 @@ test("the packaged page wires all tested UI helpers before app startup", () => {
   for (const limit of ["500", "1000", "2500", "5000"]) {
     assert.match(page, new RegExp(`data-value="${limit}"`));
   }
-  assert.ok(page.indexOf('src="ui_logic.js"') < page.indexOf('src="app.js"'));
+  assert.match(page, /id="ui-language"/);
+  assert.match(page, /src="ui_language\.js"[\s\S]+src="ui_logic\.js"[\s\S]+src="app\.js"/);
 });

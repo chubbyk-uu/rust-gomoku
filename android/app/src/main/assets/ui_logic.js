@@ -7,12 +7,12 @@
   }
   root.GomokuUiLogic = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
-  function engineThinkingState(state) {
+  function engineThinkingState(state, tr = zh => zh) {
     return {
       ...state,
       can_play: false,
       engine_thinking: true,
-      status: "引擎思考中...",
+      status: tr("引擎思考中...", "The engine is thinking…"),
       error: null,
     };
   }
@@ -65,33 +65,33 @@
     backdrop.setAttribute("aria-hidden", String(!open));
   }
 
-  function gameResult(state) {
+  function gameResult(state, tr = zh => zh) {
     if (!state || (state.winner === 0 && !state.draw)) return null;
     if (state.draw) {
       return {
         key: `draw:${state.move_count}`,
-        title: "和棋",
-        message: `棋盘在第 ${state.move_count} 手填满，双方均未连成五子。`,
+        title: tr("和棋", "Draw"),
+        message: tr(`棋盘在第 ${state.move_count} 手填满，双方均未连成五子。`, `The board filled on move ${state.move_count} without a winner.`),
         tone: "draw",
       };
     }
     if (state.params && state.params.mode === "two_player") {
       // BLACK is 1, WHITE is -1; announce the winning side, no human/engine.
-      const winnerName = state.winner === 1 ? "黑方" : "白方";
+      const winnerName = state.winner === 1 ? tr("黑方", "Black") : tr("白方", "White");
       return {
         key: `${state.winner}:${state.move_count}`,
-        title: `${winnerName}胜`,
-        message: `${winnerName}在第 ${state.move_count} 手取胜。`,
+        title: tr(`${winnerName}胜`, `${winnerName} wins`),
+        message: tr(`${winnerName}在第 ${state.move_count} 手取胜。`, `${winnerName} won on move ${state.move_count}.`),
         tone: "win",
       };
     }
     const humanWon = state.winner === state.human_side;
     return {
       key: `${state.winner}:${state.move_count}`,
-      title: humanWon ? "你赢了" : "引擎获胜",
+      title: humanWon ? tr("你赢了", "You win") : tr("引擎获胜", "Engine wins"),
       message: humanWon
-        ? `第 ${state.move_count} 手取胜。`
-        : `对局在第 ${state.move_count} 手结束。`,
+        ? tr(`第 ${state.move_count} 手取胜。`, `You won on move ${state.move_count}.`)
+        : tr(`对局在第 ${state.move_count} 手结束。`, `The game ended on move ${state.move_count}.`),
       tone: humanWon ? "win" : "loss",
     };
   }

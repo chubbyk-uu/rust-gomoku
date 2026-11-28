@@ -14,6 +14,8 @@
 
 The desktop and Android interfaces support engine play and local two-player games. In Renju, the board marks forbidden moves for Black and rejects them as input.
 
+The interface follows the system language by default, using Simplified Chinese for Chinese locales and English for other locales. Choose **Language** in the desktop settings or under **More** on Android to override it.
+
 | Mode | What it uses |
 |---|---|
 | **Pro** | Native `Mix9svq` NNUE and a per-move budget of **1 second** by default. Also supports 0.5, 2.5, and 5 seconds, a multithreaded search toggle, and a win-rate estimate chart. |
@@ -23,16 +25,16 @@ The desktop and Android interfaces support engine play and local two-player game
 
 **Desktop · Renju in Pro mode.** The right panel shows the NNUE win-rate estimate and the last move's search time.
 
-![Desktop game against the engine with a Renju board, move time, and NNUE win-rate chart](docs/screenshots/desktop-gui.png)
+![English desktop game against the engine with a Renju board, move time, and NNUE win-rate chart](docs/screenshots/desktop-gui-en.png)
 
-**Android · Game and new-game settings.** These are browser captures of the released Android interface, connected to the Rust JNI bridge on the development machine.
+**Android · Game and new-game settings.** These are browser captures of the Android interface connected to the Rust JNI bridge on the development machine.
 
 <p>
-  <img src="docs/screenshots/android-portrait.png" alt="Android portrait preview with the Renju board and win-rate chart" width="280">
-  <img src="docs/screenshots/android-difficulty.png" alt="Android new-game settings with Pro mode and time presets" width="280">
+  <img src="docs/screenshots/android-portrait-en.png" alt="English Android portrait preview with the Renju board and win-rate chart" width="280">
+  <img src="docs/screenshots/android-difficulty-en.png" alt="English Android new-game settings with Pro mode and time presets" width="280">
 </p>
 
-[View the Android landscape layout](docs/screenshots/android-landscape.png).
+[View the English Android landscape layout](docs/screenshots/android-landscape-en.png).
 
 ## Engine
 

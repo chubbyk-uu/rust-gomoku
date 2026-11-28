@@ -1,5 +1,7 @@
 package io.github.chubbykuu.rustgomoku
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.webkit.JavascriptInterface
@@ -39,7 +41,7 @@ class MainActivity : ComponentActivity() {
             settings.javaScriptEnabled = true
             settings.allowFileAccess = false
             settings.allowContentAccess = false
-            settings.domStorageEnabled = false
+            settings.domStorageEnabled = true // Stores the local UI language preference.
             // Allow the synthesized stone-placement sound to play; the page still
             // resumes its AudioContext from a user gesture.
             settings.mediaPlaybackRequiresUserGesture = false
@@ -52,7 +54,8 @@ class MainActivity : ComponentActivity() {
             webView.addJavascriptInterface(it, "AndroidBridge")
         }
 
-        webView.loadUrl("https://$ASSET_HOST/assets/index.html")
+        val systemLanguage = if (resources.configuration.locales[0].language == "zh") "zh-CN" else "en"
+        webView.loadUrl("https://$ASSET_HOST/assets/index.html?lang=$systemLanguage&version=${BuildConfig.VERSION_NAME}")
         setContentView(webView)
     }
 
@@ -74,10 +77,32 @@ class MainActivity : ComponentActivity() {
         override fun shouldOverrideUrlLoading(
             view: WebView,
             request: WebResourceRequest,
-        ): Boolean = !isApplicationAsset(request.url)
+        ): Boolean {
+            val uri = request.url
+            if (isApplicationAsset(uri)) return false
+            if (request.isForMainFrame && request.hasGesture() && isProjectLink(uri)) {
+                try {
+                    view.context.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                } catch (_: ActivityNotFoundException) {
+                    // The bundled privacy policy and license remain readable offline.
+                }
+            }
+            return true
+        }
 
         private fun isApplicationAsset(uri: Uri): Boolean {
             return uri.scheme == "https" && uri.host == ASSET_HOST
+        }
+
+        private fun isProjectLink(uri: Uri): Boolean {
+            if (uri.scheme != "https" || uri.encodedAuthority != "github.com" || uri.query != null) {
+                return false
+            }
+            return uri.encodedPath in setOf(
+                "/chubbyk-uu/rust-gomoku/tree/v${BuildConfig.VERSION_NAME}",
+                "/chubbyk-uu/rust-gomoku/blob/master/docs/privacy-policy.md",
+                "/chubbyk-uu/rust-gomoku/issues/new",
+            )
         }
     }
 

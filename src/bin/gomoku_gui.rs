@@ -15,7 +15,7 @@ use serde::Serialize;
 use rust_gomoku::{
     default_interactive_threads, load_default_config, nnue::resolve_default_nnue_dir,
     EngineSearchCompletion, GameController, GameMode, RuleSet, SearchClockMode, SearchDifficulty,
-    Side, BLACK, MAX_SEARCH_THREADS, WHITE,
+    Side, UiLanguage, BLACK, MAX_SEARCH_THREADS, WHITE,
 };
 
 const DEFAULT_ADDR: &str = "127.0.0.1:18080";
@@ -68,6 +68,7 @@ fn main() {
     ));
     let browser_activity = Arc::new(Mutex::new(BrowserActivity::default()));
     start_browser_watchdog(Arc::clone(&browser_activity));
+    let system_language = system_ui_language();
     let addr = args.addr;
     let listener = TcpListener::bind(&addr).expect("GUI server binds to local address");
     let url = browser_url(&addr);
@@ -85,7 +86,13 @@ fn main() {
         let state = Arc::clone(&state);
         let browser_activity = Arc::clone(&browser_activity);
         thread::spawn(move || {
-            handle_client(stream, state, browser_activity, default_multi_threads)
+            handle_client(
+                stream,
+                state,
+                browser_activity,
+                default_multi_threads,
+                system_language,
+            )
         });
     }
 }
@@ -333,11 +340,36 @@ fn open_browser(_url: &str) -> std::io::Result<()> {
     ))
 }
 
+#[cfg(windows)]
+fn system_ui_language() -> UiLanguage {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetUserDefaultUILanguage() -> u16;
+    }
+
+    const LANG_CHINESE: u16 = 0x04;
+    // The low ten bits of a Windows LANGID are its primary language ID.
+    if unsafe { GetUserDefaultUILanguage() } & 0x03ff == LANG_CHINESE {
+        UiLanguage::Chinese
+    } else {
+        UiLanguage::English
+    }
+}
+
+#[cfg(not(windows))]
+fn system_ui_language() -> UiLanguage {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .find_map(|key| std::env::var(key).ok().filter(|value| !value.is_empty()))
+        .map_or(UiLanguage::English, |tag| UiLanguage::from_tag(&tag))
+}
+
 fn handle_client(
     mut stream: TcpStream,
     state: Arc<Mutex<GameController>>,
     browser_activity: Arc<Mutex<BrowserActivity>>,
     default_multi_threads: usize,
+    system_language: UiLanguage,
 ) {
     let mut buffer = [0_u8; 8192];
     let Ok(read) = stream.read(&mut buffer) else {
@@ -354,9 +386,20 @@ fn handle_client(
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("/");
     let (path, query) = split_target(target);
+    let language = query_param(query, "lang").map_or(system_language, UiLanguage::from_tag);
     let response = match (method, path) {
+        ("GET", "/") if system_language == UiLanguage::English => {
+            html_response(&INDEX_HTML.replacen("<html lang=\"zh-CN\">", "<html lang=\"en\">", 1))
+        }
         ("GET", "/") => html_response(INDEX_HTML),
-        ("GET", "/state") => json_response(&state.lock().expect("state lock").snapshot()),
+        ("GET", "/ui_language.js") => response(
+            200,
+            "text/javascript; charset=utf-8",
+            include_str!("../../android/app/src/main/assets/ui_language.js").to_string(),
+        ),
+        ("GET", "/state") => {
+            json_response(&state.lock().expect("state lock").snapshot_in(language))
+        }
         ("POST", "/browser/open") | ("POST", "/browser/close") => {
             if let Some(tab) = query_param(query, "tab").filter(|tab| !tab.is_empty()) {
                 let mut activity = browser_activity.lock().expect("browser activity lock");
@@ -389,7 +432,7 @@ fn handle_client(
             if mode == GameMode::VsEngine && side == WHITE {
                 maybe_start_engine(Arc::clone(&state));
             }
-            json_response(&state.lock().expect("state lock").snapshot())
+            json_response(&state.lock().expect("state lock").snapshot_in(language))
         }
         ("POST", "/play") => {
             let x = query_param(query, "x").and_then(|value| value.parse::<usize>().ok());
@@ -399,18 +442,18 @@ fn handle_client(
                 if let (Some(x), Some(y)) = (x, y) {
                     game.play_human(x, y)
                 } else {
-                    game.set_error("缺少坐标。");
+                    game.set_localized_error("缺少坐标。", "The move is missing coordinates.");
                     false
                 }
             };
             if should_engine_move {
                 maybe_start_engine(Arc::clone(&state));
             }
-            json_response(&state.lock().expect("state lock").snapshot())
+            json_response(&state.lock().expect("state lock").snapshot_in(language))
         }
         ("POST", "/undo") => {
             state.lock().expect("state lock").undo_turn();
-            json_response(&state.lock().expect("state lock").snapshot())
+            json_response(&state.lock().expect("state lock").snapshot_in(language))
         }
         ("POST", "/difficulty") => {
             let difficulty = query_param(query, "value")
@@ -420,10 +463,13 @@ fn handle_client(
                 if let Some(difficulty) = difficulty {
                     game.set_difficulty(difficulty);
                 } else {
-                    game.set_error("未知难度，请选择 beginner、normal、senior 或 master。");
+                    game.set_localized_error(
+                        "未知难度，请选择 beginner、normal、senior 或 master。",
+                        "Unknown difficulty. Choose beginner, normal, senior or master.",
+                    );
                 }
             }
-            json_response(&state.lock().expect("state lock").snapshot())
+            json_response(&state.lock().expect("state lock").snapshot_in(language))
         }
         ("POST", "/time_limit") => {
             let ms = query_param(query, "ms").and_then(|value| value.parse::<u32>().ok());
@@ -432,10 +478,13 @@ fn handle_client(
                 if let Some(ms) = ms {
                     game.set_time_limit_ms(ms);
                 } else {
-                    game.set_error("缺少或无效的限时参数。");
+                    game.set_localized_error(
+                        "缺少或无效的限时参数。",
+                        "The time limit is missing or invalid.",
+                    );
                 }
             }
-            json_response(&state.lock().expect("state lock").snapshot())
+            json_response(&state.lock().expect("state lock").snapshot_in(language))
         }
         ("POST", "/threads") => {
             let enabled = match query_param(query, "enabled") {
@@ -452,10 +501,13 @@ fn handle_client(
                         game.set_overlap_vct_alphabeta(target_threads == 1);
                     }
                 } else {
-                    game.set_error("无效的线程开关参数。");
+                    game.set_localized_error(
+                        "无效的线程开关参数。",
+                        "Invalid multithreading setting.",
+                    );
                 }
             }
-            json_response(&state.lock().expect("state lock").snapshot())
+            json_response(&state.lock().expect("state lock").snapshot_in(language))
         }
         _ => text_response(404, "not found"),
     };
@@ -494,7 +546,11 @@ fn maybe_start_engine(state: Arc<Mutex<GameController>>) {
         .name("gomoku-gui-search".to_string())
         .spawn(move || {
             let completion = catch_unwind(AssertUnwindSafe(|| task.run())).unwrap_or_else(|_| {
-                EngineSearchCompletion::failed(generation, "引擎搜索线程异常退出。")
+                EngineSearchCompletion::failed_localized(
+                    generation,
+                    "引擎搜索线程异常退出。",
+                    "The engine search thread exited unexpectedly.",
+                )
             });
             thread_state
                 .lock()
@@ -505,9 +561,10 @@ fn maybe_start_engine(state: Arc<Mutex<GameController>>) {
         state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .commit_engine_search(EngineSearchCompletion::failed(
+            .commit_engine_search(EngineSearchCompletion::failed_localized(
                 generation,
                 "系统资源不足，无法启动引擎搜索线程。",
+                "There are not enough system resources to start the engine search thread.",
             ));
     }
 }
@@ -749,6 +806,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .settings button:hover {
       box-shadow: 0 5px 12px rgba(37, 23, 9, .12);
     }
+    html[lang="en"] .settings button {
+      padding-inline: 8px;
+    }
     select {
       width: 100%;
       min-height: 46px;
@@ -912,100 +972,110 @@ const INDEX_HTML: &str = r#"<!doctype html>
     </section>
     <aside class="panel">
       <h1>rust_gomoku</h1>
-      <div id="status" class="status">加载中...</div>
+      <div id="status" class="status" data-en="Loading…">加载中...</div>
       <div id="error" class="error-text"></div>
       <div class="controls">
         <div class="settings">
           <div class="setting-row">
-            <span class="setting-label">对战</span>
+            <span class="setting-label" data-en="Play">对战</span>
             <div class="mode-switch">
-              <button id="mode-engine" class="secondary" onclick="selectMode('vs_engine')">人机</button>
-              <button id="mode-two" class="secondary" onclick="selectMode('two_player')">双人</button>
+              <button id="mode-engine" class="secondary" onclick="selectMode('vs_engine')" data-en="Vs Engine">人机</button>
+              <button id="mode-two" class="secondary" onclick="selectMode('two_player')" data-en="Two Players">双人</button>
             </div>
           </div>
           <div class="setting-row">
-            <span class="setting-label">规则</span>
+            <span class="setting-label" data-en="Rules">规则</span>
             <div class="rule-switch">
-              <button id="rule-freestyle" class="secondary" onclick="selectRule('freestyle')">无禁手</button>
-              <button id="rule-renju" class="secondary" onclick="selectRule('renju')">有禁手</button>
+              <button id="rule-freestyle" class="secondary" onclick="selectRule('freestyle')" data-en="Freestyle">无禁手</button>
+              <button id="rule-renju" class="secondary" onclick="selectRule('renju')" data-en="Renju">有禁手</button>
             </div>
           </div>
           <div class="setting-row" id="row-clock-mode">
-            <span class="setting-label">模式</span>
+            <span class="setting-label" data-en="Mode">模式</span>
             <div class="rule-switch">
-              <button id="clock-untimed" class="secondary" onclick="selectClock('untimed')">休闲</button>
-              <button id="clock-timed" class="secondary" onclick="selectClock('timed')">专业 · NNUE</button>
+              <button id="clock-untimed" class="secondary" onclick="selectClock('untimed')" data-en="Casual">休闲</button>
+              <button id="clock-timed" class="secondary" onclick="selectClock('timed')" data-en="Pro · NNUE">专业 · NNUE</button>
             </div>
           </div>
           <label class="setting-row" id="row-difficulty" for="difficulty-select" hidden>
-            <span class="setting-label">休闲难度</span>
+            <span class="setting-label" data-en="Casual difficulty">休闲难度</span>
             <select id="difficulty-select" onchange="setDifficulty(this.value)">
-              <option value="beginner">入门 · d2 / w10 · 经典</option>
-              <option value="normal" selected>普通 · d4 / w20 · 经典</option>
-              <option value="senior">高级 · d6 / w30 · 经典 + VCF</option>
-              <option value="master">大师 · d8 / w40 · 经典 + VCF/VCT</option>
+              <option value="beginner" data-en="Beginner · d2 / w10 · Classical">入门 · d2 / w10 · 经典</option>
+              <option value="normal" selected data-en="Normal · d4 / w20 · Classical">普通 · d4 / w20 · 经典</option>
+              <option value="senior" data-en="Advanced · d6 / w30 · Classical + VCF">高级 · d6 / w30 · 经典 + VCF</option>
+              <option value="master" data-en="Master · d8 / w40 · Classical + VCF/VCT">大师 · d8 / w40 · 经典 + VCF/VCT</option>
             </select>
           </label>
           <label class="setting-row" id="row-time-limit" for="time-limit-select">
-            <span class="setting-label">专业限时</span>
+            <span class="setting-label" data-en="Pro time limit">专业限时</span>
             <select id="time-limit-select" onchange="setTimeLimit(this.value)">
-              <option value="500">0.5 秒 (500 ms)</option>
-              <option value="1000" selected>1 秒 (1000 ms)</option>
-              <option value="2500">2.5 秒 (2500 ms)</option>
-              <option value="5000">5 秒 (5000 ms)</option>
+              <option value="500" data-en="0.5 s (500 ms)">0.5 秒 (500 ms)</option>
+              <option value="1000" selected data-en="1 s (1000 ms)">1 秒 (1000 ms)</option>
+              <option value="2500" data-en="2.5 s (2500 ms)">2.5 秒 (2500 ms)</option>
+              <option value="5000" data-en="5 s (5000 ms)">5 秒 (5000 ms)</option>
             </select>
           </label>
           <label class="setting-row" id="row-multithread" for="multithread-toggle">
-            <span class="setting-label">多线程</span>
+            <span class="setting-label" data-en="Threads">多线程</span>
             <span class="check-toggle">
               <input id="multithread-toggle" type="checkbox" checked onchange="setMultithread(this.checked)">
-              <span id="multithread-label">开启</span>
+              <span id="multithread-label" data-en="On">开启</span>
             </span>
           </label>
           <div class="setting-row">
-            <span class="setting-label">落子音效</span>
-            <button id="sound-toggle" class="secondary" onclick="toggleSound()">开</button>
+            <span class="setting-label" data-en="Move sounds">落子音效</span>
+            <button id="sound-toggle" class="secondary" onclick="toggleSound()" data-en="On">开</button>
           </div>
+          <label class="setting-row" for="ui-language">
+            <span class="setting-label" data-en="Language">语言</span>
+            <select id="ui-language">
+              <option value="system" data-en="System default">跟随系统</option>
+              <option value="zh-CN" lang="zh-CN">简体中文</option>
+              <option value="en" lang="en">English</option>
+            </select>
+          </label>
         </div>
         <div id="pending-notice" class="pending-notice" hidden></div>
         <div class="new-game">
           <div id="start-vs-engine">
-            <button class="primary" onclick="newGame('black')">执黑</button>
-            <button class="primary" onclick="newGame('white')">执白</button>
+            <button class="primary" onclick="newGame('black')" data-en="Play Black">执黑</button>
+            <button class="primary" onclick="newGame('white')" data-en="Play White">执白</button>
           </div>
-          <button id="start-two-player" class="primary" onclick="startTwoPlayer()" hidden>开始双人对局</button>
+          <button id="start-two-player" class="primary" onclick="startTwoPlayer()" hidden data-en="Start two-player game">开始双人对局</button>
         </div>
         <div class="actions">
-          <button id="undo-btn" class="warn" onclick="undo()">悔棋</button>
+          <button id="undo-btn" class="warn" onclick="undo()" data-en="Undo">悔棋</button>
         </div>
-        <div class="hint">U 悔棋 · R 重新开局</div>
+        <div class="hint" data-en="U Undo · R Restart">U 悔棋 · R 重新开局</div>
       </div>
       <div class="kv" id="info"></div>
       <section class="position-estimate" id="position-estimate" aria-labelledby="position-title" hidden>
-        <h2 id="position-title">NNUE 局势估计</h2>
+        <h2 id="position-title" data-en="NNUE position estimate">NNUE 局势估计</h2>
         <p class="position-caption" id="position-current"></p>
         <canvas id="position-chart" width="640" height="180" tabindex="0" hidden
-          aria-label="黑方预计得分曲线，使用左右方向键查看历史估计"
+          aria-label="黑方预计得分曲线，使用左右方向键查看历史估计" data-aria-en="Estimated score for Black. Use the arrow keys to browse moves."
           aria-describedby="position-point"></canvas>
         <p class="position-caption" id="position-point"></p>
       </section>
       <details class="engine-details" id="engine-details" hidden>
-        <summary>引擎详情</summary>
+        <summary data-en="Engine details">引擎详情</summary>
         <div class="kv" id="search-info"></div>
       </details>
     </aside>
   </main>
   <div id="result-backdrop" class="result-backdrop" aria-hidden="true">
     <section class="result-dialog" role="dialog" aria-modal="true" aria-labelledby="result-title">
-      <h2 id="result-title">对局结束</h2>
+      <h2 id="result-title" data-en="Game over">对局结束</h2>
       <p id="result-message"></p>
       <div class="result-actions">
-        <button class="secondary" onclick="closeResult()">查看棋盘</button>
-        <button class="primary" onclick="restartFromResult()">再来一局</button>
+        <button class="secondary" onclick="closeResult()" data-en="View board">查看棋盘</button>
+        <button class="primary" onclick="restartFromResult()" data-en="Play again">再来一局</button>
       </div>
     </section>
   </div>
+  <script src="/ui_language.js"></script>
   <script>
+    const { tag: uiTag, text: tr } = localizeUi(document.documentElement.lang);
     const canvas = document.getElementById('board');
     const ctx = canvas.getContext('2d');
     const positionChart = document.getElementById('position-chart');
@@ -1081,7 +1151,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function toggleSound() {
       soundOn = !soundOn;
       const btn = document.getElementById('sound-toggle');
-      btn.textContent = soundOn ? '开' : '关';
+      btn.textContent = soundOn ? tr('开', 'On') : tr('关', 'Off');
       btn.classList.toggle('primary', soundOn);
       btn.classList.toggle('secondary', !soundOn);
       if (soundOn) unlockAudio();
@@ -1089,7 +1159,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     window.addEventListener('pointerdown', unlockAudio);
 
     async function api(path) {
-      const res = await fetch(path, { method: path === '/state' ? 'GET' : 'POST' });
+      const url = new URL(path, location.origin);
+      url.searchParams.set('lang', uiTag);
+      const res = await fetch(url, { method: path === '/state' ? 'GET' : 'POST' });
       if (!res.ok) throw new Error(await res.text());
       state = await res.json();
       maybePlayStoneSound();
@@ -1151,13 +1223,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
         return;
       }
       const curParts = [
-        p.mode === 'two_player' ? '双人' : '人机',
-        p.rule === 'renju' ? '有禁手' : '无禁手',
+        p.mode === 'two_player' ? tr('双人', 'Two Players') : tr('人机', 'Vs Engine'),
+        p.rule === 'renju' ? tr('有禁手', 'Renju') : tr('无禁手', 'Freestyle'),
       ];
       if (p.mode !== 'two_player') {
-        curParts.push(p.clock_mode === 'timed' ? '专业' : '休闲');
+        curParts.push(p.clock_mode === 'timed' ? '专业' : tr('休闲', 'Casual'));
       }
-      notice.textContent = `当前对局仍为「${curParts.join(' / ')}」，点击下方开局按钮后才会切换为新设置。`;
+      notice.textContent = tr(`当前对局仍为「${curParts.join(' / ')}」，点击下方开局按钮后才会切换为新设置。`, `Current game: ${curParts.join(' / ')}. Start a new game to apply the changes.`);
       notice.hidden = false;
     }
     function renderModeButtons() {
@@ -1213,18 +1285,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
       announcedResult = key;
       const twoPlayer = state.params && state.params.mode === 'two_player';
       if (state.draw) {
-        document.getElementById('result-title').textContent = '和棋';
-        document.getElementById('result-message').textContent = `棋盘在第 ${state.move_count} 手填满，双方均未连成五子。`;
+        document.getElementById('result-title').textContent = tr('和棋', 'Draw');
+        document.getElementById('result-message').textContent = tr(`棋盘在第 ${state.move_count} 手填满，双方均未连成五子。`, `The board filled on move ${state.move_count} without a winner.`);
       } else if (twoPlayer) {
         const winnerName = sideName(state.winner);
-        document.getElementById('result-title').textContent = `${winnerName}胜`;
-        document.getElementById('result-message').textContent = `${winnerName}在第 ${state.move_count} 手取胜。`;
+        document.getElementById('result-title').textContent = tr(`${winnerName}胜`, `${winnerName} wins`);
+        document.getElementById('result-message').textContent = tr(`${winnerName}在第 ${state.move_count} 手取胜。`, `${winnerName} won on move ${state.move_count}.`);
       } else {
         const humanWon = state.winner === state.human_side;
-        document.getElementById('result-title').textContent = humanWon ? '你赢了' : '引擎获胜';
+        document.getElementById('result-title').textContent = humanWon ? tr('你赢了', 'You win') : tr('引擎获胜', 'Engine wins');
         document.getElementById('result-message').textContent = humanWon
-          ? `第 ${state.move_count} 手取胜。`
-          : `对局在第 ${state.move_count} 手结束。`;
+          ? tr(`第 ${state.move_count} 手取胜。`, `You won on move ${state.move_count}.`)
+          : tr(`对局在第 ${state.move_count} 手结束。`, `The game ended on move ${state.move_count}.`);
       }
       const backdrop = document.getElementById('result-backdrop');
       backdrop.classList.add('open');
@@ -1342,7 +1414,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       ctx.fillText(String(number), cx, cy + 0.5);
     }
     function sideName(v) {
-      return v === 1 ? '黑' : (v === -1 ? '白' : '无');
+      return v === 1 ? tr('黑', 'Black') : (v === -1 ? tr('白', 'White') : tr('无', 'None'));
     }
     function formatMs(ms) {
       return `${ms.toFixed(1)} ms`;
@@ -1368,7 +1440,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       positionChart.hidden = points.length === 0;
       if (panel.hidden || points.length === 0) {
         selectedEstimatePly = null;
-        current.textContent = '引擎落子后更新';
+        current.textContent = tr('引擎落子后更新', 'Updates after an engine move');
         caption.textContent = '';
         return;
       }
@@ -1377,9 +1449,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const selected = points.find(point => point.ply === selectedEstimatePly) || latest;
       const latestScore = blackExpectedScore(latest);
       const scorePerMille = Math.round(latestScore * 1000);
-      const advantage = scorePerMille > 500 ? '黑方占优' : scorePerMille < 500 ? '白方占优' : '均势';
-      current.textContent = `第 ${latest.ply} 手后 · ${advantage} · 黑方预计得分 ${percent(latestScore)}`;
-      caption.textContent = `第 ${selected.ply} 手：黑胜 ${percent(selected.black_win)} · 和棋 ${percent(selected.draw)} · 白胜 ${percent(selected.white_win)}`;
+      const advantage = scorePerMille > 500 ? tr('黑方占优', 'Black ahead') : scorePerMille < 500 ? tr('白方占优', 'White ahead') : tr('均势', 'Even');
+      current.textContent = tr(`第 ${latest.ply} 手后 · ${advantage} · 黑方预计得分 ${percent(latestScore)}`, `Move ${latest.ply} · ${advantage} · Black estimated score ${percent(latestScore)}`);
+      caption.textContent = tr(`第 ${selected.ply} 手：黑胜 ${percent(selected.black_win)} · 和棋 ${percent(selected.draw)} · 白胜 ${percent(selected.white_win)}`, `Move ${selected.ply} · Black ${percent(selected.black_win)} · Draw ${percent(selected.draw)} · White ${percent(selected.white_win)}`);
 
       const { left, right, top, bottom } = chartBounds;
       const maxPly = chartMaxPly(points);
@@ -1402,7 +1474,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         c.fillText(`${score * 100}%`, left - 7, y(score));
       }
       c.setLineDash([]);
-      c.fillText(`${maxPly} 手`, right, bottom + 21);
+      c.fillText(tr(`${maxPly} 手`, `${maxPly} moves`), right, bottom + 21);
       c.textAlign = 'left';
       c.fillText('0', left, bottom + 21);
       c.beginPath();
@@ -1448,13 +1520,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const details = document.getElementById('engine-details');
       const twoPlayer = p.mode === 'two_player';
       details.hidden = twoPlayer;
-      const rows = [['手数', state.move_count]];
+      const rows = [[tr('手数', 'Moves'), state.move_count]];
       if (!twoPlayer) {
-        rows.unshift(['你执', sideName(state.human_side)]);
-        if (r?.ms != null) rows.push(['上次搜索', formatMs(r.ms)]);
-        if (t?.vcf_found || t?.vct_accepted) rows.push(['战术', '找到强制胜着']);
+        rows.unshift([tr('你执', 'You play'), sideName(state.human_side)]);
+        if (r?.ms != null) rows.push([tr('上次搜索', 'Last search'), formatMs(r.ms)]);
+        if (t?.vcf_found || t?.vct_accepted) rows.push([tr('战术', 'Tactics'), tr('找到强制胜着', 'Forced win found')]);
         if (p.clock_mode === 'timed' && r?.used_nnue === false) {
-          rows.push(['评估器', '已回落到经典评估']);
+          rows.push([tr('评估器', 'Evaluator'), tr('已回落到经典评估', 'Using classical evaluation')]);
         }
       }
       renderRows('info', rows);
@@ -1462,40 +1534,40 @@ const INDEX_HTML: &str = r#"<!doctype html>
       if (twoPlayer) return;
 
       const usingFastNnue = r ? !!r.used_nnue : (p.clock_mode === 'timed' && p.use_nnue && p.nnue_available);
-      let evaluator = '经典评估';
+      let evaluator = tr('经典评估', 'Classical evaluation');
       if (r?.used_nnue) evaluator = 'NNUE (Mix9svq · FastEngine)';
       else if (p.clock_mode === 'timed') {
-        if (!p.nnue_available) evaluator += '（未找到 NNUE 权重）';
-        else evaluator = r ? '经典评估（NNUE 加载失败）' : 'NNUE (Mix9svq · FastEngine)';
+        if (!p.nnue_available) evaluator += tr('（未找到 NNUE 权重）', ' (NNUE weights missing)');
+        else evaluator = r ? tr('经典评估（NNUE 加载失败）', 'Classical evaluation (NNUE load failed)') : 'NNUE (Mix9svq · FastEngine)';
       }
-      const config = p.clock_mode === 'timed' ? `${p.time_limit_ms} ms` : `深度 ${p.depth}`;
+      const config = p.clock_mode === 'timed' ? `${p.time_limit_ms} ms` : tr(`深度 ${p.depth}`, `Depth ${p.depth}`);
       const searchRows = [
-        ['评估器', evaluator],
-        ['搜索配置', usingFastNnue
-          ? `${config} · ${p.threads} 线程 · 32 MiB TT`
-          : `${config} · 宽度 ${p.width} · ${p.threads} 线程`],
+        [tr('评估器', 'Evaluator'), evaluator],
+        [tr('搜索配置', 'Search settings'), usingFastNnue
+          ? tr(`${config} · ${p.threads} 线程 · 32 MiB TT`, `${config} · ${p.threads} threads · 32 MiB TT`)
+          : tr(`${config} · 宽度 ${p.width} · ${p.threads} 线程`, `${config} · Width ${p.width} · ${p.threads} threads`)],
       ];
       if (!usingFastNnue) {
-        searchRows.push(['战术配置', [p.compute_vcf ? `VCF ${p.root_vcf_depth}` : 'VCF 关闭',
-          p.compute_vct ? `VCT ${p.root_vct_depth}` : 'VCT 关闭'].join(' · ')]);
+        searchRows.push([tr('战术配置', 'Tactical settings'), [p.compute_vcf ? `VCF ${p.root_vcf_depth}` : tr('VCF 关闭', 'VCF off'),
+          p.compute_vct ? `VCT ${p.root_vct_depth}` : tr('VCT 关闭', 'VCT off')].join(' · ')]);
       }
       if (r) {
-        searchRows.push(['搜索结果', `深度 ${r.depth} · ${r.nodes.toLocaleString('zh-CN')} 节点 · 引擎侧分数 ${r.score}`]);
+        searchRows.push([tr('搜索结果', 'Search result'), tr(`深度 ${r.depth} · ${r.nodes.toLocaleString(uiTag)} 节点 · 引擎侧分数 ${r.score}`, `Depth ${r.depth} · ${r.nodes.toLocaleString(uiTag)} nodes · Engine score ${r.score}`)]);
       }
-      if (t?.used_vcf) searchRows.push(['VCF', t.vcf_found ? '找到胜着' : '未找到胜着']);
+      if (t?.used_vcf) searchRows.push(['VCF', t.vcf_found ? tr('找到胜着', 'Win found') : tr('未找到胜着', 'No win found')]);
       if (t?.vct_triggered) {
-        const outcome = t.vct_accepted ? '通过验证' : t.vct_found ? '未通过验证' : '未找到胜着';
+        const outcome = t.vct_accepted ? tr('通过验证', 'Verified') : t.vct_found ? tr('未通过验证', 'Verification failed') : tr('未找到胜着', 'No win found');
         const vctDetails = [outcome];
         if (t.vct_ms != null) vctDetails.push(formatMs(t.vct_ms));
         if (t.vct_reject_reason) vctDetails.push(t.vct_reject_reason);
         searchRows.push(['VCT', vctDetails.join(' · ')]);
       }
-      if (t?.alphabeta_ms != null) searchRows.push(['主搜索', formatMs(t.alphabeta_ms)]);
+      if (t?.alphabeta_ms != null) searchRows.push([tr('主搜索', 'Main search'), formatMs(t.alphabeta_ms)]);
       if (t?.overlap_used) {
         const times = [
-          ['主搜索', t.overlap_ab_ms], ['等待', t.overlap_wait_ms], ['TT 快照', t.tt_snapshot_ms],
+          [tr('主搜索', 'Main search'), t.overlap_ab_ms], [tr('等待', 'Wait'), t.overlap_wait_ms], [tr('TT 快照', 'TT snapshot'), t.tt_snapshot_ms],
         ].filter(([, ms]) => ms != null).map(([label, ms]) => `${label} ${formatMs(ms)}`);
-        searchRows.push(['战术并行', times.join(' · ')]);
+        searchRows.push([tr('战术并行', 'Tactical overlap'), times.join(' · ')]);
       }
       renderRows('search-info', searchRows);
     }
@@ -1545,7 +1617,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const mtLabel = document.getElementById('multithread-label');
       mtToggle.checked = p.threads > 1;
       mtToggle.disabled = !!state.engine_thinking;
-      mtLabel.textContent = p.threads > 1 ? `开启（${p.threads} 线程）` : '关闭（单线程）';
+      mtLabel.textContent = p.threads > 1 ? tr(`开启（${p.threads} 线程）`, `On (${p.threads} threads)`) : tr('关闭（单线程）', 'Off (1 thread)');
       // Undo is rejected server-side while the engine thinks; disable it to match.
       document.getElementById('undo-btn').disabled = !!state.engine_thinking;
       renderRuleButtons();

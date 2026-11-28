@@ -13,31 +13,31 @@
       <div id="meta">
         <span class="chip" id="meta-rule">—</span>
         <span class="chip" id="meta-side">—</span>
-        <span class="chip" id="meta-difficulty">专业 1s</span>
-        <span class="chip" id="meta-moves">第 0 手</span>
+        <span class="chip" id="meta-difficulty" data-en="Pro 1s">专业 1s</span>
+        <span class="chip" id="meta-moves" data-en="Move 0">第 0 手</span>
       </div>
     </header>
     <header id="statusbar">
       <span id="turn-dot" class="none" aria-hidden="true"></span>
-      <span id="status-msg">准备连接引擎…</span>
+      <span id="status-msg" data-en="Connecting to the engine…">准备连接引擎…</span>
     </header>
     <main id="board-area">
       <div id="board-wrap">
-        <canvas id="board" aria-label="15路五子棋棋盘"></canvas>
+        <canvas id="board" aria-label="15路五子棋棋盘" data-aria-en="15×15 Gomoku board"></canvas>
       </div>
     </main>
     <section id="position-estimate" class="position-estimate" aria-labelledby="position-title" hidden>
       <div class="position-head">
-        <span id="position-title">NNUE 局势估计</span>
-        <span class="position-caption" id="position-current">引擎落子后更新</span>
+        <span id="position-title" data-en="NNUE estimate">NNUE 局势估计</span>
+        <span class="position-caption" id="position-current" data-en="Updates after an engine move">引擎落子后更新</span>
       </div>
-      <canvas id="position-chart" width="640" height="140" hidden aria-label="黑方预计得分曲线"></canvas>
+      <canvas id="position-chart" width="640" height="140" hidden aria-label="黑方预计得分曲线" data-aria-en="Estimated score for Black"></canvas>
       <p class="position-caption" id="position-point"></p>
     </section>
     <nav id="actionbar">
-      <button id="btn-undo" class="warn">悔棋</button>
-      <button id="btn-newgame" class="primary">新局</button>
-      <button id="btn-more">更多</button>
+      <button id="btn-undo" class="warn" data-en="Undo">悔棋</button>
+      <button id="btn-newgame" class="primary" data-en="New game">新局</button>
+      <button id="btn-more" data-en="More">更多</button>
     </nav>
   </div>
 
@@ -46,49 +46,49 @@
   <section class="sheet newgame-sheet" id="sheet-newgame" role="dialog" aria-modal="true" aria-hidden="true">
     <div class="sheet-handle" aria-hidden="true"></div>
     <div class="sheet-heading">
-      <h2>开始新对局</h2>
-      <button class="sheet-close" type="button" data-close="newgame" aria-label="关闭">×</button>
+      <h2 data-en="New game">开始新对局</h2>
+      <button class="sheet-close" type="button" data-close="newgame" aria-label="关闭" data-aria-en="Close">×</button>
     </div>
     <div class="game-options">
       <div class="option-row">
-        <label>对战</label>
+        <label data-en="Play">对战</label>
         <div class="segmented compact" id="opt-gamemode">
-          <button data-value="vs_engine" aria-pressed="true">人机</button>
-          <button data-value="two_player" aria-pressed="false">双人</button>
+          <button data-value="vs_engine" aria-pressed="true" data-en="Vs Engine">人机</button>
+          <button data-value="two_player" aria-pressed="false" data-en="Two Players">双人</button>
         </div>
       </div>
       <div class="option-row" data-engine-only>
-        <label>执棋</label>
+        <label data-en="Side">执棋</label>
         <div class="segmented compact" id="opt-side">
-          <button data-value="black" aria-pressed="true">执黑</button>
-          <button data-value="white" aria-pressed="false">执白</button>
+          <button data-value="black" aria-pressed="true" data-en="Play Black">执黑</button>
+          <button data-value="white" aria-pressed="false" data-en="Play White">执白</button>
         </div>
       </div>
       <div class="option-row">
-        <label>规则</label>
+        <label data-en="Rules">规则</label>
         <div class="segmented compact" id="opt-rule">
-          <button data-value="freestyle" aria-pressed="true">无禁手</button>
-          <button data-value="renju" aria-pressed="false">有禁手</button>
+          <button data-value="freestyle" aria-pressed="true" data-en="Freestyle">无禁手</button>
+          <button data-value="renju" aria-pressed="false" data-en="Renju">有禁手</button>
         </div>
       </div>
       <div class="option-row" data-engine-only>
-        <label>模式</label>
+        <label data-en="Mode">模式</label>
         <div class="segmented compact" id="opt-clockmode">
-          <button data-value="untimed" aria-pressed="false">休闲</button>
-          <button data-value="timed" aria-pressed="true">专业 · NNUE</button>
+          <button data-value="untimed" aria-pressed="false" data-en="Casual">休闲</button>
+          <button data-value="timed" aria-pressed="true" data-en="Pro · NNUE">专业 · NNUE</button>
         </div>
       </div>
       <div class="option-row" id="newgame-difficulty-row" data-engine-only hidden>
-        <label>难度</label>
+        <label data-en="Difficulty">难度</label>
         <div class="segmented compact quad" id="opt-difficulty">
-          <button data-value="beginner" aria-pressed="false">入门</button>
-          <button data-value="normal" aria-pressed="true">普通</button>
-          <button data-value="senior" aria-pressed="false">高级</button>
-          <button data-value="master" aria-pressed="false">大师</button>
+          <button data-value="beginner" aria-pressed="false" data-en="Beginner">入门</button>
+          <button data-value="normal" aria-pressed="true" data-en="Normal">普通</button>
+          <button data-value="senior" aria-pressed="false" data-en="Advanced">高级</button>
+          <button data-value="master" aria-pressed="false" data-en="Master">大师</button>
         </div>
       </div>
       <div class="option-row" id="newgame-timelimit-row" data-engine-only>
-        <label>限时</label>
+        <label data-en="Time limit">限时</label>
         <div class="segmented compact quad" id="opt-timelimit">
           <button data-value="500" aria-pressed="false">0.5s</button>
           <button data-value="1000" aria-pressed="true">1s</button>
@@ -98,75 +98,111 @@
       </div>
     </div>
     <div class="sheet-actions">
-      <button class="primary" id="btn-start">开始</button>
+      <button class="primary" id="btn-start" data-en="Start">开始</button>
     </div>
   </section>
 
   <!-- More / advanced sheet -->
   <div class="sheet-backdrop" data-backdrop="more" aria-hidden="true"></div>
   <section class="sheet" id="sheet-more" role="dialog" aria-modal="true" aria-hidden="true">
-    <h2>更多</h2>
+    <h2 data-en="More">更多</h2>
     <div class="toggle-row">
-      <span>显示全部手数</span>
-      <button id="opt-numbers" aria-pressed="false">关</button>
+      <span data-en="Show move numbers">显示全部手数</span>
+      <button id="opt-numbers" aria-pressed="false" data-en="Off">关</button>
     </div>
     <div class="toggle-row">
-      <span>落子音效</span>
-      <button id="opt-sound" aria-pressed="true">开</button>
+      <span data-en="Move sounds">落子音效</span>
+      <button id="opt-sound" aria-pressed="true" data-en="On">开</button>
     </div>
     <div class="toggle-row" id="more-difficulty-row" hidden>
-      <label for="more-difficulty">休闲难度</label>
+      <label for="more-difficulty" data-en="Casual difficulty">休闲难度</label>
       <select id="more-difficulty" class="more-select">
-        <option value="beginner">入门 · d2</option>
-        <option value="normal" selected>普通 · d4</option>
-        <option value="senior">高级 · d6 + VCF</option>
-        <option value="master">大师 · d8 + VCF/VCT</option>
+        <option value="beginner" data-en="Beginner · d2">入门 · d2</option>
+        <option value="normal" selected data-en="Normal · d4">普通 · d4</option>
+        <option value="senior" data-en="Advanced · d6 + VCF">高级 · d6 + VCF</option>
+        <option value="master" data-en="Master · d8 + VCF/VCT">大师 · d8 + VCF/VCT</option>
       </select>
     </div>
     <div class="toggle-row" id="more-timelimit-row">
-      <label for="more-timelimit">专业限时</label>
+      <label for="more-timelimit" data-en="Pro time limit">专业限时</label>
       <select id="more-timelimit" class="more-select">
-        <option value="500">0.5 秒 (500 ms)</option>
-        <option value="1000" selected>1 秒 (1000 ms)</option>
-        <option value="2500">2.5 秒 (2500 ms)</option>
-        <option value="5000">5 秒 (5000 ms)</option>
+        <option value="500" data-en="0.5 s (500 ms)">0.5 秒 (500 ms)</option>
+        <option value="1000" selected data-en="1 s (1000 ms)">1 秒 (1000 ms)</option>
+        <option value="2500" data-en="2.5 s (2500 ms)">2.5 秒 (2500 ms)</option>
+        <option value="5000" data-en="5 s (5000 ms)">5 秒 (5000 ms)</option>
       </select>
     </div>
     <label class="toggle-row" id="row-multithread" for="opt-multithread">
-      <span id="multithread-label">多线程搜索</span>
+      <span id="multithread-label" data-en="Multithreading">多线程搜索</span>
       <input id="opt-multithread" type="checkbox" checked>
     </label>
+    <div class="toggle-row">
+      <label for="ui-language" data-en="Language">语言</label>
+      <select id="ui-language" class="more-select">
+        <option value="system" data-en="System default">跟随系统</option>
+        <option value="zh-CN" lang="zh-CN">简体中文</option>
+        <option value="en" lang="en">English</option>
+      </select>
+    </div>
+
     <details class="advanced">
-      <summary>高级 / 引擎信息</summary>
+      <summary data-en="Engine details">高级 / 引擎信息</summary>
       <div class="kv" id="adv-kv">
-        <span class="k">评估</span><span class="v" data-adv="eval">—</span>
-        <span class="k">分数</span><span class="v" data-adv="score">—</span>
-        <span class="k">深度</span><span class="v" data-adv="depth">—</span>
-        <span class="k">节点</span><span class="v" data-adv="nodes">—</span>
-        <span class="k">思考耗时</span><span class="v" data-adv="ms">—</span>
-        <span class="k">模式</span><span class="v" data-adv="clock">—</span>
-        <span class="k">难度</span><span class="v" data-adv="difficulty">—</span>
-        <span class="k">线程</span><span class="v" data-adv="threads">—</span>
+        <span class="k" data-en="Evaluator">评估</span><span class="v" data-adv="eval">—</span>
+        <span class="k" data-en="Score">分数</span><span class="v" data-adv="score">—</span>
+        <span class="k" data-en="Depth">深度</span><span class="v" data-adv="depth">—</span>
+        <span class="k" data-en="Nodes">节点</span><span class="v" data-adv="nodes">—</span>
+        <span class="k" data-en="Search time">思考耗时</span><span class="v" data-adv="ms">—</span>
+        <span class="k" data-en="Mode">模式</span><span class="v" data-adv="clock">—</span>
+        <span class="k" data-en="Difficulty">难度</span><span class="v" data-adv="difficulty">—</span>
+        <span class="k" data-en="Threads">线程</span><span class="v" data-adv="threads">—</span>
       </div>
     </details>
     <div class="sheet-actions">
-      <button data-close="more">关闭</button>
+      <button id="btn-about" data-en="About">关于</button>
+      <button data-close="more" data-en="Close">关闭</button>
+    </div>
+  </section>
+
+  <div class="sheet-backdrop" data-backdrop="about" aria-hidden="true"></div>
+  <section class="sheet" id="sheet-about" role="dialog" aria-modal="true" aria-labelledby="about-title" aria-hidden="true">
+    <h2 id="about-title" data-en="About rust_gomoku">关于 rust_gomoku</h2>
+    <p id="about-version" hidden></p>
+    <p><a id="about-source" href="https://github.com/chubbyk-uu/rust-gomoku" data-en="Source code for this version">本版本源代码</a></p>
+    <details class="about-details">
+      <summary data-en="Privacy policy">隐私政策</summary>
+      <p data-en="rust_gomoku is an offline game by chubbyk-uu. It does not collect, transmit, or share personal data or gameplay data. It has no accounts, advertising, or analytics.">rust_gomoku 是 chubbyk-uu 开发的离线游戏。应用不收集、传输或共享个人数据及对局数据，无账号、广告或统计分析功能。</p>
+      <p data-en="The language preference is stored on your device. Clear the app’s storage in Android settings to delete it. Project links open in your browser.">语言偏好保存在本机，可在 Android 设置中清除应用存储来删除。项目链接会在浏览器中打开。</p>
+      <p><a href="https://github.com/chubbyk-uu/rust-gomoku/blob/master/docs/privacy-policy.md" data-en="View the public privacy policy">查看公开隐私政策</a></p>
+      <p><a href="https://github.com/chubbyk-uu/rust-gomoku/issues/new" data-en="Contact the developer (public issue tracker)">联系开发者（公开问题区）</a></p>
+    </details>
+    <details class="about-details" data-license="GPL-3.0.txt">
+      <summary data-en="App license (GPL-3.0-or-later)">应用许可（GPL-3.0-or-later）</summary>
+      <pre></pre>
+    </details>
+    <details class="about-details" data-license="THIRD-PARTY.txt">
+      <summary data-en="Third-party credits and licenses">第三方署名与许可</summary>
+      <pre></pre>
+    </details>
+    <div class="sheet-actions">
+      <button data-close="about" data-en="Close">关闭</button>
     </div>
   </section>
 
   <div id="result-backdrop" aria-hidden="true"></div>
   <section id="result-dialog" role="dialog" aria-modal="true" aria-labelledby="result-title" aria-hidden="true">
     <div id="result-mark" aria-hidden="true"></div>
-    <h2 id="result-title">对局结束</h2>
+    <h2 id="result-title" data-en="Game over">对局结束</h2>
     <p id="result-message"></p>
     <div class="result-actions">
-      <button id="btn-result-close">查看棋盘</button>
-      <button class="primary" id="btn-result-newgame">再来一局</button>
+      <button id="btn-result-close" data-en="View board">查看棋盘</button>
+      <button class="primary" id="btn-result-newgame" data-en="Play again">再来一局</button>
     </div>
   </section>
 
   <div id="toast" role="status"></div>
 
+  <script src="ui_language.js"></script>
   <script src="ui_logic.js"></script>
   <script src="app.js"></script>
 </body>

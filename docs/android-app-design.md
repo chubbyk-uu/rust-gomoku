@@ -24,6 +24,12 @@ cd android
 
 Outputs are `android/app/build/outputs/apk/release/app-release.apk` and `android/app/build/outputs/bundle/release/app-release.aab`, relative to the repository root. Download distributed builds from [GitHub Releases](https://github.com/chubbyk-uu/rust-gomoku/releases/latest). See [`android/app/build.gradle.kts`](../android/app/build.gradle.kts) for packaging and version fields.
 
+### Privacy and open-source notices
+
+**More → About** displays the privacy policy and bundled licenses offline. The source link points to the release tag for the installed version. Source, policy, and contact links open in the device's browser.
+
+The public [Android privacy policy](privacy-policy.md) is available in English and Simplified Chinese. For a store build, offer the exact release source and include the corresponding licenses. Gradle packages the repository's [GPL license](../LICENSE) and the [third-party notices](../android/app/src/main/legal/THIRD-PARTY.txt).
+
 ## Architecture and validation
 
 - [`src/app.rs`](../src/app.rs) owns game state, options, engine requests, and stale-result protection.

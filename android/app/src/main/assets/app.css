@@ -120,6 +120,7 @@ body { user-select: none; -webkit-user-select: none; }
 }
 #status-msg.error { color: var(--danger); }
 #statusbar.thinking #status-msg { color: var(--accent); }
+html[lang="en"] #status-msg { white-space: normal; }
 
 #board-area {
   width: 100%;
@@ -174,6 +175,8 @@ canvas#board {
   white-space: nowrap;
   text-align: right;
 }
+html[lang="en"] .position-head { flex-wrap: wrap; gap: 2px 8px; }
+html[lang="en"] #position-current { white-space: normal; text-align: left; }
 #position-chart {
   display: block;
   width: 100%;
@@ -193,6 +196,7 @@ canvas#board {
   margin-top: auto;
 }
 #actionbar button { flex: 1; font-weight: 600; }
+html[lang="en"] #actionbar button { padding-inline: 6px; }
 /* distinct colour per action */
 #btn-undo {
   background: rgba(179, 51, 31, 0.08);
@@ -386,6 +390,24 @@ details.advanced > summary {
   min-height: 44px;
   display: flex;
   align-items: center;
+}
+.about-details {
+  border-top: 1px solid var(--hairline);
+  padding: 10px 0;
+  font-size: 15px;
+  line-height: 1.45;
+}
+.about-details summary {
+  padding-block: 8px;
+  cursor: pointer;
+  font-weight: 600;
+}
+#sheet-about a { color: var(--accent); }
+.about-details pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  user-select: text;
 }
 .kv {
   display: grid;

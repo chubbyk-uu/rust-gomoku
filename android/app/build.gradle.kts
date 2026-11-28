@@ -32,8 +32,8 @@ android {
         applicationId = "io.github.chubbykuu.rustgomoku"
         minSdk = 26
         targetSdk = 36
-        versionCode = 21
-        versionName = "0.1.21"
+        versionCode = 22
+        versionName = "0.1.22"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -65,6 +65,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     androidResources {
         // Mix9svq weights are already LZ4-compressed; store uncompressed in APK
         // for faster asset extraction and AssetFileDescriptor length checks.
@@ -75,6 +79,7 @@ android {
         named("main") {
             jniLibs.directories.add("build/generated/rustJniLibs")
             assets.directories.add("build/generated/nnueAssets")
+            assets.directories.add("build/generated/legalAssets")
         }
     }
 }
@@ -117,6 +122,14 @@ val stageNnueAssets by tasks.registering(Sync::class) {
     }
 }
 
+val stageLegalAssets by tasks.registering(Sync::class) {
+    from(rootProject.projectDir.parentFile.resolve("LICENSE")) {
+        rename { "GPL-3.0.txt" }
+    }
+    from("src/main/legal")
+    into(layout.buildDirectory.dir("generated/legalAssets/legal"))
+}
+
 val buildRustArm64 by tasks.registering(Exec::class) {
     val repositoryRoot = rootProject.projectDir.parentFile
     val outputDirectory = layout.buildDirectory.dir("generated/rustJniLibs")
@@ -148,7 +161,7 @@ val buildRustArm64 by tasks.registering(Exec::class) {
 }
 
 tasks.named("preBuild").configure {
-    dependsOn(buildRustArm64, stageNnueAssets)
+    dependsOn(buildRustArm64, stageNnueAssets, stageLegalAssets)
 }
 
 val verifyReleaseSigning by tasks.registering {
@@ -173,13 +186,14 @@ tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }.co
 val testMobileUi by tasks.registering(Exec::class) {
     val repositoryRoot = rootProject.projectDir.parentFile
     val uiLogic = repositoryRoot.resolve("android/app/src/main/assets/ui_logic.js")
+    val uiLanguage = repositoryRoot.resolve("android/app/src/main/assets/ui_language.js")
     val appScript = repositoryRoot.resolve("android/app/src/main/assets/app.js")
     val appStyles = repositoryRoot.resolve("android/app/src/main/assets/app.css")
     val appPage = repositoryRoot.resolve("android/app/src/main/assets/index.html")
     val uiTests = repositoryRoot.resolve("android/app/src/test/js/ui_logic.test.cjs")
 
     workingDir(repositoryRoot)
-    inputs.files(uiLogic, appScript, appStyles, appPage, uiTests)
+    inputs.files(uiLogic, uiLanguage, appScript, appStyles, appPage, uiTests)
     commandLine("node", uiTests.absolutePath)
 }
 
