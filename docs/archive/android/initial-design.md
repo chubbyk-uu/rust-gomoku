@@ -1,0 +1,394 @@
+# Android architecture and initial design
+
+> Snapshot from the former [android-app-design.md](../../android-app-design.md). Commands, paths, baselines and acceptance criteria describe the captured version.
+
+# Android App Design
+
+## Status
+
+This document defines the implementation plan and records progress for the
+Android version of `rust_gomoku`.
+
+Development should start on a dedicated `feature/android-app` branch while
+remaining in this repository. The engine, forbidden-move rules, evaluation,
+VCF/VCT, and search must continue to have one Rust implementation shared by
+desktop, Gomocup, and Android.
+
+The local WSL build environment has been verified with:
+
+- JDK 17
+- Android Platform 36
+- Android Build Tools 36.0.0
+- Android Platform Tools 37.0.0
+- Android NDK 29.0.14206865
+- Rust target `aarch64-linux-android`
+- `cargo-ndk` 4.1.2
+
+The existing Rust library and the Android bridge crate have completed optimized
+ARM64 Android cross-builds.
+
+Implementation progress on `feature/android-app`:
+
+- Phase 1 baseline is complete.
+- Phase 2 shared controller extraction is complete.
+- Phase 3 Android project skeleton is complete.
+- Phase 4 Rust JNI bridge is complete.
+- Phase 5 Kotlin bridge and search thread are complete.
+- Phase 6 mobile UI is complete and device-confirmed by the Phase 8 pass.
+- Phase 7 automated validation is complete.
+- Phase 8 real-device validation is complete.
+- Phase 9 GitHub distribution was completed with `v0.1.3`.
+- The desktop HTTP GUI now uses `GameController`.
+- Controller tests cover forbidden input, first-move search, undo, difficulty
+  changes, invalid sides, and stale search completion.
+- Full Rust tests, Linux release builds, ARM64 Android cross-build, all 11 root
+  diff cases, and a desktop HTTP workflow smoke passed after the refactor.
+- Gradle 9.4.1, Android Gradle Plugin 9.2.0, Kotlin Activity,
+  `WebViewAssetLoader`, local assets, and the ARM64 Rust packaging task are in
+  place.
+- `test`, `lint`, and `assembleDebug` pass. The debug APK (4.6 MiB after the
+  `androidx.activity`/`lifecycle-viewmodel` dependencies are added) contains only
+  `arm64-v8a`, packages the 714 KiB stripped `librust_gomoku_android.so` exporting
+  all three `nativeCreate`/`nativeRequest`/`nativeDestroy` symbols, has no
+  `INTERNET` permission, and has a valid debug signature.
+- The bridge implements native create/request/destroy handles, strict JSON
+  command validation, lock-free search execution, stale-result protection
+  through `GameController`, and structured errors.
+- Phase 5 wiring is in place: `NativeBridge` declares the JNI contract,
+  `GameViewModel` owns the native handle across configuration changes and
+  serializes every request onto a single background thread (so engine search
+  never runs on the UI thread), and `MainActivity` exposes a narrow
+  `@JavascriptInterface` command bridge whose responses are marshalled back to
+  the WebView on the main thread. The packaged page now drives `state`,
+  `new_game`, `play`, `undo`, `set_difficulty`, and `engine_move` end to end, renders stones, the
+  last-move marker, and Renju forbidden crosses, and re-syncs through `state`
+  after rotation recreates the page. The UI-thread, rotation, and stale-result
+  behaviors are device-confirmed in Phase 8; stale protection is already covered
+  by the `GameController` generation tests.
+- Phase 6 mobile UI is in place as WebView assets (`index.html`, `app.css`,
+  `app.js`): a status row, a JS-sized square board (kept square at
+  `min(width, height)` and redrawn at `devicePixelRatio` for crisp lines), and a
+  bottom action bar, with a new-game sheet (match mode vs-engine/two-player,
+  side, rule, difficulty; the side/difficulty rows
+  hide in two-player mode) and a "more" sheet
+  holding the optional all-move-numbers switch and a collapsed advanced panel
+  (score, depth, nodes, thinking time from the snapshot's `last_result`). The
+  layout switches to board-left / panel-right in landscape. Stone placement uses
+  tap-to-preview then tap-the-same-point-to-confirm to cut mis-taps; taps snap to
+  the nearest intersection and are rejected beyond ~0.6 cell; forbidden points
+  are rejected with a toast and a light vibration (new `VIBRATE` permission).
+- The app bundles the Rapfi CC0 `Mix9svq` NNUE weights (`assets/nnue/*.bin.lz4`,
+  stored uncompressed via `noCompress += "lz4"` and extracted once on the
+  background executor to `filesDir/nnue/` before calling
+  `nativeCreateWithNnueDir`). It defaults to **Pro mode** (NNUE timed search:
+  `500 ms` / `1000 ms` / `2500 ms` / `5000 ms`, default `1000 ms`, unified
+  `tt_bits = 20` / 32 MiB TT) and also provides **Casual mode** with four
+  classical fixed-depth levels: Beginner (`d2/w10`, VCF/VCT off), Normal
+  (`d4/w20`, VCF/VCT off, default casual), Senior (`d6/w30`, VCF on, VCT off),
+  and Master (`d8/w40`, VCF/VCT on, `root_vct_depth=6`).
+- Responsive verification at the target viewports and the touch/rotation/stale
+  behaviors are confirmed on a real device.
+- Mobile UI state logic is isolated in `ui_logic.js` and covered by Node tests
+  invoked through Gradle's `testMobileUi` task. The tests lock busy-state
+  control disabling, the immediate engine-thinking snapshot, and synchronized
+  sheet visibility/`aria-hidden` state.
+- Manual phone testing has confirmed portrait/landscape rotation, the visible
+  thinking state, disabled new-game controls during search, Renju forbidden
+  crosses, forbidden-tap rejection, the result dialog, and difficulty
+  selection. The compact portrait and landscape layouts have both passed a
+  device visual check.
+
+## Goals
+
+1. Produce an installable ARM64 Android APK without duplicating engine logic.
+2. Preserve freestyle and Renju legality, search behavior, and strength.
+3. Provide a phone-first interface that keeps the board and common actions
+   visible without exposing desktop diagnostics by default.
+4. Keep the desktop browser GUI working through the same Rust game controller.
+5. Make lifecycle, search threading, and stale-result handling explicit and
+   testable.
+
+## Non-Goals For The First APK
+
+- Google Play publication or an Android App Bundle.
+- x86/x86_64 emulator builds.
+- Cloud services, accounts, telemetry, or network play.
+- Renju opening protocols such as RIF, Yamaguchi, Soosorv, or Swap2.
+- Persistent game recovery after Android kills the application process.
+- Automatic USB/ADB installation from WSL.
+- Changing default search strength before real-device measurements justify it.
+
+## Repository Layout
+
+The planned layout is:
+
+```text
+src/app/                         shared Rust game controller
+src/bin/gomoku_gui.rs            desktop HTTP and browser adapter
+android/
+├── app/
+│   └── src/main/
+│       ├── kotlin/...           Activity, ViewModel, WebView bridge
+│       ├── assets/              mobile HTML, CSS, and JavaScript
+│       └── res/                 manifest resources, theme, and icons
+├── rust_bridge/                 JNI `cdylib` crate
+├── gradle/wrapper/
+├── build.gradle.kts
+└── settings.gradle.kts
+```
+
+Generated `.so`, APK, AAB, Gradle caches, signing keys, and local SDK paths
+must not be committed.
+
+## Architecture
+
+### Shared Rust Controller
+
+The current desktop GUI combines game state, search orchestration, HTTP
+routing, and embedded HTML in `src/bin/gomoku_gui.rs`. Android must not copy
+that behavior into Kotlin.
+
+The first implementation step is to extract a reusable Rust controller that
+owns:
+
+- `EngineConfig`
+- `Board`
+- human side and rule
+- status and user-facing errors
+- last move, search result, and optional diagnostics
+- new game, play, undo, and difficulty operations
+- forbidden-point calculation
+- serializable state snapshots
+- search snapshot creation and search-result commit
+- a monotonically increasing game/request generation
+
+The generation value is required so a search started before restart, undo, or
+Activity recreation cannot apply a stale result to a newer position.
+
+The desktop GUI should become an HTTP adapter over this controller. Android
+should become a JNI adapter over the same controller.
+
+### Android Data Flow
+
+```text
+WebView UI
+    |
+    | local JSON command
+    v
+Kotlin bridge / ViewModel
+    |
+    | background executor
+    v
+JNI request interface
+    |
+    v
+Rust game controller and search
+```
+
+Android must not start the desktop localhost HTTP server. Local WebView assets
+are loaded from the APK, and native operations go through the bridge.
+
+### JNI Contract
+
+Keep the exported native surface small:
+
+```text
+nativeCreate() -> handle
+nativeRequest(handle, requestJson) -> responseJson
+nativeDestroy(handle)
+```
+
+Initial request operations:
+
+```text
+state
+new_game
+play
+undo
+set_difficulty
+engine_move
+```
+
+Request examples:
+
+```json
+{"op":"state"}
+{"op":"new_game","human_side":"black","rule":"renju"}
+{"op":"new_game","human_side":"black","rule":"renju","mode":"two_player"}
+{"op":"play","x":7,"y":7}
+{"op":"undo"}
+{"op":"set_difficulty","difficulty":"master"}
+{"op":"engine_move"}
+```
+
+`new_game` accepts an optional `mode` of `vs_engine` (default) or `two_player`.
+In two-player mode both sides are placed by humans, `engine_move` is rejected,
+`undo` reverts a single ply, and the returned state carries `params.mode`;
+Renju forbidden points are still computed and enforced against the side to move.
+
+Successful requests return `{"ok":true,"state":...}`. Bridge-level validation,
+handle, and internal failures return
+`{"ok":false,"error":{"code":"...","message":"..."}}`. Legal game rejections,
+such as tapping a forbidden point, remain part of the returned controller
+state so the UI can display the existing user-facing message.
+
+Rules:
+
+- Each handle owns an `Arc<Mutex<GameController>>`.
+- Search must run without holding the controller mutex for its full duration.
+- JNI functions catch Rust panics and return structured errors.
+- Invalid handles, JSON, coordinates, sides, difficulty values, and rules return errors
+  instead of aborting the process.
+- `nativeDestroy` invalidates the handle while allowing any already-running
+  worker to finish without accessing freed state.
+- JNI method names and JSON schemas receive focused Rust tests.
+
+### Kotlin Lifecycle
+
+Planned components:
+
+- `MainActivity`: hosts and configures the WebView.
+- `GameViewModel`: owns the native handle across configuration changes.
+- `AndroidBridge`: validates local JavaScript commands.
+- Single-thread executor: serializes controller operations and runs search away
+  from the UI thread.
+
+Required behavior:
+
+- Never run engine search on the Android main thread.
+- Disable play, undo, rule, side, and difficulty changes while search is active.
+- Preserve the game and an active search across normal screen rotation.
+- Ignore stale search results after new game, undo, or controller destruction.
+- Release the native handle when the owning ViewModel is permanently cleared.
+
+## WebView Security
+
+- Load packaged content with `WebViewAssetLoader` through
+  `https://appassets.androidplatform.net/`.
+- Do not use `file://android_asset`, universal file access, or a localhost
+  server.
+- Set `android:usesCleartextTraffic="false"`.
+- Do not request the `INTERNET` permission for the first APK.
+- Allow navigation only within the application asset origin.
+- Open any future external links in the system browser.
+- Expose only the narrow game-command bridge to JavaScript.
+- Enable JavaScript only because the packaged game UI requires it.
+
+Android recommends `WebViewAssetLoader` for packaged content and recommends
+against enabling `file://` access:
+
+- <https://developer.android.com/develop/ui/views/layout/webapps/load-local-content>
+- <https://developer.android.com/privacy-and-security/risks/insecure-webview-native-bridges>
+
+## Mobile Interface
+
+### Primary Phone Layout
+
+Portrait:
+
+```text
+compact status row
+square board using the available width
+primary action bar
+optional bottom sheet for new game and settings
+```
+
+Landscape and tablet:
+
+```text
+board on the left
+status and controls on the right
+```
+
+The board remains the dominant surface. It must have stable square dimensions
+and must not resize when status text or engine state changes.
+
+### Always Visible
+
+- Board.
+- Last-move marker.
+- Forbidden-point red crosses during a Renju black turn.
+- Current turn, winner, and thinking state.
+- Undo.
+- New game/settings entry.
+
+### New Game Sheet
+
+- Play black or white.
+- Freestyle or Renju.
+- Mode: Casual (classical Beginner / Normal / Senior / Master) or Pro (NNUE `500 ms` / `1000 ms` / `2500 ms` / `5000 ms`, default `1000 ms`).
+- Start game.
+
+Rule changes apply only to the new game, matching the desktop behavior.
+
+### Hidden By Default
+
+The following desktop diagnostics move into an advanced/diagnostic sheet:
+
+- search depth and width
+- nodes and score
+- VCF/VCT configuration and trace
+- TT information
+- alpha-beta and VCT timing
+- static/dynamic board settings
+
+Move numbers should default to only marking the latest move on small phones.
+Displaying every move number can remain an optional visual setting.
+
+### Touch And Accessibility
+
+- Snap taps to the nearest board intersection.
+- Keep enough edge padding to make outer intersections reachable.
+- Increase the effective hit target without changing stone size.
+- Reject forbidden taps without placing a stone and show a short message.
+- Disable board interaction while the engine is thinking.
+- Use light haptic feedback for accepted and rejected taps when available.
+- Use at least 48 dp touch targets for controls.
+- Provide content descriptions and maintain readable contrast.
+
+### Target Viewports
+
+The responsive layout must be checked at least at:
+
+```text
+360x800
+393x873
+412x915
+800x360
+1280x800
+```
+
+Checks include system insets, portrait/landscape transitions, button fit,
+board framing, forbidden marks, move labels, and status text overflow.
+
+## Build Configuration
+
+Initial baseline:
+
+| Setting | Value |
+|---|---|
+| Android Gradle Plugin | 9.2.x |
+| Gradle | 9.4.1 |
+| JDK | 17 |
+| compileSdk / targetSdk | 36 |
+| minSdk | 26 |
+| Build Tools | 36.0.0 |
+| NDK | 29.0.14206865 |
+| ABI | arm64-v8a |
+
+The current Android Gradle Plugin 9.2 compatibility table requires JDK 17,
+Gradle 9.4.1, and Build Tools 36.0.0:
+
+<https://developer.android.com/build/releases/gradle-plugin>
+
+The Gradle build should invoke an explicit Rust task equivalent to:
+
+```bash
+cargo ndk \
+  -t arm64-v8a \
+  -o <generated-jni-libs-directory> \
+  build --release --locked
+```
+
+Debug APKs must still embed an optimized Rust library. A debug Rust search is
+too slow to provide meaningful phone behavior or performance evidence.
