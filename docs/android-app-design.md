@@ -11,7 +11,7 @@ cd android
 ./gradlew test lint assembleDebug
 ```
 
-Gradle stages the [Mix9svq files](engine.md#nnue-weights) from `RUST_GOMOKU_NNUE_DIR` or `opponent/rapfi-networks/mix9svq`. `GameViewModel` extracts the packaged assets into the app's files directory. A build without those assets can use classical evaluation.
+Gradle stages the [Mix9svq files](engine.md#nnue-weights) from `RUST_GOMOKU_NNUE_DIR` or `opponent/rapfi-networks/mix9svq`. It also looks for the optional `model210901.bin` in the weight directory and its sibling `classical` directory. `GameViewModel` extracts the packaged assets into the app's files directory. A build without NNUE weights can use classical evaluation.
 
 ### Signed builds
 

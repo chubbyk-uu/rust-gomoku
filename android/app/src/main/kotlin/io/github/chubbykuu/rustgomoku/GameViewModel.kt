@@ -54,7 +54,7 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
             val app = getApplication<Application>()
             val assets = app.assets
             val assetEntries = assets.list(NNUE_ASSET_DIR)
-                ?.filter { it.endsWith(".bin.lz4") }
+                ?.filter { it.endsWith(".bin.lz4") || it == "model210901.bin" }
                 .orEmpty()
             if (assetEntries.isEmpty()) {
                 return null

@@ -32,8 +32,8 @@ android {
         applicationId = "io.github.chubbykuu.rustgomoku"
         minSdk = 26
         targetSdk = 36
-        versionCode = 20
-        versionName = "0.1.20"
+        versionCode = 21
+        versionName = "0.1.21"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -68,7 +68,7 @@ android {
     androidResources {
         // Mix9svq weights are already LZ4-compressed; store uncompressed in APK
         // for faster asset extraction and AssetFileDescriptor length checks.
-        noCompress += "lz4"
+        noCompress += listOf("lz4", "bin")
     }
 
     sourceSets {
@@ -87,12 +87,17 @@ val stageNnueAssets by tasks.registering(Sync::class) {
     )
     val outputDirectory = layout.buildDirectory.dir("generated/nnueAssets/nnue")
 
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     from(nnueSourceDir) {
         include(
             "mix9svqfreestyle_bsmix.bin.lz4",
             "mix9svqrenju_bs15_black.bin.lz4",
             "mix9svqrenju_bs15_white.bin.lz4",
+            "model210901.bin",
         )
+    }
+    from(nnueSourceDir.resolveSibling("classical")) {
+        include("model210901.bin")
     }
     into(outputDirectory)
     doLast {
