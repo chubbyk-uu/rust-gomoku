@@ -1229,9 +1229,23 @@ impl FastBoard {
     pub fn from_legacy_board(board: &crate::board::Board, rule: RuleSet, range: CandRange) -> Self {
         let mut fb = Self::new(rule, range);
         for rec in board.move_history() {
+            fb.set_replay_side(rec.side);
             fb.play(rec.move_ as usize);
         }
+        fb.set_replay_side(board.side_to_move());
         fb
+    }
+
+    fn set_replay_side(&mut self, side: crate::types::Side) {
+        let side = if side == crate::constants::BLACK {
+            FE_BLACK
+        } else {
+            FE_WHITE
+        };
+        if self.current_side != side {
+            self.current_side = side;
+            self.zobrist_key ^= ZOBRIST.side_to_move;
+        }
     }
 
     #[cfg(test)]

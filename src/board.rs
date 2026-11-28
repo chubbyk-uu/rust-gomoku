@@ -206,6 +206,17 @@ impl Board {
         Ok(played)
     }
 
+    /// End an interactive Renju game when Black is on turn and has no legal move.
+    pub(crate) fn adjudicate_no_legal_renju_move(&mut self, rule: RuleSet) {
+        if rule == RuleSet::Renju
+            && self.side_to_move == BLACK
+            && !self.is_terminal()
+            && !(0..BOARD_AREA as Move).any(|move_| self.is_legal_move_for_rule(move_, BLACK, rule))
+        {
+            self.winner = WHITE;
+        }
+    }
+
     fn play_with_rule(
         &mut self,
         move_: Move,

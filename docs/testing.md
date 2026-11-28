@@ -44,6 +44,8 @@ The 120- and 900-second values are harness watchdogs. The engine receives a 1-se
 
 Report W–L–D, score counting a draw as half a point, paired confidence interval, Elo estimate, color split, errors and timeouts, and both engines' mean/median/P95/max move times. For comparisons between runs, use the same opening pairs and estimate the interval of the paired score change. When repeating the same openings across runs or thread counts, group the observations by opening for combined uncertainty. Rule forfeits, protocol failures, and watchdog timeouts should be reported separately.
 
+The whole-game watchdog also applies while waiting for the Renju referee. A failed referee response records an incomplete game with `termination: "referee_error"`, with no win credited to either side.
+
 For a single-thread timed repeat, record completed depth and nodes where possible. Equal clock settings allow different amounts of work to finish before the deadline. The [November 28 repeat](perf-log.md#renju-1t-repeat) gives an example with unchanged binaries.
 
 ## Same-position benchmarks

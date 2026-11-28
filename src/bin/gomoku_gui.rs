@@ -1,5 +1,6 @@
 //! Local browser GUI for playing against the engine.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -18,8 +19,8 @@ use rust_gomoku::{
 };
 
 const DEFAULT_ADDR: &str = "127.0.0.1:18080";
-const BROWSER_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
-const BROWSER_HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+const BROWSER_EXIT_GRACE: Duration = Duration::from_secs(30);
+const BROWSER_EXIT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 fn main() {
     if cfg!(debug_assertions) {
@@ -89,29 +90,35 @@ fn main() {
     }
 }
 
+#[derive(Default)]
 struct BrowserActivity {
-    seen: bool,
-    last_seen: Instant,
+    tabs: HashSet<String>,
+    exit_after: Option<Instant>,
 }
 
-impl Default for BrowserActivity {
-    fn default() -> Self {
-        Self {
-            seen: false,
-            last_seen: Instant::now(),
+impl BrowserActivity {
+    fn open(&mut self, tab: &str) {
+        self.tabs.insert(tab.to_owned());
+        self.exit_after = None;
+    }
+
+    fn close(&mut self, tab: &str, now: Instant) {
+        if self.tabs.remove(tab) && self.tabs.is_empty() {
+            self.exit_after = Some(now + BROWSER_EXIT_GRACE);
         }
+    }
+
+    fn should_exit(&self, now: Instant) -> bool {
+        self.exit_after.is_some_and(|deadline| now >= deadline)
     }
 }
 
 fn start_browser_watchdog(browser_activity: Arc<Mutex<BrowserActivity>>) {
     thread::spawn(move || loop {
-        thread::sleep(BROWSER_HEARTBEAT_CHECK_INTERVAL);
-        let should_exit = {
-            let activity = browser_activity.lock().expect("browser activity lock");
-            activity.seen && activity.last_seen.elapsed() >= BROWSER_HEARTBEAT_TIMEOUT
-        };
-        if should_exit {
-            eprintln!("browser heartbeat timed out; exiting GUI server");
+        thread::sleep(BROWSER_EXIT_CHECK_INTERVAL);
+        let activity = browser_activity.lock().expect("browser activity lock");
+        if activity.should_exit(Instant::now()) {
+            eprintln!("all browser pages closed; exiting GUI server");
             std::process::exit(0);
         }
     });
@@ -350,11 +357,14 @@ fn handle_client(
     let response = match (method, path) {
         ("GET", "/") => html_response(INDEX_HTML),
         ("GET", "/state") => json_response(&state.lock().expect("state lock").snapshot()),
-        ("POST", "/heartbeat") => {
-            {
+        ("POST", "/browser/open") | ("POST", "/browser/close") => {
+            if let Some(tab) = query_param(query, "tab").filter(|tab| !tab.is_empty()) {
                 let mut activity = browser_activity.lock().expect("browser activity lock");
-                activity.seen = true;
-                activity.last_seen = Instant::now();
+                if path == "/browser/open" {
+                    activity.open(tab);
+                } else {
+                    activity.close(tab, Instant::now());
+                }
             }
             text_response(200, "ok")
         }
@@ -532,6 +542,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn browser_activity_exits_only_after_the_last_page_closes() {
+        let mut browser = BrowserActivity::default();
+        let now = Instant::now();
+        let late = now + BROWSER_EXIT_GRACE;
+        browser.open("frozen");
+        browser.open("visible");
+        browser.close("visible", now);
+        assert!(!browser.should_exit(late));
+        browser.close("frozen", now);
+        assert!(!browser.should_exit(now));
+        assert!(browser.should_exit(late));
+        browser.open("reloaded");
+        assert!(!browser.should_exit(late));
+    }
+
+    #[test]
     fn browser_url_rewrites_unspecified_bind_addresses() {
         assert_eq!(browser_url("0.0.0.0:18080"), "http://127.0.0.1:18080");
         assert_eq!(browser_url("[::]:18080"), "http://[::1]:18080");
@@ -589,8 +615,9 @@ mod tests {
             "start-two-player",
             "开始双人对局",
             "selectMode('two_player')",
-            "sendHeartbeat",
-            "/heartbeat",
+            "registerBrowserTab",
+            "/browser/open",
+            "/browser/close",
             "NNUE 局势估计",
             "NNUE (Mix9svq · FastEngine)",
         ] {
@@ -1069,9 +1096,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
       draw();
       renderInfo();
     }
-    function sendHeartbeat() {
-      fetch('/heartbeat', { method: 'POST', keepalive: true }).catch(() => {});
+    const browserTab = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    function registerBrowserTab() {
+      fetch('/browser/open?tab=' + browserTab, { method: 'POST', keepalive: true }).catch(() => {});
     }
+    window.addEventListener('pagehide', event => {
+      if (!event.persisted) navigator.sendBeacon('/browser/close?tab=' + browserTab);
+    });
+    window.addEventListener('pageshow', event => {
+      if (event.persisted) registerBrowserTab();
+    });
     function refresh() { api('/state').catch(showError); }
     function newGame(side) { api('/new?side=' + side + '&rule=' + selectedRule + '&mode=' + selectedMode + '&clock=' + selectedClock).catch(showError); }
     function startTwoPlayer() { newGame('black'); }
@@ -1522,8 +1556,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       renderResult();
     }
     renderModeButtons();
-    sendHeartbeat();
-    setInterval(sendHeartbeat, 5000);
+    registerBrowserTab();
     setInterval(refresh, 500);
     refresh();
   </script>

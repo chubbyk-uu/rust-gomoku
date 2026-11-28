@@ -10,6 +10,38 @@ fn coordinate_conversion_round_trip() {
 }
 
 #[test]
+fn white_first_replay_preserves_colors_and_turn_in_fastboard_conversion() {
+    use rust_gomoku::fast_engine::{pattern::FE_WHITE, CandRange, FastBoard};
+    use rust_gomoku::RuleSet;
+
+    let center = xy_to_move(7, 7).unwrap();
+    let neighbor = xy_to_move(8, 7).unwrap();
+    let mut white_first = Board::new();
+    white_first.replay(&[center, neighbor], WHITE).unwrap();
+    let mut black_first = Board::new();
+    black_first.replay(&[neighbor, center], BLACK).unwrap();
+
+    assert_eq!(white_first.at(7, 7), black_first.at(7, 7));
+    assert_eq!(white_first.at(8, 7), black_first.at(8, 7));
+    assert_ne!(white_first.side_to_move(), black_first.side_to_move());
+
+    let mut fast =
+        FastBoard::from_legacy_board(&white_first, RuleSet::Freestyle, CandRange::Square3Line4);
+    let fast_black =
+        FastBoard::from_legacy_board(&black_first, RuleSet::Freestyle, CandRange::Square3Line4);
+    assert!(fast.is_white(center as usize));
+    assert!(fast.is_black(neighbor as usize));
+    assert_eq!(fast.side_to_move(), FE_WHITE);
+    assert_ne!(fast.zobrist_key(), fast_black.zobrist_key());
+    fast.undo();
+    fast.undo();
+    assert_eq!(fast.move_count(), 0);
+    assert_eq!(fast.side_to_move(), FE_WHITE);
+    assert!(fast.is_empty(center as usize));
+    assert!(fast.is_empty(neighbor as usize));
+}
+
+#[test]
 fn row_col_helpers_match_xy_helpers() {
     let move_ = xy_to_move(7, 11).unwrap();
     assert_eq!(rc_to_move(11, 7).unwrap(), move_);

@@ -12,7 +12,7 @@ The engine supports alternating play with black forbidden moves. Renju opening p
 
 - The general-purpose checker is [`src/rules/forbidden.rs`](../src/rules/forbidden.rs). The native search uses [incremental board patterns](../src/fast_engine/board.rs) and rule-aware move checks. Tactical search must account for a defending move's legality as well as the attack.
 - The desktop and Android interfaces mark forbidden black moves and reject them as player input.
-- Gomocup accepts rule `4`. In the native NNUE path, when black has no legal point and must submit a forbidden move, it outputs the point for referee adjudication and records a white win internally. The match harness uses the [Renju referee](../src/bin/renju_referee.rs).
+- Gomocup accepts rule `4`. When black has no legal point, the engine outputs a forbidden point for referee adjudication and records a white win internally. The desktop and Android controller ends the game as a white win after the last legal move. The match harness uses the [Renju referee](../src/bin/renju_referee.rs).
 - Replaying and undoing a terminal move must keep the board, move count, side to move, and hash consistent.
 
 ## Rule regression

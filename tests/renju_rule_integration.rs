@@ -2,8 +2,53 @@ use std::collections::HashSet;
 
 use rust_gomoku::{
     generate_candidates, load_default_config, recompute_all_for_rule, xy_to_move, Board,
-    EvalCaches, RuleSet, BLACK, WHITE,
+    EvalCaches, GameController, GameMode, GomocupProtocol, RuleSet, SearchClockMode, SearchLimits,
+    BLACK, WHITE,
 };
+
+#[test]
+fn forced_black_forbidden_loss_ends_gui_game_and_returns_classical_protocol_move() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../cases/renju/no_legal_move_after_224.json")).unwrap();
+    let moves: Vec<[usize; 2]> = serde_json::from_value(fixture["moves"].clone()).unwrap();
+    let config = load_default_config();
+    let mut gui = GameController::new(config.clone());
+    gui.new_game_with_clock(
+        BLACK,
+        RuleSet::Renju,
+        GameMode::TwoPlayer,
+        SearchClockMode::Untimed,
+    );
+    let limits = SearchLimits {
+        max_depth: 2,
+        root_width: 8,
+        ..SearchLimits::default()
+    };
+    let mut protocol = GomocupProtocol::new(Some(config), Some(limits));
+    protocol.handle_line("INFO rule 4");
+    protocol.handle_line("BOARD");
+
+    for (i, [x, y]) in moves.iter().copied().enumerate() {
+        gui.play_human(x, y);
+        let side = if i % 2 == 0 { 1 } else { 2 };
+        protocol.handle_line(&format!("{x},{y},{side}"));
+    }
+
+    let state = gui.snapshot();
+    assert_eq!(state.move_count, 224);
+    assert_eq!(state.winner, WHITE);
+    assert!(!state.can_play);
+    assert!(!state.draw);
+    gui.undo_turn();
+    assert_eq!(gui.snapshot().move_count, 223);
+    assert_eq!(gui.snapshot().winner, 0);
+    assert!(gui.snapshot().can_play);
+
+    assert_eq!(protocol.handle_line("DONE").last().unwrap(), "9,12");
+    assert_eq!(protocol.board.winner(), WHITE);
+    assert_eq!(protocol.handle_line("TAKEBACK 9,12"), vec!["OK"]);
+    assert_eq!(protocol.board.winner(), 0);
+}
 
 fn double_three_board_black_to_move() -> Board {
     let mut board = Board::new();

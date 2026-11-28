@@ -107,6 +107,8 @@ fn protocol_about_returns_metadata() {
     let response = proto.handle_line("ABOUT");
     assert_eq!(response.len(), 1);
     assert!(response[0].contains("rust_gomoku"));
+    assert!(response[0].contains(concat!("version=\"", env!("CARGO_PKG_VERSION"), "\"")));
+    assert!(response[0].contains("www=\"https://github.com/chubbyk-uu/rust-gomoku\""));
 }
 
 #[test]

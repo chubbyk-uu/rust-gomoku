@@ -530,6 +530,8 @@ impl GameController {
 
         match self.board.play_for_rule(move_, None, self.config.rule_set) {
             Ok(_) => {
+                self.board
+                    .adjudicate_no_legal_renju_move(self.config.rule_set);
                 self.last_mark = Some((x, y));
                 match self.mode {
                     GameMode::TwoPlayer => {
@@ -799,6 +801,8 @@ impl GameController {
                     .play_for_rule(result.move_, None, self.config.rule_set)
                 {
                     Ok(_) => {
+                        self.board
+                            .adjudicate_no_legal_renju_move(self.config.rule_set);
                         self.last_mark = move_to_xy(result.move_).ok();
                         self.last_result = Some((result, used_nnue));
                         self.last_trace = trace;

@@ -1,3 +1,4 @@
+import shlex
 import sys
 import unittest
 from pathlib import Path
@@ -11,6 +12,69 @@ import run_gomocup_match as match_runner
 
 
 class RunGomocupMatchTests(unittest.TestCase):
+    def test_engine_stderr_does_not_block_protocol_responses(self):
+        commands = r"""
+import sys
+for line in sys.stdin:
+    if line.startswith("START"):
+        print("OK", flush=True)
+    elif line.strip() == "DONE":
+        sys.stderr.write("diagnostic\n" * 10000)
+        sys.stderr.flush()
+        print("0,0", flush=True)
+    elif line.strip() == "END":
+        break
+"""
+        engine = match_runner.GomocupEngine(
+            name="noisy",
+            command=shlex.join([sys.executable, "-c", commands]),
+            cwd=Path("."),
+            info=[],
+            restart_each_move=False,
+        )
+        try:
+            move, _, _ = engine.move([], match_runner.BLACK, 2.0)
+            self.assertEqual(move, (0, 0))
+        finally:
+            engine.close()
+
+    def test_referee_timeout_or_error_keeps_a_game_result_without_awarding_a_win(self):
+        class Engine:
+            def __init__(self, **_kwargs):
+                pass
+
+            def move(self, _moves, _side, _timeout):
+                return (0, 0), 0.0, []
+
+            def close(self):
+                pass
+
+        case = match_runner.MatchCase("referee", ((7, 7),), match_runner.WHITE, ())
+        task = match_runner.MatchTask(0, case, match_runner.BLACK)
+        a = match_runner.EngineSpec("a", "true", Path("."), [], False)
+        b = match_runner.EngineSpec("b", "true", Path("."), [], False)
+        cases = [
+            ('import time; time.sleep(2); print(\'{"legal":true,"winner":0}\')', 0.3, "game_timeout", "timeout"),
+            ('print(\'{"error":"bad referee response"}\')', 3.0, "referee_error", None),
+        ]
+        for command, timeout, termination, winner in cases:
+            with self.subTest(termination=termination), patch.object(match_runner, "GomocupEngine", Engine):
+                game = match_runner.run_match_task(
+                    task,
+                    engine_a=a,
+                    engine_b=b,
+                    max_moves=2,
+                    move_timeout_sec=3.0,
+                    game_timeout_sec=timeout,
+                    rule="renju",
+                    referee_command=shlex.join([sys.executable, "-c", command]),
+                    referee_cwd=Path("."),
+                )
+                self.assertEqual(game["termination"], termination)
+                self.assertEqual(game["winner_engine"], winner)
+                self.assertIsNone(game["winner_side"])
+                self.assertIn(termination, match_runner.INCOMPLETE_TERMINATIONS)
+
     def test_summarize_computes_paired_pentanomial_elo_and_terminations(self):
         games = [
             # Pair 0: A wins both -> WW

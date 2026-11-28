@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import suppress
 import json
 import math
 import os
@@ -11,12 +12,13 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
-from typing import Any
+from typing import Any, BinaryIO
 
 from gomocup_response import ResponseReader
 
@@ -150,6 +152,21 @@ def parse_engine_message(text: str) -> dict[str, Any]:
     return fields
 
 
+def stderr_tail(stream: BinaryIO | None) -> str:
+    if stream is None:
+        return ""
+    size = stream.seek(0, os.SEEK_END)
+    stream.seek(max(0, size - 8192))
+    return stream.read(8192).decode(errors="replace").strip()
+
+
+def close_stdio(proc: subprocess.Popen[str]) -> None:
+    for stream in (proc.stdin, proc.stdout):
+        if stream is not None:
+            with suppress(BrokenPipeError):
+                stream.close()
+
+
 class GomocupEngine:
     def __init__(
         self,
@@ -167,6 +184,7 @@ class GomocupEngine:
         self.info = info
         self.restart_each_move = restart_each_move
         self.proc: subprocess.Popen[str] | None = None
+        self.stderr: BinaryIO | None = None
 
     def start(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
@@ -174,14 +192,17 @@ class GomocupEngine:
         argv = shlex.split(self.command)
         if not argv:
             raise RuntimeError(f"{self.name}: empty command")
+        self.close()
         self.reader = ResponseReader()
+        # A file lets engines log without waiting for the runner to drain a pipe.
+        self.stderr = tempfile.TemporaryFile()
         self.proc = subprocess.Popen(
             argv,
             cwd=self.cwd,
             env=dict(os.environ),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=self.stderr,
             text=True,
             bufsize=1,
         )
@@ -224,8 +245,8 @@ class GomocupEngine:
             self.kill()
             raise TimeoutError(f"{self.name}: {exc}") from exc
         detail = ""
-        if self.proc.poll() is not None and self.proc.stderr is not None:
-            detail = self.proc.stderr.read().strip()
+        if self.proc.poll() is not None:
+            detail = stderr_tail(self.stderr)
         raise RuntimeError(f"{self.name}: engine closed its output. {detail}".rstrip())
 
     def read(self, timeout_sec: float | None = None) -> str:
@@ -271,13 +292,11 @@ class GomocupEngine:
         if proc is not None and proc.poll() is None:
             proc.kill()
             proc.wait()
-        self.proc = None
+        self.close()
 
     def close(self) -> None:
         proc = self.proc
-        if proc is None:
-            return
-        if proc.poll() is None:
+        if proc is not None and proc.poll() is None:
             try:
                 assert proc.stdin is not None
                 proc.stdin.write("END\n")
@@ -288,7 +307,13 @@ class GomocupEngine:
                 proc.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait()
+        if proc is not None:
+            close_stdio(proc)
         self.proc = None
+        if self.stderr is not None:
+            self.stderr.close()
+            self.stderr = None
 
 
 class RenjuReferee:
@@ -296,6 +321,7 @@ class RenjuReferee:
         self.command = command
         self.cwd = cwd
         self.proc: subprocess.Popen[str] | None = None
+        self.stderr: BinaryIO | None = None
 
     def start(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
@@ -303,13 +329,16 @@ class RenjuReferee:
         argv = shlex.split(self.command)
         if not argv:
             raise RuntimeError("renju referee: empty command")
+        self.close()
+        self.reader = ResponseReader()
+        self.stderr = tempfile.TemporaryFile()
         self.proc = subprocess.Popen(
             argv,
             cwd=self.cwd,
             env=dict(os.environ),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=self.stderr,
             text=True,
             bufsize=1,
         )
@@ -319,6 +348,7 @@ class RenjuReferee:
         moves: list[dict[str, Any]],
         candidate: tuple[int, int],
         side: int,
+        deadline: float | None,
     ) -> dict[str, Any]:
         self.start()
         assert self.proc is not None
@@ -331,23 +361,36 @@ class RenjuReferee:
         }
         self.proc.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
         self.proc.stdin.flush()
-        line = self.proc.stdout.readline()
+        line = next(self.reader.lines(self.proc.stdout, deadline), None)
         if not line:
-            stderr = self.proc.stderr.read() if self.proc.stderr is not None else ""
-            raise RuntimeError(f"renju referee exited: {stderr.strip()}")
+            detail = stderr_tail(self.stderr) if self.proc.poll() is not None else ""
+            raise RuntimeError(f"renju referee closed its output. {detail}".rstrip())
         response = json.loads(line)
+        if not isinstance(response, dict):
+            raise RuntimeError("renju referee: expected a JSON object")
         if response.get("error"):
             raise RuntimeError(f"renju referee: {response['error']}")
+        if not isinstance(response.get("legal"), bool):
+            raise RuntimeError("renju referee: missing or invalid legal field")
+        if response["legal"] and response.get("winner") not in (0, BLACK, WHITE):
+            raise RuntimeError("renju referee: missing or invalid winner field")
         return response
 
     def close(self) -> None:
-        if self.proc is not None and self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+        proc = self.proc
+        if proc is not None:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            close_stdio(proc)
         self.proc = None
+        if self.stderr is not None:
+            self.stderr.close()
+            self.stderr = None
 
 
 @dataclass(frozen=True)
@@ -485,7 +528,8 @@ def run_match_task(
     referee_command: str,
     referee_cwd: Path,
 ) -> dict[str, Any]:
-    game_started = time.perf_counter()
+    game_started = time.monotonic()
+    game_deadline = game_started + game_timeout_sec if game_timeout_sec > 0 else None
     engines = {
         engine_a.name: GomocupEngine(
             name=engine_a.name,
@@ -537,13 +581,15 @@ def run_match_task(
 
         while len(moves) < max_moves:
             engine_name = side_to_engine[side]
-            remaining_game = game_timeout_sec - (time.perf_counter() - game_started)
-            if game_timeout_sec > 0 and remaining_game <= 0:
+            remaining_game = (
+                game_deadline - time.monotonic() if game_deadline is not None else None
+            )
+            if remaining_game is not None and remaining_game <= 0:
                 error = f"game timeout after {game_timeout_sec:.1f}s"
                 winner_engine = "timeout"
                 termination = "game_timeout"
                 break
-            game_limits_move = game_timeout_sec > 0 and (
+            game_limits_move = remaining_game is not None and (
                 move_timeout_sec <= 0 or remaining_game < move_timeout_sec
             )
             try:
@@ -582,11 +628,19 @@ def run_match_task(
                 termination = "illegal_move"
                 break
 
-            referee_result = (
-                referee.judge(moves, (mx, my), side)
-                if referee is not None
-                else None
-            )
+            referee_result = None
+            if referee is not None:
+                try:
+                    referee_result = referee.judge(moves, (mx, my), side, game_deadline)
+                except TimeoutError:
+                    winner_engine = "timeout"
+                    termination = "game_timeout"
+                    error = f"game timeout after {game_timeout_sec:.1f}s"
+                    break
+                except Exception as exc:
+                    termination = "referee_error"
+                    error = str(exc)
+                    break
             if referee_result is not None and not referee_result["legal"]:
                 forbidden = referee_result.get("forbidden_kind")
                 error = f"{engine_name} played forbidden move {(mx, my)}: {forbidden}"
@@ -638,7 +692,7 @@ def run_match_task(
                 if len(moves) >= BOARD_SIZE * BOARD_SIZE
                 else "max_moves_cap"
             )
-        elapsed_s = time.perf_counter() - game_started
+        elapsed_s = time.monotonic() - game_started
     finally:
         for engine in engines.values():
             engine.close()
@@ -669,7 +723,7 @@ def run_match_task(
     }
 
 
-INCOMPLETE_TERMINATIONS = {"max_moves_cap", "game_timeout"}
+INCOMPLETE_TERMINATIONS = {"max_moves_cap", "game_timeout", "referee_error"}
 
 
 def elo_from_score(score: float) -> float | None:

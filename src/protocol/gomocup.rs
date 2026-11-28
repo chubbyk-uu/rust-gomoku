@@ -6,9 +6,10 @@ use crate::board::{move_to_xy, xy_to_move, Board};
 use crate::config::{
     default_tt_bits_for_search, load_default_config, EngineConfig, MAX_SEARCH_THREADS,
 };
-use crate::constants::{BOARD_AREA, BOARD_SIZE};
+use crate::constants::{BLACK, BOARD_AREA, BOARD_SIZE};
 use crate::rules::RuleSet;
 use crate::search::{RootSearcher, SearchLimits, TranspositionTable, MAX_TT_BUCKET_BITS};
+use crate::types::Move;
 
 const MAX_PROTOCOL_TIME_MS: f64 = i32::MAX as f64;
 const PREWARM_LOADING: u8 = 0;
@@ -39,7 +40,12 @@ impl PendingProtocolError {
     }
 }
 
-pub const ABOUT_TEXT: &str = "name=\"rust_gomoku\", version=\"0.1\", author=\"OpenAI\", country=\"China\", www=\"https://example.invalid/\"";
+pub const ABOUT_TEXT: &str = concat!(
+    "name=\"rust_gomoku\", version=\"",
+    env!("CARGO_PKG_VERSION"),
+    "\", author=\"rust_gomoku contributors\", country=\"China\", ",
+    "www=\"https://github.com/chubbyk-uu/rust-gomoku\""
+);
 
 #[derive(Clone, Debug)]
 pub struct GomocupProtocol {
@@ -955,30 +961,37 @@ impl GomocupProtocol {
             self.searcher = Some(searcher);
         }
 
-        let mut move_ = result.move_;
-        if !self.board.is_legal_move_for_rule(
-            move_,
-            self.board.side_to_move(),
-            self.config.rule_set,
-        ) {
-            let Some(fallback) = (0..BOARD_AREA as u16).find(|&candidate| {
-                self.board.is_legal_move_for_rule(
-                    candidate,
-                    self.board.side_to_move(),
-                    self.config.rule_set,
-                )
-            }) else {
-                return vec!["ERROR No legal move.".to_string()];
-            };
-            move_ = fallback;
-        }
-        let (x, y) = move_to_xy(move_).expect("selected move stays valid");
-        let side = self.board.side_to_move();
-        self.play_xy(x, y, side)
-            .expect("selected protocol move is legal");
+        let Some((x, y)) = self.commit_searched_move(result.move_) else {
+            return vec!["ERROR No legal move.".to_string()];
+        };
         let mut responses = trace_messages(trace.as_ref());
         responses.push(format!("{x},{y}"));
         responses
+    }
+
+    fn commit_searched_move(&mut self, preferred: Move) -> Option<(usize, usize)> {
+        let side = self.board.side_to_move();
+        let rule = self.config.rule_set;
+        let legal = |move_| self.board.is_legal_move_for_rule(move_, side, rule);
+        if let Some(move_) = Some(preferred)
+            .filter(|&move_| legal(move_))
+            .or_else(|| (0..BOARD_AREA as Move).find(|&move_| legal(move_)))
+        {
+            let (x, y) = move_to_xy(move_).ok()?;
+            self.play_xy(x, y, side).ok()?;
+            return Some((x, y));
+        }
+
+        // Emit the forbidden point so the referee records a rule loss.
+        if rule != RuleSet::Renju || side != BLACK {
+            return None;
+        }
+        let move_ = Some(preferred)
+            .filter(|&move_| self.board.is_legal_move(move_))
+            .or_else(|| (0..BOARD_AREA as Move).find(|&move_| self.board.is_legal_move(move_)))?;
+        let coords = move_to_xy(move_).ok()?;
+        self.board.play_renju_forbidden_loss(move_).ok()?;
+        Some(coords)
     }
 
     fn clear_pending_error(&mut self, error: PendingProtocolError) {
@@ -1062,33 +1075,7 @@ impl GomocupProtocol {
         };
 
         let res = searcher.search_mut(&fb, eval, &cfg);
-        let side = self.board.side_to_move();
-        let mut move_ = res.best_move;
-        let mut forced_forbidden = false;
-        if !self.board.is_legal_move_for_rule(move_, side, rule) {
-            if let Some(fallback) =
-                (0..BOARD_AREA as u16).find(|&c| self.board.is_legal_move_for_rule(c, side, rule))
-            {
-                move_ = fallback;
-            } else {
-                if rule != RuleSet::Renju || side != crate::constants::BLACK {
-                    return None;
-                }
-                // Renju terminal squeeze (e.g. ply 224 where the only remaining empty
-                // cell(s) are Black forbidden points): play the empty cell directly so
-                // the referee adjudicates a clean rule loss instead of a protocol error.
-                if (move_ as usize) >= BOARD_AREA || !self.board.is_legal_move(move_) {
-                    move_ = (0..BOARD_AREA as u16).find(|&c| self.board.is_legal_move(c))?;
-                }
-                forced_forbidden = true;
-            }
-        }
-        let (x, y) = move_to_xy(move_).ok()?;
-        if forced_forbidden {
-            self.board.play_renju_forbidden_loss(move_).ok()?;
-        } else {
-            self.play_xy(x, y, side).ok()?;
-        }
+        let (x, y) = self.commit_searched_move(res.best_move)?;
 
         let mut responses = Vec::new();
         if self.config.runtime.root_profile {
